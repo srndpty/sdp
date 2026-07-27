@@ -12,7 +12,7 @@
 | P0-A | Qt Multimedia 基本検証（形式・シーク・終了通知・日本語パス） | 完了（§3、全 12 件合格） |
 | P0-B | 速度とピッチ補正（U1、U2） | 完了。audible, varispeedともに全て正常に再生された。Time-stretchも合格。 |
 | P0-C | PCM 取得と可視化（U3） | 完了（§8、全 6 項目合格） |
-| P0-D | exe 化後の動作（U7） | 未実施 |
+| P0-D | exe 化後の動作（U7） | 完了（§9、全 12 条件合格） |
 
 ### P0-B 手動聴感確認
 
@@ -845,7 +845,269 @@ P0-C に合格しても、**P0-D（PyInstaller によるパッケージ版の検
 
 ### 8.14 次の行動
 
-**P0-D（exe 化後の動作検証、U7）へ進める。**
-確認すべきは、PyInstaller 化した後に (a) 6 形式の再生、(b) QAudioBufferOutput による
-PCM 取得、(c) 日本語・空白を含むパス、(d) 同梱される Qt Multimedia の FFmpeg プラグインが
-正しく取り込まれるか、である。
+**P0-D（exe 化後の動作検証、U7）へ進める。** → **§9 で実施済み。**
+
+---
+
+## 9. P0-D: PyInstaller onedir パッケージ版の検証
+
+検証プローブ: [`spike/p0d_packaged_probe.py`](../spike/p0d_packaged_probe.py)
+spec: [`packaging/p0d_probe.spec`](../packaging/p0d_probe.spec)
+実行スクリプト: [`scripts/p0d_build_and_verify.ps1`](../scripts/p0d_build_and_verify.ps1)
+未検証事項: U7（exe 化後の再生、日本語・空白パス）
+
+`packaging/p0d_probe.spec` は**技術検証専用**であり、製品版の spec ではない。
+製品版 `packaging/sdp.spec` は P7 で別途作成する。混同しないこと。
+
+### 9.1 ビルド環境とコマンド
+
+| 項目 | 値 |
+|---|---|
+| Python | 3.13.11 |
+| PyInstaller | 6.21.0 |
+| PySide6 / Qt | 6.10.3 |
+| NumPy | 2.5.1 |
+| OS | Windows 11 Home 10.0.26200 |
+| 形式 | **onedir**（onefile は使わない） |
+| UPX | 不使用 |
+
+```powershell
+uv run pyinstaller --clean --noconfirm packaging/p0d_probe.spec
+```
+
+方針どおり、PyInstaller 標準の PySide6 hook のみを使用した。
+**hidden import も binary の追加収集も一切必要なかった**（実測で不足が出なかったため追加していない）。
+不要 Qt モジュールの除外は行っていない（サイズ最適化は P7）。
+
+### 9.2 成果物の構成とサイズ
+
+| 項目 | 値 |
+|---|---|
+| 出力先 | `dist/p0d_probe/`（onedir） |
+| 合計サイズ | **161.8 MB** |
+| ファイル数 | **291** |
+| 実行ファイル | `p0d_probe.exe` + `_internal/` |
+
+Qt Multimedia の動作に必要なものが正しく同梱されていることを確認した。
+
+| 同梱物 | サイズ | 役割 |
+|---|---|---|
+| `_internal/PySide6/plugins/multimedia/ffmpegmediaplugin.dll` | 621 KB | **Qt Multimedia の FFmpeg バックエンド** |
+| `_internal/PySide6/plugins/multimedia/windowsmediaplugin.dll` | 285 KB | Windows Media バックエンド（未使用） |
+| `_internal/PySide6/plugins/platforms/qwindows.dll` | 974 KB | Qt platform plugin |
+| `_internal/PySide6/avcodec-61.dll` | 13.6 MB | **Qt が同梱する FFmpeg** |
+| `_internal/PySide6/avformat-61.dll` | 2.6 MB | 同上 |
+| `_internal/PySide6/avutil-59.dll` | 1.2 MB | 同上 |
+| `_internal/PySide6/swresample-5.dll` | 241 KB | 同上 |
+| `_internal/PySide6/swscale-8.dll` | 734 KB | 同上 |
+
+plugins ディレクトリ: `generic`, `iconengines`, `imageformats`, `multimedia`,
+`networkinformation`, `platforminputcontexts`, `platforms`, `styles`, `tls`。
+
+### 9.3 FFmpeg CLI からの独立性（重要）
+
+**同梱の FFmpeg と開発用 FFmpeg CLI は別物である。**バージョンでも明確に区別できる。
+
+| | 実体 | バージョン |
+|---|---|---|
+| **Qt Multimedia が使う FFmpeg** | 成果物内の `avcodec-61.dll` 等 | FFmpeg **7.1.3**（Qt ログが明示） |
+| 開発用 FFmpeg CLI（§1） | `C:\tools\ffmpeg.exe` | FFmpeg 6.x 系（libavcodec 60.30.102） |
+
+検証では、PATH を OS の動作に必要な最小限へ制限した子プロセス環境で exe を実行した。
+
+制限後の PATH:
+`%SystemRoot%\system32; %SystemRoot%; %SystemRoot%\System32\Wbem;
+%SystemRoot%\System32\WindowsPowerShell\v1.0`
+
+`C:\tools`（開発用 FFmpeg CLI）と uv / Python のディレクトリは意図的に除外した。
+**開発機の FFmpeg CLI をリネーム・削除するような破壊的操作は一切行っていない。**
+
+制限環境での確認結果（全 4 回の実行すべてで同じ）:
+
+| コマンド | 結果 |
+|---|---|
+| `where.exe ffmpeg` | 見つからない（期待どおり） |
+| `where.exe ffprobe` | 見つからない（期待どおり） |
+| `where.exe python` | 見つからない（期待どおり） |
+| `where.exe uv` | 見つからない（期待どおり） |
+
+**この状態で exe は正常に起動し、全 22 項目が PASS した（終了コード 0）。**
+外部の Python・uv・FFmpeg CLI に一切依存していない。
+
+### 9.4 配置場所とカレントディレクトリ
+
+ビルド元（`dist/`）とは別の場所へ onedir 一式をコピーして実行した。
+
+| 配置パス | 結果 |
+|---|---|
+| `.sdp-local/p0d/run-ascii/` | 22/22 PASS、終了コード 0 |
+| `.sdp-local/p0d/日本語 パッケージ/` | 22/22 PASS、終了コード 0 |
+
+カレントディレクトリは `%TEMP%`（リポジトリ外）にして実行した。
+ソースツリーや相対パスへの暗黙依存はない。
+
+パッケージ版が報告した実行時情報（日本語・空白パス配置の場合）:
+
+- `sys.executable` = コピー先の `p0d_probe.exe`
+- `frozen (PyInstaller)` = True
+- `_MEIPASS` = `<コピー先>\_internal`
+- Qt library paths = `<コピー先>/_internal/PySide6/plugins` と `<コピー先>`
+
+**パッケージのパス自体に日本語と空白が含まれていても正常に動作した。**
+
+### 9.5 検証結果（全 22 項目 PASS）
+
+音源は exe へ埋め込まず、`--audio-dir` で外部ディレクトリを渡した
+（ファイル関連付け起動に近い外部パス処理の検証を兼ねる）。音量は 0.0 固定で音は鳴らしていない。
+
+#### 基本再生（12 項目）
+
+| 対象 | 読込 | duration | 位置前進 | シーク | EndOfMedia | 判定 |
+|---|---|---|---|---|---|---|
+| ASCII `.wav` | OK | 2000ms | OK | 1400→1400ms | OK | PASS |
+| ASCII `.mp3` | OK | 2037ms | OK | 1437→1437ms | OK | PASS |
+| ASCII `.ogg` | OK | 2000ms | OK | 1400→1400ms | OK | PASS |
+| ASCII `.opus` | OK | 2006ms | OK | 1406→1406ms | OK | PASS |
+| ASCII `.flac` | OK | 2000ms | OK | 1400→1400ms | OK | PASS |
+| ASCII `.m4a` | OK | 2000ms | OK | 1400→1400ms | OK | PASS |
+| 日本語 `.wav` 〜 `.m4a` | すべて OK | 同上 | OK | 同上 | OK | PASS |
+
+`errorOccurred` は 0 件。開発環境（§3）と完全に同じ値が得られた。
+
+#### 速度・ピッチ補正 API（4 項目）
+
+| 項目 | 結果 |
+|---|---|
+| `pitchCompensationAvailability()` | **`Available`**（パッケージ版でも同じ） |
+| `pitchCompensation` の初期値 | True |
+| ON/OFF 設定（False→True→False→True） | すべて設定値どおり |
+| `playbackRate` 0.5 / 1.0 / 2.0 | すべて設定値どおり（float32 精度のため相対 1e-6 で比較） |
+| `errorOccurred` | 0 件 |
+
+P0-B で実施済みの再生時間測定と聴感確認は exe 上で繰り返していない。
+**API がパッケージ版でも利用可能であることのみ**を確認した。
+
+#### PCM 取得（6 項目）
+
+| 対象 | sampleFormat | sampleRate | ch | バッファ件数 | frameCount | constData が None | FFT peak | 判定 |
+|---|---|---|---|---|---|---|---|---|
+| WAV | Int16 | 44100 | 2 | 10 | 4096 | 0 件 | **441.4Hz** | PASS |
+| Opus | Float | 48000 | 2 | 10 | 648, 960 | 0 件 | **445.3Hz** | PASS |
+
+いずれも P0-C（開発環境）と同一の値。Opus の 445.3Hz は 48kHz における
+4096 点 FFT のビン量子化（分解能 11.7Hz）によるもので異常ではない。
+`constData()` が `None` を返した場合は想定内の空バッファとして安全にスキップし件数を記録する
+実装にしてあるが、本検証では 0 件だった。
+スロット内で予期しない例外は発生していない（例外を無条件に握り潰す実装にはしていない）。
+
+### 9.6 PyInstaller warning ファイルの評価
+
+`build/p0d_probe/warn-p0d_probe.txt`（全 222 行、`missing module` 205 行）を確認した。
+
+**Qt Multimedia・FFmpeg プラグイン・PySide6 の欠落は 1 件もない。**
+内訳は次のとおりで、いずれも既知の無害なものである。
+
+| 分類 | 件数 | 評価 |
+|---|---|---|
+| `numpy.*` の内部 optional import | 175 | NumPy が条件付きで参照するだけ。標準的なノイズ |
+| `multiprocessing` 関連 | 6 | 未使用 |
+| POSIX 専用（`posix`, `pwd`, `termios`, `resource`, `readline`） | 5 | Windows では存在しないのが正常 |
+| `java`, `_dummy_thread`, `psutil`, `threadpoolctl` 等 | 4 | 未使用の optional 依存 |
+| `collections.abc` | 1 | PyInstaller の既知の誤検出。実際には同梱されている |
+
+`collections.abc` の行に `PySide6.QtMultimedia` 等が「参照元」として列挙されるが、
+これは「PySide6 が欠落している」という意味ではない。実際に全機能が動作していることで確認済み。
+
+**致命的な警告はない。**
+
+### 9.7 Qt プラグイン診断（QT_DEBUG_PLUGINS）
+
+診断時のみ `QT_DEBUG_PLUGINS=1` を設定した。**通常実行時の既定にはしていない。**
+ログにはユーザー固有の絶対パスが含まれるため、以下は要約のみを記載する。
+
+| プラグイン | 結果 |
+|---|---|
+| Qt platform plugin | `plugins/platforms/qwindows.dll` を `loaded library`。キー `"windows"` |
+| Qt style | `plugins/styles/qmodernwindowsstyle.dll` を `loaded library` |
+| **Qt Multimedia backend** | `plugins/multimedia/ffmpegmediaplugin.dll` を `loaded library`。メタデータのキーは `"ffmpeg"` |
+| 併存する別バックエンド | `plugins/multimedia/windowsmediaplugin.dll` も検出されるが、選択されたのは ffmpeg 側 |
+
+**FFmpeg バックエンドが成果物内から正しくロードされている。**
+
+#### QT_DEBUG_PLUGINS 使用時に判明した不具合と、その原因
+
+`QT_DEBUG_PLUGINS=1` を付けた場合に限り、**全 22 項目が PASS して
+「最終終了コード: 0」を出力した後**、プロセスが
+`-1073741819`（`0xC0000005` アクセス違反）で異常終了した。
+
+切り分けの結果:
+
+- パッケージ版だけでなく**開発環境でも同様に発生**した → **パッケージ固有の問題ではない**。
+- 原因は **Python 側の `qInstallMessageHandler` を付けたまま終了していたこと**。
+  Python の終了処理が進んだ後に Qt がログを出すと、死んだインタプリタを呼び出して落ちる。
+  `QT_DEBUG_PLUGINS=1` は終了時のログが多いため顕在化した。
+- **終了前に `qInstallMessageHandler(None)` でハンドラーを外したところ、
+  開発環境・パッケージ版ともに終了コード 0 になった**（修正後に再確認済み）。
+
+→ **本体実装への反映が必要**: `services/logging_setup.py` で
+`qInstallMessageHandler` を使う場合、アプリ終了時に必ずハンドラーを解除する。
+これは P1 の実装項目とする。
+
+### 9.8 クリーンビルド 2 回の再現性
+
+`build/` と `dist/` を削除してからのクリーンビルドを 2 回行い、
+各回で ASCII パスと日本語・空白パスの両方を検証した（計 4 回の実行）。
+
+| ラウンド | 成果物サイズ | ファイル数 | warn の missing module | ASCII パス | 日本語・空白パス |
+|---|---|---|---|---|---|
+| 1 回目 | 161.8 MB | 291 | 205 行 | 22/22 PASS（exit 0） | 22/22 PASS（exit 0） |
+| 2 回目 | 161.8 MB | 291 | 205 行 | 22/22 PASS（exit 0） | 22/22 PASS（exit 0） |
+
+**機能的な再現性を確認した。** サイズ・ファイル数・警告件数・検証結果のすべてが一致した。
+バイナリのバイト単位の一致は要求していない。
+
+### 9.9 P0-D の合格条件と判定
+
+| # | 合格条件 | 結果 | 根拠 |
+|---|---|---|---|
+| 1 | Python 3.13 で onedir ビルドが成功する | **合格** | §9.1、§9.2 |
+| 2 | Python・uv・外部 ffmpeg CLI に依存せず起動する | **合格** | §9.3（PATH 制限下で 22/22 PASS） |
+| 3 | 主要 6 形式を読み込んで再生パイプラインを動かせる | **合格** | §9.5 |
+| 4 | 日本語・空白パスを処理できる | **合格** | §9.4（パッケージ配置）、§9.5（音源パス） |
+| 5 | `pitchCompensationAvailability` が Available | **合格** | §9.5 |
+| 6 | `pitchCompensation` を ON/OFF できる | **合格** | §9.5 |
+| 7 | QAudioBufferOutput から PCM を取得できる | **合格** | §9.5 |
+| 8 | 440Hz FFT が期待範囲へ入る | **合格** | §9.5（441.4Hz / 445.3Hz） |
+| 9 | Qt Multimedia または FFmpeg プラグインの不足がない | **合格** | §9.2、§9.6、§9.7 |
+| 10 | 別ディレクトリへコピーした成果物でも動く | **合格** | §9.4 |
+| 11 | クリーンビルドを 2 回行って同じ機能結果になる | **合格** | §9.8 |
+| 12 | 致命的な PyInstaller 警告がない | **合格** | §9.6 |
+
+**P0-D は全 12 条件を満たし合格。**
+
+### 9.10 再現手順
+
+```powershell
+# クリーンビルド 2 回 + ASCII / 日本語パスでの検証（PATH 制限込み）
+pwsh -File scripts/p0d_build_and_verify.ps1 -Runs 2
+
+# 開発環境で同じプローブを動かす場合
+uv run python spike/p0d_packaged_probe.py --audio-dir assets/test_audio
+
+# 生成された exe を直接動かす場合
+dist\p0d_probe\p0d_probe.exe --audio-dir "C:\dev\soft\sdp\assets\test_audio"
+```
+
+ログと成果物のコピーは `.sdp-local/p0d/` に出る（`.gitignore` 済み）。
+`build/` と `dist/` も Git 管理しない。
+
+### 9.11 残課題と未確認事項
+
+- **サイズは 161.8 MB と大きい。** 不要 Qt モジュール（QtNetwork / QtQml / QtQuick 等）と
+  翻訳ファイルの除外を **P7 で行う**。P0-D では意図的に最適化していない。
+- 製品版 spec（`packaging/sdp.spec`）は未作成。P7 で作る。
+- **GUI ウィンドウを持つアプリとしての検証は未実施**（本プローブはコンソールアプリ）。
+  ウィンドウ表示・アイコン・`console=False` での挙動は P7 で確認する。
+- コード署名なし。SmartScreen 警告は個人利用のため許容（初期スコープ外）。
+- 別マシン・クリーンな Windows 環境での動作は未確認（VC++ ランタイム依存の有無）。
+- インストーラー経由の配置は未検証（P7）。
