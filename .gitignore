@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+
+# 仮想環境
+.venv/
+venv/
+
+# ビルド成果物
+build/
+dist/
+*.egg-info/
+*.spec.bak
+
+# テスト・カバレッジ
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# 型検査・lint キャッシュ
+.ruff_cache/
+.pyright/
+
+# エディタ・OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# sdp のローカル生成物（ログ・波形キャッシュ等の検証出力）
+/logs/
+/.sdp-local/

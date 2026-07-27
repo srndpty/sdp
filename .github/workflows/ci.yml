@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 主開発環境（CPython 3.13）での品質チェック。
+  # コマンド列を CI に複製せず scripts/check.ps1 を呼び出す。
+  quality:
+    runs-on: windows-latest
+    steps:
+      - name: チェックアウト
+        # actions/checkout v5.0.0
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+
+      - name: uv のセットアップ
+        # astral-sh/setup-uv v9.0.0
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: 依存関係を lockfile から同期
+        run: uv sync --locked --all-groups
+
+      - name: 品質チェック（lockfile / format / lint / 型検査 / テスト / coverage）
+        run: pwsh -File scripts/check.ps1
+
+      - name: coverage XML を保存
+        if: always()
+        # actions/upload-artifact v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: coverage-xml-py313
+          path: coverage.xml
+          if-no-files-found: warn
+
+  # 次期 CPython（3.14）での互換性確認。
+  # format は quality ジョブで実施済みのため重複実行しない。
+  # PyInstaller での配布物作成は 3.13 のみで行うため、ここでは実施しない。
+  python-314-compatibility:
+    runs-on: windows-latest
+    env:
+      UV_PYTHON: "3.14"
+    steps:
+      - name: チェックアウト
+        # actions/checkout v5.0.0
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+
+      - name: uv のセットアップ
+        # astral-sh/setup-uv v9.0.0
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          python-version: "3.14"
+          enable-cache: true
+
+      - name: 依存関係を lockfile から同期
+        run: uv sync --locked --all-groups
+
+      - name: import 確認
+        run: uv run python -m sdp
+
+      - name: 型検査
+        run: uv run pyright --pythonversion 3.14
+
+      - name: テスト（audio 除外）
+        run: uv run pytest -m "not audio"

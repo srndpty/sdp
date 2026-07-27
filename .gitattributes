@@ -1,0 +1,22 @@
+# 既定はテキストとして自動判定し、リポジトリ内は LF で保持する
+* text=auto eol=lf
+
+# Windows 専用スクリプトは CRLF で取り出す
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.iss text eol=crlf
+
+# バイナリ（誤って差分表示・改行変換されないようにする）
+*.png binary
+*.ico binary
+*.wav binary
+*.mp3 binary
+*.ogg binary
+*.opus binary
+*.flac binary
+*.m4a binary
+*.npz binary
+
+# lockfile は差分レビュー対象外に近いので折りたたむ
+uv.lock linguist-generated=true
