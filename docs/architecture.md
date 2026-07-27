@@ -122,14 +122,21 @@ UI が Backend を直接触ることは禁止し、import 構成のレビュー�
 
 | スレッド | 処理 | 備考 |
 |---|---|---|
-| GUI（メイン） | UI、Controller、Model、PcmTap の受信、FFT、描画 | 4096 点 FFT は 1ms 未満と見込む（推測。P0 で計測）ため GUI スレッド実行を既定とする。超過が計測されたらワーカー化する |
+| GUI（メイン） | UI、Controller、Model、PcmTap の受信、FFT、描画 | **P0-C で実測済み**: 4096 点 FFT は平均 0.02ms、30FPS で回しても CPU 占有 0.06%。コールバック全体でも 0.03%。GUI スレッド実行で問題ない |
 | Qt Multimedia 内部 | デコードと音声出力 | Qt が管理する。直接は触らない |
 | WaveformAnalyzer 用 QThread | QAudioDecoder（イベントループが必要）と NumPy による縮約 | 1 ファイル 1 ジョブ。曲切り替え時は先行ジョブをキャンセルする |
 | QThreadPool | メタデータ読み取り（QRunnable） | 大量 D&D 時はキューで処理する |
 
-**リングバッファのロック方針**: `audioBufferReceived` は queued 接続により GUI スレッドで
-受信される見込みで、その場合は writer と reader がともに GUI スレッドとなりロックは不要。
-この接続スレッドの前提は P0（U3）で確認し、異なれば mutex を追加する。
+**リングバッファのロック方針**: **P0-C で実測により確定**
+（[p0-report.md §8.4](./p0-report.md#84-スレッド境界実測ではない)）。
+`audioBufferReceived` は **GUI スレッドで受信される**（Python の `threading.get_ident()` が
+メインスレッドと一致し、`QThread.currentThread()` / 受信 QObject の `thread()` /
+`QApplication.instance().thread()` がすべて同一の `Qt mainThread`）。
+接続方式は既定の `AutoConnection` で、送信元と受信先が同一スレッドのため Direct 接続として
+振る舞う。したがって writer と reader がともに GUI スレッドとなり、**ロックは不要**。
+
+この結論の前提は「PcmTap の受信 QObject を GUI スレッドに置くこと」である。
+将来 PCM 受信をワーカースレッドへ移す場合は、この前提が崩れるため mutex が必要になる。
 
 ---
 
@@ -146,8 +153,34 @@ UI が Backend を直接触ることは禁止し、import 構成のレビュー�
      （foobar2000 的な挙動）。無音時・停止時は release のみが働き自然に減衰する
 - 描画は 30FPS の QTimer。`hideEvent` と最小化でタイマーを停止し PCM タップを切断、
   `showEvent` で再開する（SPEC-04）。
-- 速度変更時、PCM タップは出力直前の音声を受け取るため表示は自然に追従する見込み（U3 で検証）。
-  位置駆動方式へ切り替えた場合は `position × rate` の補正が必要になる。
+- 速度変更時の挙動は **P0-C で実測済み**（[p0-report.md §8.6](./p0-report.md#86-速度変更時の通知挙動最重要の発見)）。
+  確定した事実は次のとおり。
+  - **QAudioBufferOutput が渡すのは、速度・ピッチ処理を適用する前のデコード済み PCM である。**
+    2.0 倍の varispeed 再生中でも、取得 PCM の FFT ピークは元の周波数のままになる。
+    可視化はこの差を仕様として受け入れるか、ピッチ補正 OFF のときだけ周波数軸を
+    `playbackRate` 倍にスケールするかを P5 で決める。ピッチ補正 ON では補正してはならない。
+  - **1 バッファの `frameCount` は playbackRate によらず一定で、変わるのは通知間隔**
+    （1.0 倍で約 93ms、0.5 倍で約 186ms、2.0 倍で約 46ms）。
+    通知間隔は描画間隔（30FPS = 33ms）より長いため、同じスナップショットを複数回描くことは
+    あっても取りこぼしは起きない。
+  - PCM の供給レートが playbackRate に比例するため、**固定長リングバッファが保持する
+    「聴取時間」は playbackRate に反比例する**（16384 サンプルは 1.0 倍で約 340ms、
+    2.0 倍で約 170ms 相当）。平滑化の時定数を実時間基準で設計する場合は考慮する。
+- **音量とミュートは取得 PCM へ一切影響しない**（P0-C 実測。RMS の差は 0.000000）。
+  可視化は音量設定を適用する前の信号を表す。ミュート中でもレベルは振れる。
+- PCM の解釈について P0-C で確定した事実:
+  - 実環境で観測された `sampleFormat` は **Int16（WAV / FLAC）と Float（MP3 / Vorbis /
+    Opus / AAC）の 2 種類のみ**。`UInt8` と `Int32` は未観測のため実装しない。
+    未対応形式は明示的に失敗させ、silent fallback を作らない。
+  - **`frameCount` はコーデックごとに異なり、同一ファイル内でも一定でない**
+    （先頭バッファはプライミングで短い）。固定バッファ長を前提にしてはならない。
+  - **`QAudioBuffer.startTime()` は負値を取りうる**（MP3 で -25ms、Opus で -6.5ms を観測）。
+    エンコーダー遅延・プリスキップに由来する。時間軸計算で負値を弾かない。
+  - **`QAudioBuffer.constData()` は `None` を返すことがある**。バイト列化の前に判定する。
+    また PySide6 はスロット内の例外を握り潰すため、PcmTap 内で例外を投げない作りにし、
+    無効バッファは件数を数えて捨てる。
+  - 曲切替時に前曲 PCM の混入は観測されなかったが、リングバッファは切替時に
+    明示的に clear する（コストがほぼ無く、確実なため）。
 
 ---
 
