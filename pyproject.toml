@@ -81,7 +81,7 @@ docstring-code-format = true
 # Pyright（新規プロジェクトのため strict を採用）
 # ---------------------------------------------------------------------------
 [tool.pyright]
-include = ["src", "tests"]
+include = ["src", "tests", "tools"]
 exclude = ["**/__pycache__", ".venv", "spike", "build", "dist"]
 pythonVersion = "3.13"
 pythonPlatform = "Windows"

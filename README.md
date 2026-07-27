@@ -86,6 +86,21 @@ uv run pytest
 uv run pytest -m audio
 ```
 
+### テスト音源
+
+`assets/test_audio/` に自己作成のテスト音源（正弦波・スイープ・無音を全対応形式で用意）を
+コミットしてある。通常はそのまま使えるため、再生成は不要。
+
+再生成する場合のみ **FFmpeg CLI（`ffmpeg` と `ffprobe`）が別途必要**で、
+`winget install --id Gyan.FFmpeg -e` などで導入し PATH へ通しておく。
+
+```powershell
+uv run python tools/gen_test_audio.py
+```
+
+FFmpeg CLI はテスト音源生成用の開発ツールであり、sdp 本体からは実行せず、
+依存関係にも配布物にも含めない。Qt Multimedia が内部で使う FFmpeg バックエンドとは別物である。
+
 ## 設計文書
 
 - [開発計画](./docs/development-plan.md) — 要件一覧、MVP 境界、マイルストーン、PR 分割
