@@ -32,6 +32,8 @@
 | `analysis/waveform.py` の縮約 | 合成 PCM から生成した envelope の min/max の正当性 |
 | `analysis/waveform_cache.py` | キー照合（更新日時・サイズ・解析バージョンの差異で無効化）、破損 npz、LRU 削除 |
 | `playlist` のロジック | 次曲決定（順次 / 1 曲リピート / 全曲リピート / シャッフルの網羅）、欠損スキップ、重複 entry_id |
+| `services/logging_setup.py` | ログファイルの UTF-8 出力、多重初期化でハンドラーが増えないこと、ローテーション設定、出力先の決定、未捕捉例外フックの記録と多重インストールの抑止 |
+| `ui/player_controls.py` の時間整形 | `m:ss` / `h:mm:ss` の境界値と負値の扱い |
 | `services/settings.py` | 往復、欠落キーの既定値補完、未知キーの無視、アトミック書き込み |
 | `playlist/persistence.py` | `playlist.json` の往復（将来は M3U8 も） |
 
@@ -43,6 +45,10 @@
 | `PlaybackController` | **FakeBackend**（`IPlaybackBackend` のテストダブル）を使い、状態遷移・曲終了時の次曲送り・エラー時の方針を `qtbot.waitSignal` で検証 |
 | `QtMultimediaBackend` | Qt enum 写像の完全性（値が増えたら失敗する）、エラー変換、故障注入による変換失敗・再入ガード、状態通知の重複抑制、音を鳴らさない load・source差し替え・再ロード。所有する QMediaPlayer / QAudioOutput は `findChildren` で取得し、テストのために公開 API を増やさない |
 | `SingleInstanceService` | 同一プロセス内でサーバーとクライアントを往復させる |
+| `PlayerControls` | **FakeBackend + 実 PlaybackController** で、状態ごとのボタン活性、シーク（ドラッグ中の非同期更新の抑止、`sliderReleased` での 1 回だけの seek）、音量・ミュートの往復とフィードバックループの不在を検証する。子ウィジェットは `objectName` で取得する |
+| `MainWindow` | `QFileDialog.getOpenFileName` を差し替え、キャンセル / 選択、ファイル名とタイトルの更新、`MediaStatus` とエラー表示（`detail` を出さないこと）、終了アクションを検証する |
+| `app.py` の配線 | Backend → Controller → MainWindow を組み立てられること。イベントループは起動しない |
+| UI 層の依存 | `src/sdp/ui/` が `qt_backend` / `QMediaPlayer` / `QAudioOutput` を import していないことを標準ライブラリの `ast` で検査する（新しい依存は追加しない） |
 | `MetadataReader` | 実ファイルに対する非同期完了シグナル |
 | 可視化ウィジェット | 表示 ON/OFF でタイマーと PCM タップが停止すること（SPEC-04） |
 
@@ -76,6 +82,23 @@ uv run pytest -m audio
 - `sdp.exe --selftest`: オフスクリーンで各形式を 1 秒ずつデコード再生し、
   終了コード 0 / 1 を返す。CI ではなくリリース前のローカル実行を想定する。
 - 手動チェックリスト（§7）。
+
+## 6.1 P1 手動スモーク（`uv run python -m sdp`）
+
+GUI と実音を伴うため自動化しない。**最初は音量を下げるかミュートで確認する。**
+
+- [ ] アプリが起動する
+- [ ] 「開く...」から WAV を選べる
+- [ ] ファイル名表示とウィンドウタイトルが更新される
+- [ ] 再生 / 一時停止 / 再開 / 停止
+- [ ] シーク（つまみを離した時点で位置が変わる）
+- [ ] 音量変更とミュート
+- [ ] 最後まで再生して「再生終了」が表示される
+- [ ] MP3 を開いて再生できる
+- [ ] 日本語・空白を含むパスを開いて再生できる
+- [ ] 壊れたファイル・音声でないファイルを選んでもクラッシュせず、エラーが表示される
+- [ ] ウィンドウを閉じて正常終了する
+- [ ] `%LOCALAPPDATA%\sdp\logs\sdp.log` が生成される
 
 ## 7. 手動チェックリスト（リリース前）
 

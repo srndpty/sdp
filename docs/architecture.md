@@ -97,12 +97,13 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 | `SettingsService` | 型付き設定の読み書き、既定値、スキーマバージョン | 任意キーの雑多な保存 |
 | `SingleInstanceService` | サーバー / クライアントの判定、パス転送、受信通知 | 受け取ったファイルの解釈 |
 
-### 3.1 再生層の契約（P1-A・P1-B で確定した範囲）
+### 3.1 再生層と UI の契約（P1 で確定した範囲）
 
-実装済みなのは `types.py` / `backend.py` / `controller.py`（P1-A）と
-`qt_backend.py`（P1-B）で、UI（`main_window.py`、`player_controls.py` など）と
-`app.py` での本番配線はまだ存在しない（P1-C）。
+実装済みなのは `types.py` / `backend.py` / `controller.py`（P1-A）、
+`qt_backend.py`（P1-B）、`app.py` / `ui/main_window.py` / `ui/player_controls.py` /
+`services/logging_setup.py`（P1-C）。
 表中の曲順・リピート・シャッフルは P2 以降で Controller へ追加する。
+速度・ピッチの操作 UI（`speed_panel.py`）、プレイリスト、可視化は未実装。
 
 - **状態とエラーの型**（`types.py`。すべて Qt 非依存）
   - `PlaybackState`: `NO_MEDIA` / `STOPPED` / `PLAYING` / `PAUSED`。
@@ -177,6 +178,40 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
   Backend の `load()` へ渡す。Backend が読み込み状態・再生状態・エラーを同期通知しても、
   UI は必ず新しい source を先に認識できる。通常の読み込み失敗は Python 例外ではなく
   `media_status_changed(INVALID_MEDIA)` と `error_occurred` で通知する。
+
+#### 配線と UI（P1-C）
+
+- **`app.py` が composition root**。`QtMultimediaBackend` → `PlaybackController` →
+  `MainWindow` の順に組み立てる。具体的な Backend を知ってよいのは `app.py` と
+  Backend 自身、およびそのテストだけで、`ui/` からの import は AST 検査で禁止している。
+  `__main__.py` は `app.run()` を呼ぶだけにし、組み立てを重複させない。
+- **寿命**: Backend・Controller・MainWindow はいずれも QObject の親を持たず、
+  `run()` が保持する `PlayerComposition` への参照でイベントループ中の寿命を保証する。
+  グローバル変数へは置かず、MainWindow に Backend を所有も参照もさせない。
+- **`MainWindow`**: レイアウト骨格、「ファイル」メニュー（開く / 終了）、
+  現在のファイル名表示（フルパスはツールチップ）、ウィンドウタイトル、ステータスバー。
+  再生操作は持たず `PlayerControls` へ委譲する。ファイルダイアログのフィルターは
+  ユーザー補助にすぎず、「すべてのファイル」を必ず選べるようにする
+  （拡張子や `QMediaFormat` で再生可否を断定しないため）。
+- **`PlayerControls`**: 再生 / 一時停止 / 停止、シークバー、現在時間と総時間、
+  音量、ミュート、再生状態ラベル。受け取るのは `PlaybackController` だけ。
+  状態に応じた表示と活性の更新は 1 つのメソッドへ集約する。
+  ミリ秒 → 表示文字列の変換は純粋関数（`m:ss` / `h:mm:ss`、負値は 0 表示）。
+- **シークバー**: 値はミリ秒。`duration_changed` で最大値を更新し、0 なら無効化して
+  位置を 0 へ戻す。**ドラッグ中は Backend の位置通知でつまみを戻さず**、
+  `sliderReleased` の 1 回だけ `seek()` する（毎イベント seek しない）。
+  `seek()` の `ValueError` は握り潰さず、プログラミングエラーとして表面化させる。
+- **音量とミュート**: UI は 0〜100 の整数、Controller へは 0.0〜1.0 の float。
+  Controller 由来の更新は `QSignalBlocker` で反映し、フィードバックループを作らない。
+- **エラーとログの境界**: UI は `PlaybackError.message` だけをステータスバーへ出す。
+  `detail` は画面へ出さない。通常の再生エラーでモーダルダイアログを出さない。
+  技術詳細のログ記録は Controller の責務で、UI では重複して記録しない。
+- **状態表示の分担**: 再生状態ラベルは `PlaybackState`（再生中 / 一時停止 / 停止）、
+  ステータスバーは `MediaStatus` とエラーという一時的な情報。両者を 1 つの enum へ統合しない。
+- **ログ**: `services/logging_setup.py` が `%LOCALAPPDATA%\sdp\logs\sdp.log` へ
+  RotatingFileHandler（UTF-8、1MB × 5 世代）を設定し、多重初期化ではハンドラーを増やさない。
+  未捕捉例外は `sys.excepthook` で記録する。Qt の `qInstallMessageHandler` は
+  ADR-0001 の制約 11（終了前の解除が必要）と併せて後続で扱う。
 
 ---
 
