@@ -40,6 +40,7 @@ def save_playlist(file_path: Path, entries: Sequence[PlaylistEntry]) -> None:
     ファイル状態（欠損かどうか）は保存しない。復元時にファイルシステムから
     判定し直すのが常に正しいため。
     """
+    _validate_entries_for_save(entries)
     document: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "entries": [{"entry_id": entry.entry_id, "path": str(entry.path)} for entry in entries],
@@ -64,12 +65,13 @@ def save_playlist(file_path: Path, entries: Sequence[PlaylistEntry]) -> None:
 def load_playlist(file_path: Path) -> list[PlaylistEntry]:
     """プレイリストを復元する。ファイル状態は読み込み時に判定し直す。
 
-    ファイルが無い場合は ``FileNotFoundError`` をそのまま送出する
-    （「まだ保存していない」のか「壊れている」のかを呼び出し側が区別できるように、
-    空リストへ丸めない）。内容が壊れている場合は :class:`PlaylistFileError`。
-    未知のキーは無視する。
+    ファイルが無い場合は初回起動の正常状態として空リストを返す。
+    内容が壊れている場合は :class:`PlaylistFileError`。未知のキーは無視する。
     """
-    text = file_path.read_text(encoding="utf-8")
+    try:
+        text = file_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
     try:
         parsed: object = json.loads(text)
     except json.JSONDecodeError as error:
@@ -82,7 +84,7 @@ def load_playlist(file_path: Path) -> list[PlaylistEntry]:
     document = cast("dict[str, object]", parsed)
 
     version = document.get("schema_version")
-    if version != SCHEMA_VERSION:
+    if type(version) is not int or version != SCHEMA_VERSION:
         raise PlaylistFileError(
             f"未対応のプレイリスト schema_version です（期待 {SCHEMA_VERSION}、実際 {version!r}）"
         )
@@ -100,6 +102,19 @@ def load_playlist(file_path: Path) -> list[PlaylistEntry]:
         seen_entry_ids.add(entry.entry_id)
         entries.append(entry)
     return entries
+
+
+def _validate_entries_for_save(entries: Sequence[PlaylistEntry]) -> None:
+    """自身で読み戻せないプレイリストを保存前に拒否する。"""
+    seen_entry_ids: set[str] = set()
+    for index, entry in enumerate(entries):
+        if not entry.entry_id:
+            raise ValueError(f"entries[{index}] の entry_id が空です。")
+        if entry.entry_id in seen_entry_ids:
+            raise ValueError(f"entry_id が重複しています: {entry.entry_id}")
+        if not entry.path.is_absolute():
+            raise ValueError(f"entries[{index}] のパスが絶対パスではありません。")
+        seen_entry_ids.add(entry.entry_id)
 
 
 def _entry_from_json(raw_entry: object, index: int) -> PlaylistEntry:

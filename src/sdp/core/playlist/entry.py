@@ -5,7 +5,7 @@
 """
 
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
 
@@ -55,13 +55,14 @@ class PlaylistEntry:
 
     entry_id: str
     path: Path
-    file_status: FileStatus = FileStatus.AVAILABLE
+    file_status: FileStatus = field(init=False)
 
     def __post_init__(self) -> None:
         if not self.entry_id:
             raise ValueError("entry_id が空です。")
         if not self.path.is_absolute():
             raise ValueError(f"entry のパスは絶対パスにしてください: {self.path}")
+        object.__setattr__(self, "file_status", probe_file_status(self.path))
 
     @property
     def display_name(self) -> str:
@@ -78,10 +79,10 @@ class PlaylistEntry:
         ファイルが削除・復元された場合に Model 側が行を差し替えるために使う。
         状態が変わらない場合は自分自身を返すため、呼び出し側は同一性で判定できる。
         """
-        status = probe_file_status(self.path)
-        if status is self.file_status:
+        refreshed = PlaylistEntry(entry_id=self.entry_id, path=self.path)
+        if refreshed.file_status is self.file_status:
             return self
-        return replace(self, file_status=status)
+        return refreshed
 
 
 def create_entry(path: Path, *, entry_id: str | None = None) -> PlaylistEntry:
@@ -93,5 +94,4 @@ def create_entry(path: Path, *, entry_id: str | None = None) -> PlaylistEntry:
     return PlaylistEntry(
         entry_id=new_entry_id() if entry_id is None else entry_id,
         path=normalized,
-        file_status=probe_file_status(normalized),
     )

@@ -10,7 +10,14 @@ from enum import IntEnum
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QPersistentModelIndex, Qt
+from PySide6.QtCore import (
+    QAbstractTableModel,
+    QByteArray,
+    QModelIndex,
+    QObject,
+    QPersistentModelIndex,
+    Qt,
+)
 
 from sdp.core.playlist.entry import FileStatus, PlaylistEntry, create_entry
 
@@ -76,6 +83,18 @@ class PlaylistModel(QAbstractTableModel):
 
     def columnCount(self, parent: QModelIndex | QPersistentModelIndex = _ROOT) -> int:
         return 0 if parent.isValid() else len(Column)
+
+    def roleNames(self) -> dict[int, QByteArray]:
+        """カスタムroleの安定名を返す。"""
+        roles = super().roleNames()
+        roles.update(
+            {
+                ENTRY_ID_ROLE: QByteArray(b"entryId"),
+                PATH_ROLE: QByteArray(b"path"),
+                FILE_STATUS_ROLE: QByteArray(b"fileStatus"),
+            }
+        )
+        return roles
 
     def data(
         self,

@@ -93,6 +93,13 @@ def test_missing_path_can_be_kept(tmp_path: Path) -> None:
     assert entry.file_status is FileStatus.MISSING
 
 
+def test_direct_construction_probes_missing_status(tmp_path: Path) -> None:
+    """直接構築しても欠損ファイルをAVAILABLEとして保持しない。"""
+    entry = PlaylistEntry(entry_id="missing", path=tmp_path / "ない曲.wav")
+
+    assert entry.file_status is FileStatus.MISSING
+
+
 def test_japanese_and_space_are_preserved(audio_file: Path) -> None:
     """日本語と空白を含むパスをそのまま保持する。"""
     entry = create_entry(audio_file)

@@ -348,6 +348,8 @@ UI が Backend を直接触ることは禁止し、import 構成のレビュー�
 
 - **`PlaylistEntry`**: 不変 dataclass。`entry_id`（`str`）/ `path`（絶対 `Path`）/
   `file_status`（`AVAILABLE` / `MISSING`）だけを持つ。
+  直接構築を含むすべての生成時にファイル状態を検査し、`file_status` は呼び出し側から
+  指定できない。
   「現在再生中」「選択中」やメタデータの状態は持たない
   （現在曲は PlaybackController が entry_id で管理する。メタデータ状態は P2-D で判断）。
 - **`entry_id`**: `uuid4().hex` の文字列。行番号でも `hash(path)` でもなく、
@@ -364,14 +366,18 @@ UI が Backend を直接触ることは禁止し、import 構成のレビュー�
   欠損状態のみ。現在再生中のエントリ、再生位置、リピート、シャッフル、保存先パス、
   自動保存、メタデータワーカーは持たない。
   内部リストは公開せず `entries()` は `tuple` を返す。
-  役割別 role は `ENTRY_ID_ROLE` / `PATH_ROLE` / `FILE_STATUS_ROLE`（`Qt.UserRole` 起点）。
+  役割別 role は `ENTRY_ID_ROLE` / `PATH_ROLE` / `FILE_STATUS_ROLE`（`Qt.UserRole` 起点）で、
+  `roleNames()` はそれぞれ `entryId` / `path` / `fileStatus` という安定名を返す。
   entry_id の重複は暗黙に採番し直さず `ValueError` で拒否する。
   範囲外の行指定は `IndexError`、`removeRows` / `moveRows` の不正引数は `False`。
 - **永続化**: `schema_version` 付きの JSON（`entry_id` と `path` の配列、UTF-8）。
+  `schema_version` は bool や float を受理せず、現在値と一致する厳密な整数だけを受理する。
   同じディレクトリの一時ファイルへ書いてから `os.replace` でアトミックに置き換える。
+  保存前に空 ID・ID 重複・相対パスを検証し、不整合があれば一時ファイルも既存ファイルも
+  変更せず `ValueError` にする。
   壊れたデータ（JSON 不正、未対応バージョン、型不一致、空の `entry_id`、ID 重複）は
   黙って解釈せず `PlaylistFileError` にする。未知のキーは無視する。
-  ファイルが無い場合は空リストへ丸めず `FileNotFoundError` を通す。
+  ファイルが無い場合は初回起動の正常状態として空リストを返す。
   保存先の決定・保存タイミング・自動保存は呼び出し側（P2-C 以降）の責務。
 
 ---

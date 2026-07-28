@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QModelIndex, Qt
-from PySide6.QtTest import QAbstractItemModelTester
+from PySide6.QtTest import QAbstractItemModelTester, QSignalSpy
 from pytestqt.qtbot import QtBot
 
 from sdp.core.playlist.entry import FileStatus, create_entry
@@ -189,6 +189,15 @@ def test_data_roles(model: PlaylistModel, audio_files: list[Path]) -> None:
     assert model.data(name_index, ENTRY_ID_ROLE) == entry.entry_id
     assert model.data(name_index, PATH_ROLE) == entry.path
     assert model.data(name_index, FILE_STATUS_ROLE) is FileStatus.AVAILABLE
+
+
+def test_custom_role_names_are_stable(model: PlaylistModel) -> None:
+    """カスタムroleを名前でも識別できる。"""
+    role_names = model.roleNames()
+
+    assert role_names[ENTRY_ID_ROLE].data() == b"entryId"
+    assert role_names[PATH_ROLE].data() == b"path"
+    assert role_names[FILE_STATUS_ROLE].data() == b"fileStatus"
 
 
 def test_data_for_invalid_index_is_none(model: PlaylistModel) -> None:
@@ -467,8 +476,14 @@ def test_bulk_operations_with_1000_entries(model: PlaylistModel, tmp_path: Path)
     for path in paths:
         path.write_bytes(b"x")
 
+    rows_inserted_spy = QSignalSpy(model.rowsInserted)
     entry_ids = model.add_paths(paths)
     assert model.rowCount() == 1000
+    assert rows_inserted_spy.count() == 1
+    parent, first, last = rows_inserted_spy.at(0)
+    assert not parent.isValid()
+    assert first == 0
+    assert last == 999
     assert len(set(entry_ids)) == 1000
     assert model.row_of_entry_id(entry_ids[999]) == 999
 

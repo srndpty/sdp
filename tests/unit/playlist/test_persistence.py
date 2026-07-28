@@ -146,13 +146,41 @@ def test_failed_save_keeps_the_previous_file(
     assert [path.name for path in tmp_path.glob("*.tmp")] == []
 
 
+def test_duplicate_ids_are_rejected_before_touching_existing_file(
+    tmp_path: Path, audio_files: list[Path]
+) -> None:
+    """重複IDの保存を拒否し、既存ファイルと一時ファイルを変更しない。"""
+    file_path = tmp_path / "playlist.json"
+    save_playlist(file_path, [create_entry(audio_files[0])])
+    existing_content = file_path.read_bytes()
+    duplicate = create_entry(audio_files[1])
+
+    with pytest.raises(ValueError, match="entry_id が重複"):
+        save_playlist(file_path, [duplicate, duplicate])
+
+    assert file_path.read_bytes() == existing_content
+    assert list(tmp_path.glob("playlist.json.*.tmp")) == []
+
+
 # -- 破損データ -------------------------------------------------------------
 
 
-def test_missing_file_raises_file_not_found(tmp_path: Path) -> None:
-    """ファイルが無い場合は空リストへ丸めず FileNotFoundError にする。"""
-    with pytest.raises(FileNotFoundError):
-        load_playlist(tmp_path / "存在しない.json")
+def test_missing_file_returns_empty_playlist(tmp_path: Path) -> None:
+    """保存ファイルが無い初回起動は空プレイリストとして扱う。"""
+    assert load_playlist(tmp_path / "存在しない.json") == []
+
+
+@pytest.mark.parametrize("version", [True, 1.0, "1", None])
+def test_schema_version_requires_an_exact_integer(tmp_path: Path, version: object) -> None:
+    """bool・float・文字列・nullをschema version 1として受理しない。"""
+    file_path = tmp_path / "playlist.json"
+    file_path.write_text(
+        json.dumps({"schema_version": version, "entries": []}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PlaylistFileError, match="schema_version"):
+        load_playlist(file_path)
 
 
 @pytest.mark.parametrize(
