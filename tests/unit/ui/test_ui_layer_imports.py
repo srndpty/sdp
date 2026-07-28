@@ -24,7 +24,7 @@ FORBIDDEN_NAMES = {
 
 
 def ui_modules() -> list[Path]:
-    modules = sorted(UI_DIR.glob("*.py"))
+    modules = sorted(UI_DIR.rglob("*.py"))
     assert modules, f"UI モジュールが見つかりません: {UI_DIR}"
     return modules
 
@@ -40,14 +40,37 @@ def imported_modules_and_names(source: str) -> tuple[set[str], set[str]]:
                 names.add(alias.name.rsplit(".", maxsplit=1)[-1])
         elif isinstance(node, ast.ImportFrom) and node.module is not None:
             modules.add(node.module)
+            modules.update(f"{node.module}.{alias.name}" for alias in node.names)
             names.update(alias.name for alias in node.names)
     return modules, names
 
 
-@pytest.mark.parametrize("module_path", ui_modules(), ids=lambda path: path.name)
+def forbidden_modules(modules: set[str]) -> set[str]:
+    """禁止モジュール自身と、その配下に一致するimportを返す。"""
+    return {
+        module
+        for module in modules
+        if any(
+            module == forbidden or module.startswith(f"{forbidden}.")
+            for forbidden in FORBIDDEN_MODULES
+        )
+    }
+
+
+def test_parent_module_import_is_expanded_to_forbidden_child() -> None:
+    """親モジュールからqt_backendをimportする迂回も検出する。"""
+    modules, _ = imported_modules_and_names("from sdp.core.playback import qt_backend")
+
+    assert forbidden_modules(modules) == {"sdp.core.playback.qt_backend"}
+
+
+@pytest.mark.parametrize(
+    "module_path", ui_modules(), ids=lambda path: path.relative_to(UI_DIR).as_posix()
+)
 def test_ui_module_does_not_import_playback_implementation(module_path: Path) -> None:
     """UI から qt_backend・QMediaPlayer・QAudioOutput を import しない。"""
     modules, names = imported_modules_and_names(module_path.read_text(encoding="utf-8"))
 
-    assert not (modules & FORBIDDEN_MODULES), f"{module_path.name}: {modules & FORBIDDEN_MODULES}"
+    forbidden = forbidden_modules(modules)
+    assert not forbidden, f"{module_path.name}: {forbidden}"
     assert not (names & FORBIDDEN_NAMES), f"{module_path.name}: {names & FORBIDDEN_NAMES}"

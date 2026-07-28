@@ -48,6 +48,7 @@ class MainWindow(QMainWindow):
     def __init__(self, controller: PlaybackController, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._controller = controller
+        self._has_current_source_error = False
 
         self.setWindowTitle(WINDOW_TITLE)
 
@@ -100,10 +101,12 @@ class MainWindow(QMainWindow):
     # -- Controller からの通知 ----------------------------------------------
 
     def _on_source_changed(self, source: object) -> None:
+        self._has_current_source_error = False
         if not isinstance(source, Path):
             self._file_name_label.setText(NO_FILE_TEXT)
             self._file_name_label.setToolTip("")
             self.setWindowTitle(WINDOW_TITLE)
+            self.statusBar().showMessage("音声ファイルを開いてください。")
             return
         # メタデータ（タイトル・アーティスト）は P2 の責務。ここではファイル名だけ。
         self._file_name_label.setText(source.name)
@@ -112,6 +115,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(_MEDIA_STATUS_MESSAGES[MediaStatus.LOADING])
 
     def _on_media_status_changed(self, status: MediaStatus) -> None:
+        if status is MediaStatus.INVALID_MEDIA and self._has_current_source_error:
+            return
         message = _MEDIA_STATUS_MESSAGES.get(status)
         if message is not None:
             self.statusBar().showMessage(message)
@@ -120,4 +125,5 @@ class MainWindow(QMainWindow):
         # ユーザーへは message だけを見せる。detail は画面へ出さない。
         # 技術詳細のログ記録は PlaybackController の責務のため、ここでは記録しない。
         # 通常の再生エラーでモーダルダイアログを出すと連続操作を妨げるため使わない。
+        self._has_current_source_error = True
         self.statusBar().showMessage(error.message)

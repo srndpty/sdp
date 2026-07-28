@@ -223,6 +223,7 @@ def test_position_change_is_ignored_while_dragging(
 
 def test_slider_release_seeks_once(controls: PlayerControls, backend: FakePlaybackBackend) -> None:
     """sliderReleased で Controller.seek が 1 回だけ呼ばれる。"""
+    backend.emit_state(PlaybackState.STOPPED)
     backend.emit_duration(120_000)
     seek_slider = slider(controls, "seekSlider")
     seek_slider.sliderPressed.emit()
@@ -230,8 +231,61 @@ def test_slider_release_seeks_once(controls: PlayerControls, backend: FakePlayba
     backend.calls.clear()
 
     seek_slider.sliderReleased.emit()
+    seek_slider.sliderReleased.emit()
 
     assert backend.call_args("seek") == [(30_000,)]
+
+
+def test_slider_release_without_press_does_not_seek(
+    controls: PlayerControls, backend: FakePlaybackBackend
+) -> None:
+    """対応するsliderPressedがないreleaseは古い操作として無視する。"""
+    backend.emit_state(PlaybackState.STOPPED)
+    backend.emit_duration(120_000)
+    seek_slider = slider(controls, "seekSlider")
+    seek_slider.setValue(30_000)
+    backend.calls.clear()
+
+    seek_slider.sliderReleased.emit()
+
+    assert backend.call_args("seek") == []
+
+
+def test_source_change_during_drag_cancels_seek(
+    controls: PlayerControls,
+    controller: PlaybackController,
+    backend: FakePlaybackBackend,
+    audio_file: Path,
+) -> None:
+    """ドラッグ中にsourceが変わった場合、古いreleaseを新しい音源へ適用しない。"""
+    backend.emit_state(PlaybackState.STOPPED)
+    backend.emit_duration(120_000)
+    seek_slider = slider(controls, "seekSlider")
+    seek_slider.sliderPressed.emit()
+    seek_slider.setValue(30_000)
+
+    controller.load(audio_file)
+    backend.calls.clear()
+    seek_slider.sliderReleased.emit()
+
+    assert backend.call_args("seek") == []
+
+
+def test_zero_duration_during_drag_cancels_seek(
+    controls: PlayerControls, backend: FakePlaybackBackend
+) -> None:
+    """ドラッグ中にdurationが0になった場合、releaseでseekしない。"""
+    backend.emit_state(PlaybackState.STOPPED)
+    backend.emit_duration(120_000)
+    seek_slider = slider(controls, "seekSlider")
+    seek_slider.sliderPressed.emit()
+    seek_slider.setValue(30_000)
+
+    backend.emit_duration(0)
+    backend.calls.clear()
+    seek_slider.sliderReleased.emit()
+
+    assert backend.call_args("seek") == []
 
 
 def test_dragging_does_not_seek_before_release(
@@ -257,10 +311,12 @@ def test_seek_beyond_duration_is_not_swallowed(
     Qt のシグナル経由で呼ばれるスロットの例外は呼び出し元へ伝播しないため、
     pytest-qt の例外捕捉で検出する。
     """
+    backend.emit_state(PlaybackState.STOPPED)
     backend.emit_duration(10_000)
     seek_slider = slider(controls, "seekSlider")
     seek_slider.setMaximum(20_000)
     seek_slider.setValue(20_000)
+    seek_slider.sliderPressed.emit()
 
     with qtbot.capture_exceptions() as exceptions:
         seek_slider.sliderReleased.emit()

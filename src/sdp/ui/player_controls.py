@@ -158,7 +158,11 @@ class PlayerControls(QWidget):
         self._position_label.setText(format_duration_ms(position_ms))
 
     def _on_seek_released(self) -> None:
+        if not self._is_seeking:
+            return
         self._is_seeking = False
+        if not self._seek_slider.isEnabled() or self._seek_slider.maximum() <= 0:
+            return
         # ドラッグ中は毎イベント seek せず、離した時点で 1 回だけ転送する。
         # 範囲外の値は Controller が ValueError にする契約であり、ここでは握り潰さない。
         self._controller.seek(self._seek_slider.value())

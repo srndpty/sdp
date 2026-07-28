@@ -199,17 +199,24 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
   ミリ秒 → 表示文字列の変換は純粋関数（`m:ss` / `h:mm:ss`、負値は 0 表示）。
 - **シークバー**: 値はミリ秒。`duration_changed` で最大値を更新し、0 なら無効化して
   位置を 0 へ戻す。**ドラッグ中は Backend の位置通知でつまみを戻さず**、
-  `sliderReleased` の 1 回だけ `seek()` する（毎イベント seek しない）。
+  対応する `sliderPressed` から継続している `sliderReleased` の 1 回だけ `seek()` する
+  （毎イベント seek しない）。source変更またはduration 0でドラッグを無効化し、
+  古いreleaseを新しいsourceへ適用しない。
   `seek()` の `ValueError` は握り潰さず、プログラミングエラーとして表面化させる。
 - **音量とミュート**: UI は 0〜100 の整数、Controller へは 0.0〜1.0 の float。
   Controller 由来の更新は `QSignalBlocker` で反映し、フィードバックループを作らない。
 - **エラーとログの境界**: UI は `PlaybackError.message` だけをステータスバーへ出す。
   `detail` は画面へ出さない。通常の再生エラーでモーダルダイアログを出さない。
+  現在のsourceで具体的な `PlaybackError` を表示した後の `INVALID_MEDIA` は無視し、
+  一般メッセージで上書きしない。通知順が逆なら後着の具体的なエラーを表示する。
+  source変更時にこの優先状態をリセットし、source解除時は初期メッセージへ戻す。
   技術詳細のログ記録は Controller の責務で、UI では重複して記録しない。
 - **状態表示の分担**: 再生状態ラベルは `PlaybackState`（再生中 / 一時停止 / 停止）、
   ステータスバーは `MediaStatus` とエラーという一時的な情報。両者を 1 つの enum へ統合しない。
 - **ログ**: `services/logging_setup.py` が `%LOCALAPPDATA%\sdp\logs\sdp.log` へ
   RotatingFileHandler（UTF-8、1MB × 5 世代）を設定し、多重初期化ではハンドラーを増やさない。
+  同じ出力先での再設定は既存ハンドラーを再利用し、異なる出力先なら既存ハンドラーを
+  ルートロガーから外して閉じた後、新しい出力先のハンドラーへ置換する。
   未捕捉例外は `sys.excepthook` で記録する。Qt の `qInstallMessageHandler` は
   ADR-0001 の制約 11（終了前の解除が必要）と併せて後続で扱う。
 

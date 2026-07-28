@@ -1,6 +1,7 @@
 """ログ設定の契約を検証する。"""
 
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,34 @@ def test_configure_logging_is_idempotent(tmp_path: Path) -> None:
     logging_setup.configure_logging(log_directory=tmp_path)
 
     assert len(logging.getLogger().handlers) == after_first
+
+
+def test_configure_logging_replaces_handler_for_new_directory(tmp_path: Path) -> None:
+    """出力先を変更すると既存ハンドラーを置換し、以後は新しいファイルだけへ書く。"""
+    directory_a = tmp_path / "A"
+    directory_b = tmp_path / "B"
+    path_a = logging_setup.configure_logging(log_directory=directory_a)
+    logger = logging.getLogger("sdp.test.reconfigure")
+    logger.error("Aへのログ")
+
+    path_b = logging_setup.configure_logging(log_directory=directory_b)
+    logger.error("Bへのログ")
+    matching_handlers = [
+        handler
+        for handler in logging.getLogger().handlers
+        if handler.get_name() == "sdp-rotating-file"
+    ]
+    for handler in matching_handlers:
+        handler.flush()
+
+    assert path_a == (directory_a / "sdp.log").resolve()
+    assert path_b == (directory_b / "sdp.log").resolve()
+    assert len(matching_handlers) == 1
+    assert isinstance(matching_handlers[0], RotatingFileHandler)
+    assert Path(matching_handlers[0].baseFilename) == path_b
+    assert "Aへのログ" in path_a.read_text(encoding="utf-8")
+    assert "Bへのログ" not in path_a.read_text(encoding="utf-8")
+    assert "Bへのログ" in path_b.read_text(encoding="utf-8")
 
 
 def test_rotating_handler_is_configured(tmp_path: Path) -> None:

@@ -151,6 +151,7 @@ def test_cleared_source_restores_the_initial_title(
 
     assert file_name_text(window) == main_window_module.NO_FILE_TEXT
     assert window.windowTitle() == main_window_module.WINDOW_TITLE
+    assert window.statusBar().currentMessage() == "音声ファイルを開いてください。"
 
 
 # -- ステータス表示 ---------------------------------------------------------
@@ -195,6 +196,48 @@ def test_error_message_is_shown_without_technical_detail(
     assert window.statusBar().currentMessage() == error.message
     assert error.detail not in window.statusBar().currentMessage()
     assert error.detail not in file_name_text(window)
+
+
+@pytest.mark.parametrize("error_first", [True, False])
+def test_specific_error_wins_over_invalid_media_status(
+    window: MainWindow, backend: FakePlaybackBackend, error_first: bool
+) -> None:
+    """通知順にかかわらず、INVALID_MEDIAより具体的な再生エラーを表示する。"""
+    error = PlaybackError(
+        code=PlaybackErrorCode.ACCESS_DENIED,
+        message="音声ファイルへのアクセスが拒否されました。",
+        detail="QMediaPlayer.AccessDeniedError",
+    )
+
+    if error_first:
+        backend.emit_error(error)
+        backend.emit_media_status(MediaStatus.INVALID_MEDIA)
+    else:
+        backend.emit_media_status(MediaStatus.INVALID_MEDIA)
+        backend.emit_error(error)
+
+    assert window.statusBar().currentMessage() == error.message
+
+
+def test_new_source_clears_specific_error_priority(
+    window: MainWindow,
+    controller: PlaybackController,
+    backend: FakePlaybackBackend,
+    audio_file: Path,
+) -> None:
+    """source変更後のINVALID_MEDIAは新しいsourceの一般エラーとして表示する。"""
+    backend.emit_error(
+        PlaybackError(
+            code=PlaybackErrorCode.FORMAT_ERROR,
+            message="この音声形式は再生できません。",
+            detail="old source",
+        )
+    )
+
+    controller.load(audio_file)
+    backend.emit_media_status(MediaStatus.INVALID_MEDIA)
+
+    assert window.statusBar().currentMessage() == "音声ファイルを読み込めませんでした"
 
 
 # -- メニュー ---------------------------------------------------------------

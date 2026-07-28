@@ -46,13 +46,19 @@ def configure_logging(*, level: int = logging.INFO, log_directory: Path | None =
     """
     directory = default_log_directory() if log_directory is None else log_directory
     directory.mkdir(parents=True, exist_ok=True)
-    log_path = directory / LOG_FILE_NAME
+    log_path = (directory / LOG_FILE_NAME).resolve()
 
     root = logging.getLogger()
     root.setLevel(level)
-    for existing in root.handlers:
-        if existing.get_name() == _HANDLER_NAME:
-            return log_path
+    for existing in list(root.handlers):
+        if existing.get_name() != _HANDLER_NAME:
+            continue
+        if isinstance(existing, RotatingFileHandler):
+            existing_path = Path(existing.baseFilename).resolve()
+            if existing_path == log_path:
+                return existing_path
+        root.removeHandler(existing)
+        existing.close()
 
     handler = RotatingFileHandler(
         log_path, maxBytes=MAX_BYTES, backupCount=BACKUP_COUNT, encoding="utf-8"
