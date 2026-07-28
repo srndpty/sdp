@@ -341,10 +341,12 @@ UI が Backend を直接触ることは禁止し、import 構成のレビュー�
 - 永続化は `playlist.json`。
   M3U8 入出力は将来 `persistence.py` に追加する（`#EXTM3U` / `#EXTINF`、UTF-8）。
 
-### 8.1 P2-A で確定した契約
+### 8.1 P2-A・P2-B で確定した契約
 
-実装済みなのは `entry.py` / `model.py` / `persistence.py`。
-`PlaylistView`、D&D、複数ファイル追加、曲順制御、メタデータは未実装（P2-B 以降）。
+実装済みなのは `entry.py` / `model.py` / `persistence.py`（P2-A）と、
+`ui/playlist_view.py` / `services/playlist_session.py` / Model の D&D（P2-B）。
+現在曲・前後曲・自動次曲・リピート・シャッフルは P2-C、
+タイトル等のメタデータ列は P2-D で追加する。
 
 - **`PlaylistEntry`**: 不変 dataclass。`entry_id`（`str`）/ `path`（絶対 `Path`）/
   `file_status`（`AVAILABLE` / `MISSING`）だけを持つ。
@@ -370,6 +372,70 @@ UI が Backend を直接触ることは禁止し、import 構成のレビュー�
   `roleNames()` はそれぞれ `entryId` / `path` / `fileStatus` という安定名を返す。
   entry_id の重複は暗黙に採番し直さず `ValueError` で拒否する。
   範囲外の行指定は `IndexError`、`removeRows` / `moveRows` の不正引数は `False`。
+#### プレイリスト UI と永続化（P2-B）
+
+実装済みなのは `ui/playlist_view.py` と `services/playlist_session.py`、
+および Model の D&D。プレイリストからの再生・現在曲・前後曲・リピート・
+シャッフル・メタデータは未実装（P2-C / P2-D）。
+
+- **`PlaylistView`**: 受け取るのは `PlaylistModel` だけ。表示、ファイル追加、
+  削除、全消去、選択に応じたボタン活性、短いステータスメッセージの要求
+  （`message_requested`）まで。再生操作は持たず、`playlist.json` も知らない。
+- **`MainWindow`**: `PlaybackController` と `PlaylistModel` だけを受け取り、
+  `PlayerControls` と `PlaylistView` を QSplitter へ配置して
+  `message_requested` をステータスバーへ流すだけ。追加・削除・D&D の処理は持たない。
+  単曲用の「開く...」と、プレイリストの「プレイリストに追加...」は別操作として共存する。
+- **テーブル設定**: 行単位・複数選択、編集不可、ドラッグ有効、外部ドロップ受理、
+  ドロップ位置表示、`dragDropOverwriteMode(False)`（行と行の「間」へ落とす）。
+  列ヘッダーのクリックによるソートは無効のままにする（プレイリスト順と表示順が
+  ずれると「次の曲」の意味が壊れるため。`QSortFilterProxyModel` も使わない）。
+- **内部 D&D**: 専用 MIME `application/x-sdp-playlist-entry-ids` に entry_id の
+  JSON 配列を入れる。パスは重複しうるし行番号はドラッグ中に変わるため、
+  行の安定した同一性である entry_id を運ぶ。移動は最終的に `moveRows` で行い、
+  `beginResetModel` による並べ替えはしない。
+  **非連続の複数行ドラッグは P2-B では対応せず、安全に拒否する**
+  （途中行を巻き込まない移動の意味を一意に決められないため）。
+  移動範囲の内部・直後へのドロップも拒否する（no-op のため）。
+  `PlaylistTableView` はドラッグを CopyAction として実行し、
+  Qt が移動後に元行を自動削除（`clearOrRemove`）するのを防ぐ。
+  Model は内部 MIME を受け取った時点で常に移動として扱う。
+- **外部 D&D**: `text/uri-list` を受理し、URL の順序を表示順にする。
+  ローカルファイル URL だけを `Path` へ変換し、ディレクトリと非ローカル URL は
+  無視する（再帰追加もしない）。拡張子では判定せず、内容も開かない。
+  有効なファイルが 0 件ならドロップを拒否する。
+  ドロップ直前に消えていたファイルは欠損エントリとして追加する（行を消さない契約に従う）。
+  `canDropMimeData` はドラッグ中に何度も呼ばれるため軽い判定に留め、
+  ディレクトリ判定などのファイルシステムアクセスは `dropMimeData` で行う。
+- **ドロップ位置**: `PlaylistModel.drop_row()` の 1 か所で決める。
+  有効な parent → その行の前、行と行の間 → その位置、`row < 0`（末尾より下・空） → 末尾。
+- **欠損表示**: `PlaylistView` の `MissingEntryDelegate` が `FILE_STATUS_ROLE` を読み、
+  現在の QPalette の Disabled/Text でグレー描画する（固定 RGB を埋め込まないため、
+  ライト / ダークどちらでも読める）。コア Model に色を持たせない。
+  欠損行も選択・削除・並べ替えができ、ツールチップでパスを確認できる。
+  disabled item にはしない（表示上のグレー化と再生可否は別の話。
+  再生時のスキップは P2-C）。
+- **削除**: 非連続選択に対応する。降順で 1 行ずつ消すのではなく、連続範囲へまとめて
+  下側の範囲から `removeRows` する（行番号のずれを防ぐ）。
+  削除後は次の行、末尾を消した場合は新しい末尾を選ぶ。選択が無ければ何もしない。
+- **全消去**: 非空のときだけ有効。確認ダイアログでキャンセルされたら変更せず、
+  確認されたら `clear()` を 1 回だけ呼ぶ。ディスク上のファイルは削除しない。
+- **永続化サービス**: `services/playlist_session.py` が保存先の保持、
+  `load_into(model)` / `save_from(model)` を担当する。Model に save/load は持たせず、
+  UI からは import しない（AST テストで担保）。保存先は
+  `%LOCALAPPDATA%\sdp\playlist.json`（規則は `services/user_paths.py` へ集約）。
+  組み立てと復元・保存の呼び出しは composition root（`app.py`）が行う。
+- **起動時復元**: ファイルが無ければ初回起動として空で始める。
+  順序・entry_id・重複行・日本語パスを維持し、欠損状態は復元時に再評価する。
+- **破損時の上書き防止**: 破損・読み込み I/O エラーでは、技術詳細をログへ残し、
+  空のモデルで起動してステータスへ短いメッセージを出したうえで、
+  **その起動中の保存を無効化する**（`is_save_enabled` が False）。
+  空のプレイリストを保存して既存ファイルを壊さないための、
+  「復元失敗」と「正常な空プレイリスト」の区別。
+- **終了時保存**: `app.exec()` の戻り後に `entry_id` / `path` / 順序 / 重複行だけを保存する。
+  選択行・スクロール位置・現在曲・再生位置・音量・ミュート・欠損状態・
+  メタデータは保存しない。保存の失敗はログへ残すだけにして終了処理を止めない
+  （ウィンドウが閉じた後でユーザーへ提示できないため）。
+
 - **永続化**: `schema_version` 付きの JSON（`entry_id` と `path` の配列、UTF-8）。
   `schema_version` は bool や float を受理せず、現在値と一致する厳密な整数だけを受理する。
   同じディレクトリの一時ファイルへ書いてから `os.replace` でアトミックに置き換える。

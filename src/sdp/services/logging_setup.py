@@ -10,12 +10,12 @@ ADR-0001 の制約 11 のとおり終了前に解除しないとアクセス違�
 
 import logging
 import sys
-import tempfile
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from types import TracebackType
 
-APP_DIR_NAME = "sdp"
+from sdp.services.user_paths import app_data_directory
+
 LOG_FILE_NAME = "sdp.log"
 MAX_BYTES = 1_000_000
 BACKUP_COUNT = 5
@@ -28,15 +28,10 @@ _excepthook_installed = False
 def default_log_directory() -> Path:
     """ログの出力先ディレクトリを返す。
 
-    Windows の通常環境では ``%LOCALAPPDATA%\\sdp\\logs``。
-    ``LOCALAPPDATA`` が無い環境（一部の CI やテスト）では一時ディレクトリ配下を使う。
-    互換レイヤーはこの 1 段だけとし、それ以上の分岐は作らない。
+    Windows の通常環境では ``%LOCALAPPDATA%\\sdp\\logs``。置き場所の規則は
+    :func:`sdp.services.user_paths.app_data_directory` へ集約している。
     """
-    import os
-
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    base = Path(local_app_data) if local_app_data else Path(tempfile.gettempdir())
-    return base / APP_DIR_NAME / "logs"
+    return app_data_directory() / "logs"
 
 
 def configure_logging(*, level: int = logging.INFO, log_directory: Path | None = None) -> Path:
