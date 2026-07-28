@@ -41,7 +41,7 @@
 |---|---|
 | `PlaylistModel` | `QAbstractItemModelTester`、URL ドロップの MIME 処理、`moveRows` |
 | `PlaybackController` | **FakeBackend**（`IPlaybackBackend` のテストダブル）を使い、状態遷移・曲終了時の次曲送り・エラー時の方針を `qtbot.waitSignal` で検証 |
-| `QtMultimediaBackend` | Qt enum 写像の完全性（値が増えたら失敗する）、エラー変換、状態通知の重複抑制、音を鳴らさない load。所有する QMediaPlayer / QAudioOutput は `findChildren` で取得し、テストのために公開 API を増やさない |
+| `QtMultimediaBackend` | Qt enum 写像の完全性（値が増えたら失敗する）、エラー変換、故障注入による変換失敗・再入ガード、状態通知の重複抑制、音を鳴らさない load・source差し替え・再ロード。所有する QMediaPlayer / QAudioOutput は `findChildren` で取得し、テストのために公開 API を増やさない |
 | `SingleInstanceService` | 同一プロセス内でサーバーとクライアントを往復させる |
 | `MetadataReader` | 実ファイルに対する非同期完了シグナル |
 | 可視化ウィジェット | 表示 ON/OFF でタイマーと PCM タップが停止すること（SPEC-04） |

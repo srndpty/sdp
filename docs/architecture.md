@@ -126,6 +126,8 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
     duration が未確定（0）のあいだは上限を検証せず転送する
     （読み込み直後の位置復元を拒否しないため。実際の可否は Backend に委ねる）。
   - 拡張子や `QMediaFormat` の列挙で対応可否を判定しない（ADR-0001 の制約 3）。
+  - 有効な source は `resolve(strict=True)` で絶対パスへ正規化して保持し、Backend へ渡す。
+    Controller の `source` は `None` または絶対パスとする。
 - **要求値の保持**: `playback_rate` と `pitch_compensation` はユーザーの要求値を真値とする。
   Backend からの読み戻しは float32 精度になりうる（ADR-0001 の制約 2）ため、
   許容誤差（相対 1e-6）内なら要求値を保ったまま再通知しない。
@@ -152,7 +154,8 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 - **enum 写像**: `QMediaPlayer.MediaStatus` の 8 値と `QMediaPlayer.PlaybackState` の 3 値を
   明示的な写像表で 1 対 1 に変換する。既知値を既定値へ丸めない。
   写像表の鍵集合が Qt の enum 全値と一致することをテストし、
-  Qt の更新で値が増えた場合に失敗して対応漏れを検知する。
+  Qt の更新で値が増えた場合に失敗して対応漏れを検知する。写像表は製品の公開APIではなく、
+  モジュールprivateな実装詳細とする。
 - **エラー写像**: `ResourceError` / `FormatError` / `NetworkError` / `AccessDeniedError` を
   対応するコードへ写し、`NoError` からは `PlaybackError` を作らない。
   未知の Qt 値だけを `UNKNOWN_ERROR` とする。`detail` には Qt の enum 名・`errorString`・
@@ -162,7 +165,14 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
   （P0-C で確認）。状態・メディア状況・エラーの各変換では例外を放置せず、
   critical ログと `UNKNOWN_ERROR` の通知という観測可能な失敗へ変換する。
   状態を捏造せず、内部失敗の報告は再入ガードで繰り返さない。
+  `try` はQt型の変換と `PlaybackError` の生成だけを囲み、アプリ側Signalの通知は外で行う。
+  変換例外のスタックトレースを記録した経路では同じ内部エラーを二重にログへ書かない。
   単純な中継スロット（位置・duration・音量など）へはこの仕組みを広げない。
+- **source の差し替え**: 異なるsourceを `load()` すると、再生中・一時停止中を問わず
+  `STOPPED` へ1回だけ遷移し、positionは0へ戻る。durationとmedia statusは新しいsourceの
+  非同期通知で更新する。先のsourceが読み込み中でも、最後に指定したsourceを有効とする。
+  同じsourceを再度 `load()` した場合はQt 6.10.3の実挙動に合わせ、positionだけを0へ戻し、
+  読み込み済みのdurationを保持して `LOADING` / `LOADED` を再通知しない。
 - **読み込み通知順**: 有効な source は Controller が保持して `source_changed` を通知してから
   Backend の `load()` へ渡す。Backend が読み込み状態・再生状態・エラーを同期通知しても、
   UI は必ず新しい source を先に認識できる。通常の読み込み失敗は Python 例外ではなく

@@ -25,7 +25,7 @@ from sdp.core.playback.types import (
 
 _logger = logging.getLogger(__name__)
 
-PLAYBACK_STATE_MAP: dict[QMediaPlayer.PlaybackState, PlaybackState] = {
+_PLAYBACK_STATE_MAP: dict[QMediaPlayer.PlaybackState, PlaybackState] = {
     QMediaPlayer.PlaybackState.StoppedState: PlaybackState.STOPPED,
     QMediaPlayer.PlaybackState.PlayingState: PlaybackState.PLAYING,
     QMediaPlayer.PlaybackState.PausedState: PlaybackState.PAUSED,
@@ -36,7 +36,7 @@ PLAYBACK_STATE_MAP: dict[QMediaPlayer.PlaybackState, PlaybackState] = {
 （Qt は source 未設定でも ``StoppedState`` を返すため）。
 """
 
-MEDIA_STATUS_MAP: dict[QMediaPlayer.MediaStatus, MediaStatus] = {
+_MEDIA_STATUS_MAP: dict[QMediaPlayer.MediaStatus, MediaStatus] = {
     QMediaPlayer.MediaStatus.NoMedia: MediaStatus.NO_MEDIA,
     QMediaPlayer.MediaStatus.LoadingMedia: MediaStatus.LOADING,
     QMediaPlayer.MediaStatus.LoadedMedia: MediaStatus.LOADED,
@@ -48,7 +48,7 @@ MEDIA_STATUS_MAP: dict[QMediaPlayer.MediaStatus, MediaStatus] = {
 }
 """Qt のメディア状況からアプリ内 MediaStatus への写像（既知の全値を明示的に列挙する）。"""
 
-ERROR_CODE_MAP: dict[QMediaPlayer.Error, PlaybackErrorCode] = {
+_ERROR_CODE_MAP: dict[QMediaPlayer.Error, PlaybackErrorCode] = {
     QMediaPlayer.Error.ResourceError: PlaybackErrorCode.RESOURCE_ERROR,
     QMediaPlayer.Error.FormatError: PlaybackErrorCode.FORMAT_ERROR,
     QMediaPlayer.Error.NetworkError: PlaybackErrorCode.NETWORK_ERROR,
@@ -59,7 +59,7 @@ ERROR_CODE_MAP: dict[QMediaPlayer.Error, PlaybackErrorCode] = {
 ``NoError`` は「エラーが無い」ことを表すため写像へ含めず、PlaybackError も作らない。
 """
 
-ERROR_MESSAGES: dict[PlaybackErrorCode, str] = {
+_ERROR_MESSAGES: dict[PlaybackErrorCode, str] = {
     PlaybackErrorCode.RESOURCE_ERROR: "音声ファイルを読み込めません。",
     PlaybackErrorCode.FORMAT_ERROR: "この音声形式は再生できません。",
     PlaybackErrorCode.NETWORK_ERROR: "音声データの取得中にエラーが発生しました。",
@@ -195,10 +195,7 @@ class QtMultimediaBackend(PlaybackBackend):
     def _on_playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
         # 引数の値だけでは NO_MEDIA と STOPPED を区別できないため、
         # source の有無を含めて評価し直す。
-        try:
-            self._sync_state(state)
-        except Exception:
-            self._report_conversion_exception("PlaybackState")
+        self._sync_state(state)
 
     @Slot(int)
     def _on_position_changed(self, position_ms: int) -> None:
@@ -211,40 +208,39 @@ class QtMultimediaBackend(PlaybackBackend):
     @Slot(QMediaPlayer.MediaStatus)
     def _on_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
         try:
-            mapped = MEDIA_STATUS_MAP.get(status)
-            if mapped is None:
-                # 既知値を既定値へ丸めず、観測可能な失敗にする。
-                self._report_internal_failure(
-                    f"未知の QMediaPlayer.MediaStatus: {_enum_name(status)}"
-                )
-                return
-            self.media_status_changed.emit(mapped)
+            mapped = _MEDIA_STATUS_MAP.get(status)
         except Exception:
             self._report_conversion_exception("MediaStatus")
+            return
+        if mapped is None:
+            # 既知値を既定値へ丸めず、観測可能な失敗にする。
+            self._report_internal_failure(f"未知の QMediaPlayer.MediaStatus: {_enum_name(status)}")
+            return
+        self.media_status_changed.emit(mapped)
 
     @Slot(QMediaPlayer.Error, str)
     def _on_error_occurred(self, error: QMediaPlayer.Error, error_string: str) -> None:
+        if error == QMediaPlayer.Error.NoError:
+            return
         try:
-            if error == QMediaPlayer.Error.NoError:
-                return
-            code = ERROR_CODE_MAP.get(error)
+            code = _ERROR_CODE_MAP.get(error)
             if code is None:
                 # 未知の Qt エラー値だけを UNKNOWN_ERROR として扱う（既知値は丸めない）。
                 _logger.critical("未知の QMediaPlayer.Error: %s", _enum_name(error))
                 code = PlaybackErrorCode.UNKNOWN_ERROR
             # 通常の再生エラーは Controller がログへ記録する契約のため、ここでは記録しない。
-            self.error_occurred.emit(
-                PlaybackError(
-                    code=code,
-                    message=ERROR_MESSAGES[code],
-                    detail=(
-                        f"QMediaPlayer.Error.{_enum_name(error)} / "
-                        f"errorString={error_string!r} / source={self._source_path}"
-                    ),
-                )
+            playback_error = PlaybackError(
+                code=code,
+                message=_ERROR_MESSAGES[code],
+                detail=(
+                    f"QMediaPlayer.Error.{_enum_name(error)} / "
+                    f"errorString={error_string!r} / source={self._source_path}"
+                ),
             )
         except Exception:
             self._report_conversion_exception("Error")
+            return
+        self.error_occurred.emit(playback_error)
 
     @Slot(float)
     def _on_playback_rate_changed(self, rate: float) -> None:
@@ -273,8 +269,18 @@ class QtMultimediaBackend(PlaybackBackend):
         状態の保持と通知をここへ集約することで、``state`` プロパティと
         最後に通知した値が常に一致する。同値の重複通知もここで抑制する。
         """
-        state = self._compute_state(self._player.playbackState() if qt_state is None else qt_state)
-        if state is None or state == self._state:
+        current_qt_state = self._player.playbackState() if qt_state is None else qt_state
+        try:
+            state = self._compute_state(current_qt_state)
+        except Exception:
+            self._report_conversion_exception("PlaybackState")
+            return
+        if state is None:
+            self._report_internal_failure(
+                f"未知の QMediaPlayer.PlaybackState: {_enum_name(current_qt_state)}"
+            )
+            return
+        if state == self._state:
             return
         self._state = state
         self.state_changed.emit(state)
@@ -287,12 +293,7 @@ class QtMultimediaBackend(PlaybackBackend):
         """
         if self._source_path is None:
             return PlaybackState.NO_MEDIA
-        state = PLAYBACK_STATE_MAP.get(qt_state)
-        if state is None:
-            self._report_internal_failure(
-                f"未知の QMediaPlayer.PlaybackState: {_enum_name(qt_state)}"
-            )
-        return state
+        return _PLAYBACK_STATE_MAP.get(qt_state)
 
     def _report_conversion_exception(self, boundary: str) -> None:
         """変換スロット内の予期しない例外を、スタックトレース付きで観測可能にする。
@@ -301,9 +302,12 @@ class QtMultimediaBackend(PlaybackBackend):
         例外のまま逃がすと失敗が記録されずに再生だけが不整合になる。
         """
         _logger.exception("%s の変換で予期しない例外が発生", boundary)
-        self._report_internal_failure(f"{boundary} の変換で例外が発生（詳細はログを参照）")
+        self._report_internal_failure(
+            f"{boundary} の変換で例外が発生（詳細はログを参照）",
+            write_log=False,
+        )
 
-    def _report_internal_failure(self, detail: str) -> None:
+    def _report_internal_failure(self, detail: str, *, write_log: bool = True) -> None:
         """変換境界での契約違反を、ログと UNKNOWN_ERROR で観測可能にする。
 
         PySide6 は Qt シグナルから呼ばれたスロット内の例外を呼び出し元へ伝播させず
@@ -315,11 +319,12 @@ class QtMultimediaBackend(PlaybackBackend):
             return
         self._reporting_failure = True
         try:
-            _logger.critical("Backend 内部エラー: %s", detail)
+            if write_log:
+                _logger.critical("Backend 内部エラー: %s", detail)
             self.error_occurred.emit(
                 PlaybackError(
                     code=PlaybackErrorCode.UNKNOWN_ERROR,
-                    message=ERROR_MESSAGES[PlaybackErrorCode.UNKNOWN_ERROR],
+                    message=_ERROR_MESSAGES[PlaybackErrorCode.UNKNOWN_ERROR],
                     detail=f"{detail} / source={self._source_path}",
                 )
             )

@@ -12,6 +12,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtTest import QSignalSpy
 from pytestqt.qtbot import QtBot
 
@@ -92,4 +93,42 @@ def test_compressed_format_playback(
 
     backend.stop()
     qtbot.waitUntil(lambda: backend.state is PlaybackState.STOPPED, timeout=ACTION_TIMEOUT_MS)
+    assert error_spy.count() == 0
+
+
+@pytest.mark.parametrize("pause_before_replace", [False, True])
+def test_replace_source_while_playing_or_paused(
+    backend: QtMultimediaBackend,
+    test_audio_dir: Path,
+    qtbot: QtBot,
+    pause_before_replace: bool,
+) -> None:
+    """実再生中・一時停止中にsourceを差し替えると、先頭で停止する。"""
+    source_a = test_audio_dir / "sine440.wav"
+    source_b = test_audio_dir / "sweep.wav"
+    backend.load(source_a)
+    qtbot.waitUntil(lambda: backend.duration_ms > 0, timeout=LOAD_TIMEOUT_MS)
+    backend.play()
+    qtbot.waitUntil(lambda: backend.state is PlaybackState.PLAYING, timeout=ACTION_TIMEOUT_MS)
+    qtbot.waitUntil(lambda: backend.position_ms > 0, timeout=ACTION_TIMEOUT_MS)
+    if pause_before_replace:
+        backend.pause()
+        qtbot.waitUntil(lambda: backend.state is PlaybackState.PAUSED, timeout=ACTION_TIMEOUT_MS)
+
+    state_spy = QSignalSpy(backend.state_changed)
+    position_spy = QSignalSpy(backend.position_changed)
+    error_spy = QSignalSpy(backend.error_occurred)
+
+    backend.load(source_b)
+
+    assert backend.state is PlaybackState.STOPPED
+    assert state_spy.count() == 1
+    assert state_spy.at(0)[0] is PlaybackState.STOPPED
+    assert backend.position_ms == 0
+    assert position_spy.count() >= 1
+    assert position_spy.at(position_spy.count() - 1)[0] == 0
+    qtbot.waitUntil(lambda: backend.duration_ms > 0, timeout=LOAD_TIMEOUT_MS)
+    players = backend.findChildren(QMediaPlayer)
+    assert len(players) == 1
+    assert Path(players[0].source().toLocalFile()) == source_b
     assert error_spy.count() == 0
