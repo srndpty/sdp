@@ -43,6 +43,12 @@ class PlaybackBackend(QObject):
         存在検査は PlaybackController が済ませてある。実際に再生できるかどうかは
         読み込んでみるまで分からないため（ADR-0001 の制約 3）、
         失敗は :attr:`error_occurred` と :attr:`media_status_changed` で通知する。
+
+        source の設定後は、読み込み中・読み込み完了・読み込み失敗を含め、
+        再生中でも一時停止中でもなければ :attr:`state` は
+        :attr:`~sdp.core.playback.types.PlaybackState.STOPPED` とする。
+        :attr:`~sdp.core.playback.types.PlaybackState.NO_MEDIA` は source が未設定の
+        初期状態に限る。
         """
         raise NotImplementedError
 

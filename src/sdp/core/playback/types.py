@@ -15,7 +15,11 @@ class PlaybackState(Enum):
     Qt の ``QMediaPlayer.PlaybackState``（Stopped / Playing / Paused）に
     「音源が未設定」を表す :attr:`NO_MEDIA` を加えたもの。
 
-    読み込み中・読み込み失敗はここへ入れない。
+    ``NO_MEDIA`` は source が設定されていない場合に限る。source が設定された後は、
+    読み込み中・読み込み完了後の未再生・再生終了・読み込み失敗のいずれも、
+    再生中でも一時停止中でもなければ ``STOPPED`` とする。
+
+    読み込み中・読み込み失敗は独立した状態としてここへ入れない。
     進行状況は :class:`MediaStatus`、失敗は :class:`PlaybackError` で別に扱う。
     Qt 自身も両者を別のプロパティとして持っており、状態を増やすと
     「読み込み中に一時停止していたか」のような情報が失われるため。
@@ -56,6 +60,7 @@ class PlaybackErrorCode(Enum):
     SOURCE_NOT_A_FILE = auto()
     RESOURCE_ERROR = auto()
     FORMAT_ERROR = auto()
+    NETWORK_ERROR = auto()
     ACCESS_DENIED = auto()
     UNKNOWN_ERROR = auto()
 

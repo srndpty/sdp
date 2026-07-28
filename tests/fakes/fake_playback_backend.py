@@ -52,6 +52,15 @@ class FakePlaybackBackend(PlaybackBackend):
         self.float32_rate_readback = False
         """True にすると playback_rate_changed を float32 へ丸めて通知する。"""
 
+        self.effective_volume: float | None = None
+        self.effective_muted: bool | None = None
+        self.effective_playback_rate: float | None = None
+        self.effective_pitch_compensation: bool | None = None
+        """設定時に同期通知する補正後の実効値。None の項目は要求値をそのまま使う。"""
+
+        self.setter_errors: dict[str, Exception] = {}
+        """操作名に対応する setter から送出するテスト用例外。"""
+
     # -- 記録の参照 ---------------------------------------------------------
 
     def call_names(self) -> list[str]:
@@ -89,23 +98,36 @@ class FakePlaybackBackend(PlaybackBackend):
 
     def set_volume(self, volume: float) -> None:
         self.calls.append(("set_volume", (volume,)))
-        self._volume = volume
-        self.volume_changed.emit(volume)
+        self._raise_setter_error("set_volume")
+        self._volume = self.effective_volume if self.effective_volume is not None else volume
+        self.volume_changed.emit(self._volume)
 
     def set_muted(self, muted: bool) -> None:
         self.calls.append(("set_muted", (muted,)))
-        self._muted = muted
-        self.muted_changed.emit(muted)
+        self._raise_setter_error("set_muted")
+        self._muted = self.effective_muted if self.effective_muted is not None else muted
+        self.muted_changed.emit(self._muted)
 
     def set_playback_rate(self, rate: float) -> None:
         self.calls.append(("set_playback_rate", (rate,)))
-        self._playback_rate = to_float32(rate) if self.float32_rate_readback else rate
+        self._raise_setter_error("set_playback_rate")
+        effective_rate = (
+            self.effective_playback_rate if self.effective_playback_rate is not None else rate
+        )
+        self._playback_rate = (
+            to_float32(effective_rate) if self.float32_rate_readback else effective_rate
+        )
         self.playback_rate_changed.emit(self._playback_rate)
 
     def set_pitch_compensation(self, enabled: bool) -> None:
         self.calls.append(("set_pitch_compensation", (enabled,)))
-        self._pitch_compensation = enabled
-        self.pitch_compensation_changed.emit(enabled)
+        self._raise_setter_error("set_pitch_compensation")
+        self._pitch_compensation = (
+            self.effective_pitch_compensation
+            if self.effective_pitch_compensation is not None
+            else enabled
+        )
+        self.pitch_compensation_changed.emit(self._pitch_compensation)
 
     # -- テストからの発火 ---------------------------------------------------
 
@@ -164,3 +186,8 @@ class FakePlaybackBackend(PlaybackBackend):
             return
         self._state = state
         self.state_changed.emit(state)
+
+    def _raise_setter_error(self, operation: str) -> None:
+        error = self.setter_errors.get(operation)
+        if error is not None:
+            raise error

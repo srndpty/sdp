@@ -107,11 +107,15 @@ P1-A で実装済みなのは `types.py` / `backend.py` / `controller.py` の 3 
   - `PlaybackState`: `NO_MEDIA` / `STOPPED` / `PLAYING` / `PAUSED`。
     読み込みの進行状況は `MediaStatus`、失敗は `PlaybackError` として別に扱い、
     状態 enum へ混ぜない。
+    `NO_MEDIA` は source が未設定の場合に限る。source 設定後は、`LOADING` / `LOADED` /
+    `END_OF_MEDIA` / `INVALID_MEDIA` を含め、再生中でも一時停止中でもなければ `STOPPED` とする。
   - `MediaStatus`: `QMediaPlayer.MediaStatus` の 8 値と 1 対 1。
     値を間引くと Backend が未知値を丸めることになり silent fallback になるため。
   - `PlaybackError`: 不変 dataclass。`code`（アプリ内コード）/
     `message`（ユーザー向け日本語）/ `detail`（ログ向け技術詳細）。
     例外オブジェクトを UI へ渡さず、`detail` をそのまま表示しない。
+    Backend は Qt の既知エラーを `RESOURCE_ERROR` / `FORMAT_ERROR` / `NETWORK_ERROR` /
+    `ACCESS_DENIED` へ明示的に写像し、未知値だけを `UNKNOWN_ERROR` とする。
 - **値検証**（`PlaybackController`）。暗黙の clamp で呼び出し側のバグを隠さない。
   - 欠損ファイル・ディレクトリの指定は**ユーザー入力由来**として `error_occurred` で通知する
     （例外にしない）。失敗した場合は現在の source を変更しない。
@@ -124,8 +128,15 @@ P1-A で実装済みなのは `types.py` / `backend.py` / `controller.py` の 3 
 - **要求値の保持**: `playback_rate` と `pitch_compensation` はユーザーの要求値を真値とする。
   Backend からの読み戻しは float32 精度になりうる（ADR-0001 の制約 2）ため、
   許容誤差（相対 1e-6）内なら要求値を保ったまま再通知しない。
-  誤差を超える場合のみ Backend の実値を採用する。厳密な等値比較は行わない。
+  誤差を超える場合や Backend が設定値を補正した場合のみ Backend の実値を採用する。
+  setter 内の同期通知を含め、最後の変更通知と公開プロパティを一致させる。
+  Backend の setter が予期せぬ Python 例外を送出した場合は直前の要求値へ戻して再送出する。
+  厳密な等値比較は行わない。
 - **同じ値の再設定**は Backend を呼ばず通知もしない（no-op）ものとして全設定で統一する。
+- **読み込み通知順**: 有効な source は Controller が保持して `source_changed` を通知してから
+  Backend の `load()` へ渡す。Backend が読み込み状態・再生状態・エラーを同期通知しても、
+  UI は必ず新しい source を先に認識できる。通常の読み込み失敗は Python 例外ではなく
+  `media_status_changed(INVALID_MEDIA)` と `error_occurred` で通知する。
 
 ---
 

@@ -62,6 +62,34 @@ def test_load_passes_existing_path_to_backend(
     assert spy.at(0)[0] == audio_file
 
 
+def test_source_is_notified_before_synchronous_backend_notifications(
+    controller: PlaybackController, backend: FakePlaybackBackend, audio_file: Path
+) -> None:
+    """同期的な Backend 通知より先に、新しい source が UI へ通知される。"""
+    events: list[tuple[str, object]] = []
+
+    def record_source(source: object) -> None:
+        events.append(("source", source))
+
+    def record_status(status: MediaStatus) -> None:
+        events.append(("status", status))
+
+    def record_state(state: PlaybackState) -> None:
+        events.append(("state", state))
+
+    controller.source_changed.connect(record_source)
+    controller.media_status_changed.connect(record_status)
+    controller.state_changed.connect(record_state)
+
+    controller.load(audio_file)
+
+    assert events == [
+        ("source", audio_file),
+        ("status", MediaStatus.LOADED),
+        ("state", PlaybackState.STOPPED),
+    ]
+
+
 def test_load_accepts_unknown_extension(
     controller: PlaybackController, backend: FakePlaybackBackend, tmp_path: Path
 ) -> None:
@@ -188,6 +216,33 @@ def test_load_failure_from_backend_is_relayed(
 
     assert backend.call_args("load") == [(audio_file,)]
     assert spy.count() == 1
+
+
+def test_no_media_and_stopped_state_contract(
+    controller: PlaybackController, backend: FakePlaybackBackend, audio_file: Path
+) -> None:
+    """NO_MEDIA は source 未設定時だけで、設定後の非再生状態は STOPPED になる。"""
+    assert controller.source is None
+    assert controller.state is PlaybackState.NO_MEDIA
+
+    controller.load(audio_file)
+    assert controller.source == audio_file
+    assert controller.state is PlaybackState.STOPPED
+
+    backend.emit_media_status(MediaStatus.LOADING)
+    assert controller.state is PlaybackState.STOPPED
+
+    controller.play()
+    assert controller.state is PlaybackState.PLAYING
+    controller.pause()
+    assert controller.state is PlaybackState.PAUSED
+
+    backend.emit_state(PlaybackState.STOPPED)
+    backend.emit_media_status(MediaStatus.END_OF_MEDIA)
+    assert controller.state is PlaybackState.STOPPED
+
+    backend.emit_media_status(MediaStatus.INVALID_MEDIA)
+    assert controller.state is PlaybackState.STOPPED
 
 
 # -- 値検証 -----------------------------------------------------------------
@@ -331,6 +386,92 @@ def test_rate_changed_outside_tolerance_is_adopted(
 
     assert controller.playback_rate == 2.0
     assert spy.count() == 1
+
+
+@pytest.mark.parametrize(
+    (
+        "effective_attribute",
+        "setter_name",
+        "signal_name",
+        "property_name",
+        "requested",
+        "effective",
+    ),
+    [
+        ("effective_volume", "set_volume", "volume_changed", "volume", 0.4, 0.25),
+        ("effective_muted", "set_muted", "muted_changed", "muted", True, False),
+        (
+            "effective_playback_rate",
+            "set_playback_rate",
+            "playback_rate_changed",
+            "playback_rate",
+            1.7,
+            1.5,
+        ),
+        (
+            "effective_pitch_compensation",
+            "set_pitch_compensation",
+            "pitch_compensation_changed",
+            "pitch_compensation",
+            False,
+            True,
+        ),
+    ],
+)
+def test_synchronous_backend_correction_keeps_last_signal_consistent(
+    controller: PlaybackController,
+    backend: FakePlaybackBackend,
+    effective_attribute: str,
+    setter_name: str,
+    signal_name: str,
+    property_name: str,
+    requested: object,
+    effective: object,
+) -> None:
+    """Backend の同期補正後に要求値を再通知せず、最後の通知と公開値を一致させる。"""
+    setattr(backend, effective_attribute, effective)
+    spy = QSignalSpy(getattr(controller, signal_name))
+
+    getattr(controller, setter_name)(requested)
+
+    assert getattr(controller, property_name) == effective
+    assert spy.count() == 1
+    assert spy.at(0)[0] == effective
+
+
+@pytest.mark.parametrize(
+    ("setter_name", "signal_name", "property_name", "requested", "initial"),
+    [
+        ("set_volume", "volume_changed", "volume", 0.4, 1.0),
+        ("set_muted", "muted_changed", "muted", True, False),
+        ("set_playback_rate", "playback_rate_changed", "playback_rate", 1.7, 1.0),
+        (
+            "set_pitch_compensation",
+            "pitch_compensation_changed",
+            "pitch_compensation",
+            False,
+            True,
+        ),
+    ],
+)
+def test_backend_setter_exception_restores_cached_value(
+    controller: PlaybackController,
+    backend: FakePlaybackBackend,
+    setter_name: str,
+    signal_name: str,
+    property_name: str,
+    requested: object,
+    initial: object,
+) -> None:
+    """Backend の setter が例外を送出した場合、Controller のキャッシュを元へ戻す。"""
+    backend.setter_errors[setter_name] = RuntimeError("Backend setter failed")
+    spy = QSignalSpy(getattr(controller, signal_name))
+
+    with pytest.raises(RuntimeError, match="Backend setter failed"):
+        getattr(controller, setter_name)(requested)
+
+    assert getattr(controller, property_name) == initial
+    assert spy.count() == 0
 
 
 # -- 同じ値の再設定 ---------------------------------------------------------

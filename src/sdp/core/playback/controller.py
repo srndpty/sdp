@@ -39,7 +39,7 @@ class PlaybackController(QObject):
     - 現在の source（``Path`` または ``None``）の保持
     - 操作の Backend への転送と、その前段での値の検証
     - Backend からの通知を UI 向けシグナルへ中継
-    - ユーザーが要求した再生速度・ピッチ補正値の保持（Backend の読み戻しで上書きしない）
+    - ユーザーが要求した設定値の保持と、Backend が補正した実効値との同期
     - エラーの正規化（UI が受け取るのは常に :class:`PlaybackError` のみ）
 
     エラーの区別:
@@ -116,16 +116,16 @@ class PlaybackController(QObject):
 
     @property
     def playback_rate(self) -> float:
-        """ユーザーが要求した再生速度。
+        """再生速度の現在値。
 
-        Backend の読み戻し値ではなく要求値を返す。読み戻しは float32 精度で
-        45/33 のような値が揺れるため（ADR-0001 の制約 2）。
+        float32 の読み戻し誤差内ならユーザーの要求値を返す。許容誤差を超えて
+        Backend が補正した場合は、その実効値を返す。
         """
         return self._playback_rate
 
     @property
     def pitch_compensation(self) -> bool:
-        """ユーザーが要求したピッチ補正の設定値。"""
+        """ピッチ補正の要求値、または Backend が補正した実効値。"""
         return self._pitch_compensation
 
     # -- 操作 ---------------------------------------------------------------
@@ -156,9 +156,11 @@ class PlaybackController(QObject):
             )
             return
 
+        # Backend.load() は media_status_changed などを同期通知しうる。
+        # UI が新しい source を認識してから読み込み状態を受け取れるよう、先に通知する。
         self._source = path
-        self._backend.load(path)
         self.source_changed.emit(path)
+        self._backend.load(path)
 
     def play(self) -> None:
         self._backend.play()
@@ -196,16 +198,29 @@ class PlaybackController(QObject):
             raise ValueError(f"音量は 0.0〜1.0 で指定してください: {volume}")
         if volume == self._volume:
             return
+        previous = self._volume
         self._volume = volume
-        self._backend.set_volume(volume)
-        self.volume_changed.emit(volume)
+        try:
+            self._backend.set_volume(volume)
+        except Exception:
+            self._volume = previous
+            raise
+        # Backend が同期的に異なる実効値を通知した場合、そのハンドラーが通知済み。
+        if math.isclose(self._volume, volume, abs_tol=_VOLUME_ABSOLUTE_TOLERANCE):
+            self.volume_changed.emit(volume)
 
     def set_muted(self, muted: bool) -> None:
         if muted == self._muted:
             return
+        previous = self._muted
         self._muted = muted
-        self._backend.set_muted(muted)
-        self.muted_changed.emit(muted)
+        try:
+            self._backend.set_muted(muted)
+        except Exception:
+            self._muted = previous
+            raise
+        if self._muted == muted:
+            self.muted_changed.emit(muted)
 
     def set_playback_rate(self, rate: float) -> None:
         """再生速度を設定する。0 以下・NaN・無限大は ``ValueError``。
@@ -216,16 +231,32 @@ class PlaybackController(QObject):
             raise ValueError(f"再生速度は 0 より大きい有限の値で指定してください: {rate}")
         if rate == self._playback_rate:
             return
+        previous = self._playback_rate
         self._playback_rate = rate
-        self._backend.set_playback_rate(rate)
-        self.playback_rate_changed.emit(rate)
+        try:
+            self._backend.set_playback_rate(rate)
+        except Exception:
+            self._playback_rate = previous
+            raise
+        if math.isclose(
+            self._playback_rate,
+            rate,
+            rel_tol=_RATE_RELATIVE_TOLERANCE,
+        ):
+            self.playback_rate_changed.emit(rate)
 
     def set_pitch_compensation(self, enabled: bool) -> None:
         if enabled == self._pitch_compensation:
             return
+        previous = self._pitch_compensation
         self._pitch_compensation = enabled
-        self._backend.set_pitch_compensation(enabled)
-        self.pitch_compensation_changed.emit(enabled)
+        try:
+            self._backend.set_pitch_compensation(enabled)
+        except Exception:
+            self._pitch_compensation = previous
+            raise
+        if self._pitch_compensation == enabled:
+            self.pitch_compensation_changed.emit(enabled)
 
     # -- Backend からの通知 -------------------------------------------------
 
