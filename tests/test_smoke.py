@@ -15,6 +15,10 @@ def test_version_string_is_available() -> None:
     assert sdp.__version__
 
 
-def test_entry_point_exits_normally() -> None:
-    """`python -m sdp` 相当の処理が終了コード 0 で終わることを確認する。"""
-    assert main() == 0
+def test_entry_point_is_callable() -> None:
+    """エントリポイントが呼び出し可能であることを確認する。
+
+    実際の起動は GUI のイベントループへ入るため、ここでは呼び出さない。
+    app.run への委譲は tests/qt/test_app_wiring.py で検証する。
+    """
+    assert callable(main)

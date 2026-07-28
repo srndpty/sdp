@@ -70,7 +70,8 @@ jobs:
         run: uv sync --locked --all-groups
 
       - name: import 確認
-        run: uv run python -m sdp
+        # GUI エントリポイントはイベントループへ入るため、CI では import だけを確認する。
+        run: uv run python -c "import sdp; import sdp.app"
 
       - name: 型検査
         run: uv run pyright --pythonversion 3.14

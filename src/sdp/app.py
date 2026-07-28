@@ -1,0 +1,75 @@
+"""アプリケーションの composition root。
+
+具体的な再生実装（QtMultimediaBackend）を知ってよいのはこのモジュールだけで、
+UI は PlaybackController しか知らない。
+
+依存方向: MainWindow / PlayerControls → PlaybackController → PlaybackBackend
+"""
+
+import sys
+from dataclasses import dataclass
+
+from PySide6.QtWidgets import QApplication
+
+from sdp.core.playback.controller import PlaybackController
+from sdp.core.playback.qt_backend import QtMultimediaBackend
+from sdp.services import logging_setup
+from sdp.ui.main_window import MainWindow
+
+APPLICATION_NAME = "sdp"
+ORGANIZATION_NAME = "sdp"
+
+
+@dataclass(frozen=True, slots=True)
+class PlayerComposition:
+    """組み立て済みの再生一式。
+
+    Backend・Controller・MainWindow はいずれも QObject の親を持たないため、
+    この dataclass への参照が生きているあいだだけ寿命が保証される。
+    :func:`run` はイベントループの実行中これを保持し続ける。
+    グローバル変数へは置かない。
+    """
+
+    backend: QtMultimediaBackend
+    controller: PlaybackController
+    window: MainWindow
+
+
+def build_player() -> PlayerComposition:
+    """Backend → Controller → MainWindow の順に組み立てる。
+
+    QApplication が既に存在していることが前提（ウィジェットの生成に必要）。
+    """
+    backend = QtMultimediaBackend()
+    controller = PlaybackController(backend)
+    window = MainWindow(controller)
+    return PlayerComposition(backend=backend, controller=controller, window=window)
+
+
+def create_application(argv: list[str]) -> QApplication:
+    """QApplication を用意し、アプリのメタ情報を設定する。
+
+    QApplication はプロセスに 1 つだけで、二重生成は例外になる。通常起動では
+    まだ存在しないが、テスト環境では pytest-qt が先に生成しているため再利用する。
+    """
+    existing = QApplication.instance()
+    app = existing if isinstance(existing, QApplication) else QApplication(argv)
+    app.setApplicationName(APPLICATION_NAME)
+    app.setApplicationDisplayName(APPLICATION_NAME)
+    app.setOrganizationName(ORGANIZATION_NAME)
+    return app
+
+
+def run(argv: list[str] | None = None) -> int:
+    """アプリを起動し、終了コードを返す。
+
+    コマンドライン引数による音声ファイルの読み込みは P7 の責務のため扱わない。
+    """
+    logging_setup.configure_logging()
+    logging_setup.install_excepthook()
+
+    app = create_application(list(argv if argv is not None else sys.argv))
+    # composition はイベントループ実行中ずっと参照され続ける（寿命の保証）。
+    composition = build_player()
+    composition.window.show()
+    return app.exec()
