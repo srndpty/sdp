@@ -41,14 +41,22 @@
 |---|---|
 | `PlaylistModel` | `QAbstractItemModelTester`、URL ドロップの MIME 処理、`moveRows` |
 | `PlaybackController` | **FakeBackend**（`IPlaybackBackend` のテストダブル）を使い、状態遷移・曲終了時の次曲送り・エラー時の方針を `qtbot.waitSignal` で検証 |
+| `QtMultimediaBackend` | Qt enum 写像の完全性（値が増えたら失敗する）、エラー変換、状態通知の重複抑制、音を鳴らさない load。所有する QMediaPlayer / QAudioOutput は `findChildren` で取得し、テストのために公開 API を増やさない |
 | `SingleInstanceService` | 同一プロセス内でサーバーとクライアントを往復させる |
 | `MetadataReader` | 実ファイルに対する非同期完了シグナル |
 | 可視化ウィジェット | 表示 ON/OFF でタイマーと PCM タップが停止すること（SPEC-04） |
 
 ## 4. 実音再生テスト（`audio` マーカー。ローカル手動実行のみ）
 
-- 各形式のロード → 再生 → `mediaStatusChanged` の確認
-- シーク、再生速度変更、ピッチ補正の切り替え
+置き場所は `tests/audio/`。再生前に必ず音量を 0.0 にして可聴音を出さない。
+待機は `qtbot.waitUntil` などで行い、必ずタイムアウトを明示して無期限待機を作らない。
+
+- ロード → 再生 → `mediaStatusChanged`（`END_OF_MEDIA`）の確認
+- 一時停止・再開、シーク、停止
+- 再生速度変更、ピッチ補正の切り替え
+
+形式ごとの対応可否は P0-A で 6 形式すべて実測済みのため、ここでは全形式を再検証せず、
+WAV と代表的な圧縮形式 1 つに留める。
 
 音声デバイスを前提とするため CI では実行しない（`pytest -m "not audio"`）。
 

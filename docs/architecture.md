@@ -86,7 +86,7 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 | クラス | 責務 | 持たないもの |
 |---|---|---|
 | `PlaybackBackend` | `load` / `play` / `pause` / `stop` / `seek` / `set_volume` / `set_muted` / `set_playback_rate` / `set_pitch_compensation` と、位置・長さ・状態・メディア状況・エラーのシグナル。**mpv 差し替えに必要な最小限のみ** | プレイリストの知識、UI の知識 |
-| `QtMultimediaBackend` | QMediaPlayer / QAudioOutput / QAudioBufferOutput の所有と、上記インターフェースへの変換 | 曲順ロジック |
+| `QtMultimediaBackend` | QMediaPlayer / QAudioOutput の所有（QAudioBufferOutput は P5 で追加）と、上記インターフェースへの変換。Qt の enum・QUrl・エラーをアプリ内の型へ写す | 曲順ロジック、値の検証 |
 | `PlaybackController` | 「今どのエントリを再生中か」の唯一の管理者。順次 / リピート / シャッフル、曲終了時の次曲決定、欠損スキップ、再生失敗時の方針 | デコード、描画 |
 | `PlaylistModel` | 行データ、並べ替え、D&D、欠損フラグ、重複許可（entry_id 採番） | 再生状態の所有（現在行は Controller が entry_id で参照する） |
 | `MetadataReader` | ワーカーで Mutagen による読み取りを行い、シグナルで Model へ反映する | GUI スレッドでのブロッキング I/O |
@@ -97,10 +97,11 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 | `SettingsService` | 型付き設定の読み書き、既定値、スキーマバージョン | 任意キーの雑多な保存 |
 | `SingleInstanceService` | サーバー / クライアントの判定、パス転送、受信通知 | 受け取ったファイルの解釈 |
 
-### 3.1 再生層の契約（P1-A で確定した範囲）
+### 3.1 再生層の契約（P1-A・P1-B で確定した範囲）
 
-P1-A で実装済みなのは `types.py` / `backend.py` / `controller.py` の 3 つで、
-`qt_backend.py` と UI（`main_window.py` など）はまだ存在しない。
+実装済みなのは `types.py` / `backend.py` / `controller.py`（P1-A）と
+`qt_backend.py`（P1-B）で、UI（`main_window.py`、`player_controls.py` など）と
+`app.py` での本番配線はまだ存在しない（P1-C）。
 表中の曲順・リピート・シャッフルは P2 以降で Controller へ追加する。
 
 - **状態とエラーの型**（`types.py`。すべて Qt 非依存）
@@ -133,6 +134,35 @@ P1-A で実装済みなのは `types.py` / `backend.py` / `controller.py` の 3 
   Backend の setter が予期せぬ Python 例外を送出した場合は直前の要求値へ戻して再送出する。
   厳密な等値比較は行わない。
 - **同じ値の再設定**は Backend を呼ばず通知もしない（no-op）ものとして全設定で統一する。
+
+#### QtMultimediaBackend（P1-B）
+
+- **所有**: `QMediaPlayer(parent=self)` と `QAudioOutput(parent=self)` を持ち、
+  `setAudioOutput` で結び付ける。Backend の破棄で両方とも破棄される。
+  外部へは公開せず、UI と Controller は Qt の型に触れない。
+  QAudioBufferOutput は接続しない（PcmTap とリングバッファは P5 の責務）。
+- **状態**: Qt は source 未設定でも `StoppedState` を返すため、`NO_MEDIA` と `STOPPED` を
+  Qt の値だけでは区別できない。Backend が現在の source を内部で保持して判定する
+  （公開契約へ source プロパティは追加しない。公開 source は Controller の責務）。
+  `setSource` は `mediaStatusChanged` を同期的に出す一方で `playbackStateChanged` を
+  出さないため、`load` で状態を明示的に評価し `NO_MEDIA` → `STOPPED` を 1 回だけ通知する。
+  状態の保持と通知は 1 か所へ集約し、同値は重複通知しない。これにより
+  **`state` プロパティと最後に通知した状態が常に一致する**。同値抑制は状態のみに適用し、
+  位置や duration へは広げない。
+- **enum 写像**: `QMediaPlayer.MediaStatus` の 8 値と `QMediaPlayer.PlaybackState` の 3 値を
+  明示的な写像表で 1 対 1 に変換する。既知値を既定値へ丸めない。
+  写像表の鍵集合が Qt の enum 全値と一致することをテストし、
+  Qt の更新で値が増えた場合に失敗して対応漏れを検知する。
+- **エラー写像**: `ResourceError` / `FormatError` / `NetworkError` / `AccessDeniedError` を
+  対応するコードへ写し、`NoError` からは `PlaybackError` を作らない。
+  未知の Qt 値だけを `UNKNOWN_ERROR` とする。`detail` には Qt の enum 名・`errorString`・
+  現在の source を入れ、ユーザー向け `message` へは混ぜない。
+  通常の再生エラーのログ記録は Controller の責務のため、Backend では重複して記録しない。
+- **変換境界の例外**: PySide6 はスロット内の例外を呼び出し元へ伝播させず処理を継続する
+  （P0-C で確認）。状態・メディア状況・エラーの各変換では例外を放置せず、
+  critical ログと `UNKNOWN_ERROR` の通知という観測可能な失敗へ変換する。
+  状態を捏造せず、内部失敗の報告は再入ガードで繰り返さない。
+  単純な中継スロット（位置・duration・音量など）へはこの仕組みを広げない。
 - **読み込み通知順**: 有効な source は Controller が保持して `source_changed` を通知してから
   Backend の `load()` へ渡す。Backend が読み込み状態・再生状態・エラーを同期通知しても、
   UI は必ず新しい source を先に認識できる。通常の読み込み失敗は Python 例外ではなく
