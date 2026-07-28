@@ -14,7 +14,7 @@ sdp の設計文書。要件 ID（PLAY-xx、WAVE-xx 等）とマイルストー�
 - UI から QMediaPlayer などの具体的な再生実装を直接操作しない。
   UI が触ってよいのは PlaybackController まで。
 - PlaybackController と PlaybackBackend を分離し、
-  将来の mpv 差し替えに必要な最小限の `IPlaybackBackend` だけを定義する。
+  将来の mpv 差し替えに必要な最小限の `PlaybackBackend` だけを定義する。
 - 汎用プラグインシステムは作らない。
 - メタデータ取得と波形解析で GUI スレッドをブロックしない。
 - `audioBufferReceived` 内で重い FFT や描画を行わない。PCM は固定長リングバッファへ渡す。
@@ -35,8 +35,9 @@ sdp/
 │   ├── app.py                # QApplication の組み立てと依存の手動配線、日本語ロケール
 │   ├── core/
 │   │   ├── playback/
-│   │   │   ├── backend.py    # IPlaybackBackend（最小インターフェース）と状態 enum
-│   │   │   ├── qt_backend.py # QtMultimediaBackend 実装
+│   │   │   ├── types.py      # 再生状態・メディア状況・エラーの Qt 非依存型
+│   │   │   ├── backend.py    # PlaybackBackend（最小インターフェース）
+│   │   │   ├── qt_backend.py # QtMultimediaBackend 実装（P1-B で追加予定）
 │   │   │   └── controller.py # PlaybackController（曲順・リピート・シャッフル・自動送り）
 │   │   ├── playlist/
 │   │   │   ├── entry.py      # PlaylistEntry（entry_id / path / メタデータ / 状態）
@@ -84,7 +85,7 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 
 | クラス | 責務 | 持たないもの |
 |---|---|---|
-| `IPlaybackBackend` | `load` / `play` / `pause` / `stop` / `seek` / `set_volume` / `set_muted` / `set_rate` / `set_pitch_compensation` と、位置・長さ・状態・終了・エラーのシグナル。**mpv 差し替えに必要な最小限のみ** | プレイリストの知識、UI の知識 |
+| `PlaybackBackend` | `load` / `play` / `pause` / `stop` / `seek` / `set_volume` / `set_muted` / `set_playback_rate` / `set_pitch_compensation` と、位置・長さ・状態・メディア状況・エラーのシグナル。**mpv 差し替えに必要な最小限のみ** | プレイリストの知識、UI の知識 |
 | `QtMultimediaBackend` | QMediaPlayer / QAudioOutput / QAudioBufferOutput の所有と、上記インターフェースへの変換 | 曲順ロジック |
 | `PlaybackController` | 「今どのエントリを再生中か」の唯一の管理者。順次 / リピート / シャッフル、曲終了時の次曲決定、欠損スキップ、再生失敗時の方針 | デコード、描画 |
 | `PlaylistModel` | 行データ、並べ替え、D&D、欠損フラグ、重複許可（entry_id 採番） | 再生状態の所有（現在行は Controller が entry_id で参照する） |
@@ -96,16 +97,57 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 | `SettingsService` | 型付き設定の読み書き、既定値、スキーマバージョン | 任意キーの雑多な保存 |
 | `SingleInstanceService` | サーバー / クライアントの判定、パス転送、受信通知 | 受け取ったファイルの解釈 |
 
+### 3.1 再生層の契約（P1-A で確定した範囲）
+
+P1-A で実装済みなのは `types.py` / `backend.py` / `controller.py` の 3 つで、
+`qt_backend.py` と UI（`main_window.py` など）はまだ存在しない。
+表中の曲順・リピート・シャッフルは P2 以降で Controller へ追加する。
+
+- **状態とエラーの型**（`types.py`。すべて Qt 非依存）
+  - `PlaybackState`: `NO_MEDIA` / `STOPPED` / `PLAYING` / `PAUSED`。
+    読み込みの進行状況は `MediaStatus`、失敗は `PlaybackError` として別に扱い、
+    状態 enum へ混ぜない。
+    `NO_MEDIA` は source が未設定の場合に限る。source 設定後は、`LOADING` / `LOADED` /
+    `END_OF_MEDIA` / `INVALID_MEDIA` を含め、再生中でも一時停止中でもなければ `STOPPED` とする。
+  - `MediaStatus`: `QMediaPlayer.MediaStatus` の 8 値と 1 対 1。
+    値を間引くと Backend が未知値を丸めることになり silent fallback になるため。
+  - `PlaybackError`: 不変 dataclass。`code`（アプリ内コード）/
+    `message`（ユーザー向け日本語）/ `detail`（ログ向け技術詳細）。
+    例外オブジェクトを UI へ渡さず、`detail` をそのまま表示しない。
+    Backend は Qt の既知エラーを `RESOURCE_ERROR` / `FORMAT_ERROR` / `NETWORK_ERROR` /
+    `ACCESS_DENIED` へ明示的に写像し、未知値だけを `UNKNOWN_ERROR` とする。
+- **値検証**（`PlaybackController`）。暗黙の clamp で呼び出し側のバグを隠さない。
+  - 欠損ファイル・ディレクトリの指定は**ユーザー入力由来**として `error_occurred` で通知する
+    （例外にしない）。失敗した場合は現在の source を変更しない。
+  - 負のシーク位置、範囲外・NaN の音量、0 以下・NaN・無限大の再生速度は
+    **プログラミングエラー**として `ValueError` を送出する。
+  - duration が確定（1 以上）していれば duration 超えの seek を拒否する。
+    duration が未確定（0）のあいだは上限を検証せず転送する
+    （読み込み直後の位置復元を拒否しないため。実際の可否は Backend に委ねる）。
+  - 拡張子や `QMediaFormat` の列挙で対応可否を判定しない（ADR-0001 の制約 3）。
+- **要求値の保持**: `playback_rate` と `pitch_compensation` はユーザーの要求値を真値とする。
+  Backend からの読み戻しは float32 精度になりうる（ADR-0001 の制約 2）ため、
+  許容誤差（相対 1e-6）内なら要求値を保ったまま再通知しない。
+  誤差を超える場合や Backend が設定値を補正した場合のみ Backend の実値を採用する。
+  setter 内の同期通知を含め、最後の変更通知と公開プロパティを一致させる。
+  Backend の setter が予期せぬ Python 例外を送出した場合は直前の要求値へ戻して再送出する。
+  厳密な等値比較は行わない。
+- **同じ値の再設定**は Backend を呼ばず通知もしない（no-op）ものとして全設定で統一する。
+- **読み込み通知順**: 有効な source は Controller が保持して `source_changed` を通知してから
+  Backend の `load()` へ渡す。Backend が読み込み状態・再生状態・エラーを同期通知しても、
+  UI は必ず新しい source を先に認識できる。通常の読み込み失敗は Python 例外ではなく
+  `media_status_changed(INVALID_MEDIA)` と `error_occurred` で通知する。
+
 ---
 
 ## 4. シグナルとデータフロー
 
 ```
-UI 操作 → PlayerControls ──(メソッド呼び出し)──→ PlaybackController ──→ IPlaybackBackend
-                                                   │ currentEntryChanged(entry_id)
-Backend ──positionChanged / durationChanged──→ Controller ──→ PlayerControls / WaveformWidget
-Backend ──mediaFinished──→ Controller（次曲を決定）
-Backend ──errorOccurred──→ Controller（該当エントリにエラーを記録し方針を適用）→ PlaylistModel
+UI 操作 → PlayerControls ──(メソッド呼び出し)──→ PlaybackController ──→ PlaybackBackend
+                                                   │ current_entry_changed(entry_id)
+Backend ──position_changed / duration_changed──→ Controller ──→ PlayerControls / WaveformWidget
+Backend ──media_status_changed(END_OF_MEDIA)──→ Controller（次曲を決定）
+Backend ──error_occurred(PlaybackError)──→ Controller（該当エントリにエラーを記録し方針を適用）→ PlaylistModel
 QAudioBufferOutput ──audioBufferReceived──→ PcmTap（軽量変換のみ）→ PcmRingBuffer
 QTimer(30FPS) → SpectrumWidget: PcmRingBuffer.snapshot() → FFT → 描画
 WaveformAnalyzer(worker) ──progress / finished(envelope)──→ WaveformWidget（部分描画）

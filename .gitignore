@@ -34,3 +34,4 @@ desktop.ini
 # sdp のローカル生成物（ログ・波形キャッシュ等の検証出力）
 /logs/
 /.sdp-local/
+tmp/
