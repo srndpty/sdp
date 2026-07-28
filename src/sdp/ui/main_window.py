@@ -6,12 +6,22 @@
 
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QLabel,
+    QMainWindow,
+    QSplitter,
+    QVBoxLayout,
+    QWidget,
+)
 
 from sdp.core.playback.controller import PlaybackController
 from sdp.core.playback.types import MediaStatus, PlaybackError
+from sdp.core.playlist.model import PlaylistModel
 from sdp.ui.player_controls import PlayerControls
+from sdp.ui.playlist_view import PlaylistView
 
 WINDOW_TITLE = "sdp"
 NO_FILE_TEXT = "ファイル未選択"
@@ -43,9 +53,18 @@ _MEDIA_STATUS_MESSAGES: dict[MediaStatus, str] = {
 
 
 class MainWindow(QMainWindow):
-    """単曲再生のメインウィンドウ。受け取るのは PlaybackController だけ。"""
+    """メインウィンドウ。受け取るのは PlaybackController と PlaylistModel だけ。
 
-    def __init__(self, controller: PlaybackController, parent: QWidget | None = None) -> None:
+    レイアウト骨格・メニュー・ステータス表示に徹し、再生操作は PlayerControls、
+    プレイリスト操作は PlaylistView へ委譲する。永続化（playlist.json）は知らない。
+    """
+
+    def __init__(
+        self,
+        controller: PlaybackController,
+        playlist_model: PlaylistModel,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self._controller = controller
         self._has_current_source_error = False
@@ -55,13 +74,22 @@ class MainWindow(QMainWindow):
         self._file_name_label = QLabel(NO_FILE_TEXT)
         self._file_name_label.setObjectName("fileNameLabel")
         self._controls = PlayerControls(controller)
+        self._playlist_view = PlaylistView(playlist_model)
 
-        central = QWidget(self)
-        layout = QVBoxLayout(central)
-        layout.addWidget(self._file_name_label)
-        layout.addWidget(self._controls)
-        layout.addStretch(1)
-        self.setCentralWidget(central)
+        player_panel = QWidget()
+        player_layout = QVBoxLayout(player_panel)
+        player_layout.setContentsMargins(0, 0, 0, 0)
+        player_layout.addWidget(self._file_name_label)
+        player_layout.addWidget(self._controls)
+
+        splitter = QSplitter(Qt.Orientation.Vertical, self)
+        splitter.addWidget(player_panel)
+        splitter.addWidget(self._playlist_view)
+        # プレイリストが十分な高さを持つようにする。
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        self.setCentralWidget(splitter)
+        self.resize(720, 540)
 
         self._build_menu()
         self.statusBar().showMessage("音声ファイルを開いてください。")
@@ -69,6 +97,7 @@ class MainWindow(QMainWindow):
         controller.source_changed.connect(self._on_source_changed)
         controller.media_status_changed.connect(self._on_media_status_changed)
         controller.error_occurred.connect(self._on_error_occurred)
+        self._playlist_view.message_requested.connect(self.show_status_message)
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("ファイル(&F)")
@@ -79,6 +108,12 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self.open_file)
         file_menu.addAction(open_action)
 
+        add_to_playlist_action = QAction("プレイリストに追加...(&A)", self)
+        add_to_playlist_action.setObjectName("addToPlaylistAction")
+        add_to_playlist_action.setShortcut("Ctrl+Shift+O")
+        add_to_playlist_action.triggered.connect(self._playlist_view.add_files)
+        file_menu.addAction(add_to_playlist_action)
+
         file_menu.addSeparator()
 
         quit_action = QAction("終了(&X)", self)
@@ -88,6 +123,10 @@ class MainWindow(QMainWindow):
         file_menu.addAction(quit_action)
 
     # -- 操作 ---------------------------------------------------------------
+
+    def show_status_message(self, message: str) -> None:
+        """ステータスバーへ短いメッセージを表示する。"""
+        self.statusBar().showMessage(message)
 
     def open_file(self) -> None:
         """ファイルダイアログで選んだ音源を読み込む。キャンセル時は何もしない。"""

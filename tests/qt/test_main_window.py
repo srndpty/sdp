@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QLabel, QTableView
 from pytestqt.qtbot import QtBot
 
 from fakes.fake_playback_backend import FakePlaybackBackend
@@ -19,9 +19,11 @@ from sdp.core.playback.types import (
     PlaybackError,
     PlaybackErrorCode,
 )
+from sdp.core.playlist.model import PlaylistModel
 from sdp.ui import main_window as main_window_module
 from sdp.ui.main_window import MainWindow
 from sdp.ui.player_controls import PlayerControls
+from sdp.ui.playlist_view import PlaylistView
 
 
 @pytest.fixture
@@ -36,8 +38,16 @@ def controller(backend: FakePlaybackBackend) -> Iterator[PlaybackController]:
 
 
 @pytest.fixture
-def window(controller: PlaybackController, qtbot: QtBot) -> Iterator[MainWindow]:
-    main = MainWindow(controller)
+def playlist_model(qtbot: QtBot) -> Iterator[PlaylistModel]:
+    del qtbot
+    yield PlaylistModel()
+
+
+@pytest.fixture
+def window(
+    controller: PlaybackController, playlist_model: PlaylistModel, qtbot: QtBot
+) -> Iterator[MainWindow]:
+    main = MainWindow(controller, playlist_model)
     qtbot.addWidget(main)
     yield main
 
@@ -74,23 +84,67 @@ def action_of(window: MainWindow, name: str) -> QAction:
 # -- 依存の向き -------------------------------------------------------------
 
 
-def test_main_window_only_needs_a_controller() -> None:
-    """MainWindow が受け取るのは PlaybackController（と親）だけ。"""
+def test_main_window_takes_a_controller_and_a_playlist_model() -> None:
+    """MainWindow が受け取るのは PlaybackController と PlaylistModel（と親）だけ。"""
     parameters = list(inspect.signature(MainWindow.__init__).parameters)
-    assert parameters == ["self", "controller", "parent"]
+    assert parameters == ["self", "controller", "playlist_model", "parent"]
 
 
 def test_main_window_module_does_not_import_the_qt_backend() -> None:
-    """MainWindow のモジュールが具体的な Backend を参照していない。"""
-    assert not hasattr(main_window_module, "QtMultimediaBackend")
-    assert not hasattr(main_window_module, "QMediaPlayer")
+    """MainWindow のモジュールが具体的な Backend も永続化も参照していない。"""
+    for forbidden in (
+        "QtMultimediaBackend",
+        "QMediaPlayer",
+        "save_playlist",
+        "load_playlist",
+        "PlaylistSession",
+    ):
+        assert not hasattr(main_window_module, forbidden), forbidden
 
 
-def test_main_window_delegates_transport_to_player_controls(window: MainWindow) -> None:
-    """再生操作は PlayerControls へ委譲し、MainWindow は持たない。"""
-    assert window.findChild(PlayerControls) is not None
-    for forbidden in ("play", "pause", "stop", "seek", "set_volume"):
+def test_main_window_delegates_to_child_widgets(
+    window: MainWindow, playlist_model: PlaylistModel
+) -> None:
+    """再生は PlayerControls、プレイリスト操作は PlaylistView へ委譲する。"""
+    controls = window.findChild(PlayerControls)
+    playlist_views = window.findChildren(PlaylistView)
+    assert controls is not None
+    assert len(playlist_views) == 1
+    assert playlist_views[0].findChild(QTableView, "playlistTable") is not None
+
+    for forbidden in (
+        "play",
+        "pause",
+        "stop",
+        "seek",
+        "set_volume",
+        "add_files",
+        "remove_selected",
+        "clear_playlist",
+    ):
         assert not hasattr(window, forbidden), forbidden
+
+
+def test_playlist_view_uses_the_given_model(
+    window: MainWindow, playlist_model: PlaylistModel
+) -> None:
+    """配置された PlaylistView に同じ PlaylistModel が設定される。"""
+    table = window.findChild(QTableView, "playlistTable")
+    assert table is not None
+    assert table.model() is playlist_model
+
+
+def test_playlist_messages_reach_the_status_bar(
+    window: MainWindow, playlist_model: PlaylistModel
+) -> None:
+    """PlaylistView のメッセージ要求がステータスバーへ表示される。"""
+    del playlist_model
+    view = window.findChild(PlaylistView)
+    assert view is not None
+
+    view.message_requested.emit("3曲を追加しました。")
+
+    assert window.statusBar().currentMessage() == "3曲を追加しました。"
 
 
 # -- ファイルを開く ---------------------------------------------------------
