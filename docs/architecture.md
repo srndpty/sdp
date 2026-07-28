@@ -335,12 +335,50 @@ UI が Backend を直接触ることは禁止し、import 構成のレビュー�
   内部の並べ替えは `moveRows` を用いる。
 - 欠損は追加時と復元時に存在チェックを行って `missing` フラグを立て、
   `QStyledItemDelegate` でグレー描画し、再生時はスキップする（PL-05）。
-- **重複追加は許可する**（PL-07）。entry_id は単調増加の整数で、
-  「現在再生中」の表示・波形・メタデータはすべて entry_id 単位で扱うため、
-  同一パスの行が複数あっても破綻しない。
+- **重複追加は許可する**（PL-07）。「現在再生中」の表示・波形・メタデータはすべて
+  entry_id 単位で扱うため、同一パスの行が複数あっても破綻しない。
 - 妥当性は `QAbstractItemModelTester` で常時検証する。
-- 永続化は `playlist.json`（パス配列、現在の entry、再生位置）。
+- 永続化は `playlist.json`。
   M3U8 入出力は将来 `persistence.py` に追加する（`#EXTM3U` / `#EXTINF`、UTF-8）。
+
+### 8.1 P2-A で確定した契約
+
+実装済みなのは `entry.py` / `model.py` / `persistence.py`。
+`PlaylistView`、D&D、複数ファイル追加、曲順制御、メタデータは未実装（P2-B 以降）。
+
+- **`PlaylistEntry`**: 不変 dataclass。`entry_id`（`str`）/ `path`（絶対 `Path`）/
+  `file_status`（`AVAILABLE` / `MISSING`）だけを持つ。
+  直接構築を含むすべての生成時にファイル状態を検査し、`file_status` は呼び出し側から
+  指定できない。
+  「現在再生中」「選択中」やメタデータの状態は持たない
+  （現在曲は PlaybackController が entry_id で管理する。メタデータ状態は P2-D で判断）。
+- **`entry_id`**: `uuid4().hex` の文字列。行番号でも `hash(path)` でもなく、
+  同じパスを複数回追加しても別 ID になり、保存・復元をまたいで安定する。空文字は拒否する。
+- **パスの正規化**: `entry.normalize_path()` が唯一の正規化地点で、
+  `expanduser().resolve(strict=False)` で絶対パスへ統一する。
+  存在しないファイルも復元・保持する必要があるため `strict=True` にしない。
+  相対パスを作業ディレクトリ依存のまま保持せず、絶対パス以外は dataclass が拒否する。
+  拡張子や音声形式で拒否しない（対応可否は再生時に判定する。ADR-0001 の制約 3）。
+- **欠損**: 追加時と復元時に存在チェックし、`refresh_file_status()` で再確認できる。
+  欠損行は削除せず保持する（PL-05）。ファイル状態は**永続化しない**。
+  復元時にファイルシステムから判定し直すのが常に正しいため。
+- **`PlaylistModel`**: 行データ、追加・挿入・削除・移動、entry_id → 行の索引、
+  欠損状態のみ。現在再生中のエントリ、再生位置、リピート、シャッフル、保存先パス、
+  自動保存、メタデータワーカーは持たない。
+  内部リストは公開せず `entries()` は `tuple` を返す。
+  役割別 role は `ENTRY_ID_ROLE` / `PATH_ROLE` / `FILE_STATUS_ROLE`（`Qt.UserRole` 起点）で、
+  `roleNames()` はそれぞれ `entryId` / `path` / `fileStatus` という安定名を返す。
+  entry_id の重複は暗黙に採番し直さず `ValueError` で拒否する。
+  範囲外の行指定は `IndexError`、`removeRows` / `moveRows` の不正引数は `False`。
+- **永続化**: `schema_version` 付きの JSON（`entry_id` と `path` の配列、UTF-8）。
+  `schema_version` は bool や float を受理せず、現在値と一致する厳密な整数だけを受理する。
+  同じディレクトリの一時ファイルへ書いてから `os.replace` でアトミックに置き換える。
+  保存前に空 ID・ID 重複・相対パスを検証し、不整合があれば一時ファイルも既存ファイルも
+  変更せず `ValueError` にする。
+  壊れたデータ（JSON 不正、未対応バージョン、型不一致、空の `entry_id`、ID 重複）は
+  黙って解釈せず `PlaylistFileError` にする。未知のキーは無視する。
+  ファイルが無い場合は初回起動の正常状態として空リストを返す。
+  保存先の決定・保存タイミング・自動保存は呼び出し側（P2-C 以降）の責務。
 
 ---
 
