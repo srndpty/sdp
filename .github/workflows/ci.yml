@@ -52,6 +52,8 @@ jobs:
     runs-on: windows-latest
     env:
       UV_PYTHON: "3.14"
+      # Windows runner の標準出力が cp1252 でも、日本語メッセージを安全に出力する。
+      PYTHONUTF8: "1"
     steps:
       - name: チェックアウト
         # actions/checkout v5.0.0
