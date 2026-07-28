@@ -102,6 +102,25 @@ def test_load_accepts_unknown_extension(
     assert backend.call_args("load") == [(path,)]
 
 
+def test_load_resolves_relative_path(
+    controller: PlaybackController,
+    backend: FakePlaybackBackend,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ControllerのsourceとBackendへ渡すパスを絶対パスへ正規化する。"""
+    source = tmp_path / "relative.wav"
+    source.write_bytes(b"RIFF----WAVEfmt ")
+    monkeypatch.chdir(tmp_path)
+
+    controller.load(Path("relative.wav"))
+
+    assert controller.source == source
+    assert controller.source is not None
+    assert controller.source.is_absolute()
+    assert backend.call_args("load") == [(source,)]
+
+
 def test_load_missing_file_reports_error_without_calling_backend(
     controller: PlaybackController, backend: FakePlaybackBackend, tmp_path: Path
 ) -> None:

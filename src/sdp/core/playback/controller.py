@@ -141,26 +141,35 @@ class PlaybackController(QObject):
         読み込みに進めなかった場合は現在の source を変更せず、
         :attr:`error_occurred` で通知する。
         """
-        if path.is_dir():
-            self._emit_error(
-                PlaybackErrorCode.SOURCE_NOT_A_FILE,
-                "フォルダーは再生できません。",
-                f"ディレクトリが指定された: {path}",
-            )
-            return
-        if not path.is_file():
+        try:
+            resolved_path = path.resolve(strict=True)
+        except OSError:
             self._emit_error(
                 PlaybackErrorCode.SOURCE_NOT_FOUND,
                 "ファイルが見つかりません。",
                 f"存在しないパス: {path}",
             )
             return
+        if resolved_path.is_dir():
+            self._emit_error(
+                PlaybackErrorCode.SOURCE_NOT_A_FILE,
+                "フォルダーは再生できません。",
+                f"ディレクトリが指定された: {resolved_path}",
+            )
+            return
+        if not resolved_path.is_file():
+            self._emit_error(
+                PlaybackErrorCode.SOURCE_NOT_FOUND,
+                "ファイルが見つかりません。",
+                f"通常ファイルではないパス: {resolved_path}",
+            )
+            return
 
         # Backend.load() は media_status_changed などを同期通知しうる。
         # UI が新しい source を認識してから読み込み状態を受け取れるよう、先に通知する。
-        self._source = path
-        self.source_changed.emit(path)
-        self._backend.load(path)
+        self._source = resolved_path
+        self.source_changed.emit(resolved_path)
+        self._backend.load(resolved_path)
 
     def play(self) -> None:
         self._backend.play()
