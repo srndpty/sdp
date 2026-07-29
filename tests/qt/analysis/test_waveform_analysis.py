@@ -293,11 +293,14 @@ def test_missing_source_request_fails_without_starting_decode(
         yield DecodedChunk(np.zeros(20, dtype=np.float32), 1_000)
 
     service = make_service(controller, tmp_path / "cache", counting_decode)
+    started = QSignalSpy(service.analysis_started)
     failed = QSignalSpy(service.analysis_failed)
     service.start()
     missing = tmp_path / "missing.wav"
     service._on_source_changed(missing)  # pyright: ignore[reportPrivateUsage]
+    assert started.count() == 1
     assert failed.count() == 1
+    assert started.at(0)[:2] == failed.at(0)[:2]
     assert calls == []
     service.shutdown()
 

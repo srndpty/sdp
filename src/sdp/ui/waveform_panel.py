@@ -2,13 +2,12 @@
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from sdp.core.analysis.waveform import WaveformData
 from sdp.core.playback.controller import PlaybackController
 from sdp.services.waveform_analysis import WaveformAnalysisService
-from sdp.ui.waveform_widget import NO_SOURCE_MESSAGE, WaveformWidget
+from sdp.ui.waveform_widget import WaveformWidget
 
 ANALYZING_MESSAGE = "波形を解析中…"
 FAILED_MESSAGE = "波形を表示できません"
@@ -32,15 +31,10 @@ class WaveformPanel(QWidget):
         self._waveform_data: WaveformData | None = None
 
         self._widget = WaveformWidget(self)
-        self._status_label = QLabel(self)
-        self._status_label.setObjectName("waveformStatusLabel")
-        self._status_label.setAlignment(Qt.AlignmentFlag.AlignRight)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
         layout.addWidget(self._widget)
-        layout.addWidget(self._status_label)
 
         playback.source_changed.connect(self._on_source_changed)
         playback.position_changed.connect(self._on_position_changed)
@@ -54,10 +48,7 @@ class WaveformPanel(QWidget):
 
         source = playback.source
         self._widget.reset_for_source(source is not None)
-        if source is None:
-            self._set_status(NO_SOURCE_MESSAGE)
-        else:
-            self._set_status(ANALYZING_MESSAGE)
+        if source is not None:
             self._widget.set_position(max(0, playback.position_ms))
             self._widget.set_duration(max(0, playback.duration_ms))
 
@@ -76,7 +67,6 @@ class WaveformPanel(QWidget):
         self._waveform_data = None
         available = isinstance(source, Path)
         self._widget.reset_for_source(available)
-        self._set_status(ANALYZING_MESSAGE if available else NO_SOURCE_MESSAGE)
 
     def _on_position_changed(self, position_ms: int) -> None:
         if self._playback.source is not None:
@@ -93,7 +83,6 @@ class WaveformPanel(QWidget):
         self._waveform_data = None
         self._widget.set_waveform_data(None)
         self._widget.set_status_text(ANALYZING_MESSAGE)
-        self._set_status(ANALYZING_MESSAGE)
 
     def _on_partial_ready(self, path_value: object, token: int, data_value: object) -> None:
         if not self._matches_active(path_value, token) or not isinstance(data_value, WaveformData):
@@ -102,7 +91,6 @@ class WaveformPanel(QWidget):
         self._widget.set_waveform_data(data_value)
         self._widget.set_status_text(ANALYZING_MESSAGE)
         self._widget.set_duration(self._effective_duration(self._playback.duration_ms))
-        self._set_status(ANALYZING_MESSAGE)
 
     def _on_analysis_finished(
         self,
@@ -118,7 +106,6 @@ class WaveformPanel(QWidget):
         self._widget.set_waveform_data(data_value)
         self._widget.set_status_text("")
         self._widget.set_duration(self._effective_duration(self._playback.duration_ms))
-        self._set_status("")
 
     def _on_analysis_failed(self, path_value: object, token: int, message: str) -> None:
         del message
@@ -126,7 +113,6 @@ class WaveformPanel(QWidget):
             return
         self._widget.set_status_text(FAILED_MESSAGE)
         self._widget.set_duration(self._effective_duration(self._playback.duration_ms))
-        self._set_status(FAILED_MESSAGE)
 
     def _on_analysis_cleared(self) -> None:
         self._active_path = None
@@ -134,7 +120,6 @@ class WaveformPanel(QWidget):
         self._waveform_data = None
         available = self._playback.source is not None
         self._widget.reset_for_source(available)
-        self._set_status(ANALYZING_MESSAGE if available else NO_SOURCE_MESSAGE)
 
     def _matches_active(self, path_value: object, token: int) -> bool:
         return (
@@ -151,7 +136,3 @@ class WaveformPanel(QWidget):
         if data is not None and data.complete and data.duration_ms > 0:
             return data.duration_ms
         return 0
-
-    def _set_status(self, message: str) -> None:
-        self._status_label.setText(message)
-        self._status_label.setVisible(bool(message))

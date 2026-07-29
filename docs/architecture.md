@@ -400,7 +400,8 @@ UI が Backend を直接触ることは禁止し、import 構成のレビュー�
   cache境界で行い、現在sourceが解析中に変化した場合は専用の`analysis_failed`で必ず要求を終端する。
   source変更とshutdownではthread-safeなcancel状態を即時設定してQAudioDecoderへstopを要求し、workerが
   cancel処理を終えたtokenはregistryから回収する。解析失敗はPlaybackControllerの状態や再生エラーへ
-  混ぜない。
+  混ぜない。request生成前のpath事前確認に失敗した場合もtokenを先に採番し、同じpath/tokenで
+  `analysis_started`、`analysis_failed`の順に通知してUIの解析状態を必ず終端する。
 - **cache key**: 解決済み絶対path、size、mtime_ns、analysis version 1、20ms bucket、mono format
   version 1をcanonical JSONからSHA-256化する。ファイル名はhashだけで、生pathを含めない。
 - **npz schema**: minimum、maximum、bucket_duration_ms、duration_ms、analysis_version、
@@ -429,7 +430,9 @@ UI が Backend を直接触ることは禁止し、import 構成のレビュー�
 - **表示調停**: `WaveformPanel`はControllerのsource／position／durationとServiceの
   started／partial／finished／failed／clearedをWidgetへ接続する。startedでactive path/tokenを
   記録し、一致しない結果は無視する。source変更とclearでは旧波形・active token・dragを即時解除する。
-  sourceなし、解析中、部分表示、完了、失敗を短い日本語表示で区別し、生のdecoder errorは表示しない。
+  sourceなし、解析中、部分表示、完了、失敗をWidget内の1か所だけに短い日本語で表示し、生のdecoder
+  errorは表示しない。波形がない状態では中央、partial表示中は左上へ描き、別QLabelの表示切替による
+  Panel高の変動を作らない。
 - **duration**: シーク上限は正の`PlaybackController.duration_ms`を優先し、それが未確定の場合だけ
   completeな`WaveformData.duration_ms`を使う。partialのdurationは総時間として扱わない。
   描画のbucket時刻は常に`WaveformData.bucket_duration_ms`から求め、Controller durationへ引き延ばさない。

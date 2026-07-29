@@ -1,12 +1,13 @@
 """WaveformPanelによるController・解析Service・Widget間の調停を検証する。"""
 
-from collections.abc import Iterator
+import threading
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import numpy as np
 import pytest
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtTest import QTest
+from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QLabel
 from pytestqt.qtbot import QtBot
 
@@ -14,7 +15,7 @@ from fakes.fake_playback_backend import FakePlaybackBackend
 from sdp.core.analysis.waveform import WaveformData
 from sdp.core.playback.controller import PlaybackController
 from sdp.core.playback.types import PlaybackState
-from sdp.services.waveform_analysis import WaveformAnalysisService
+from sdp.services.waveform_analysis import DecodedChunk, WaveformAnalysisService
 from sdp.ui.waveform_panel import ANALYZING_MESSAGE, FAILED_MESSAGE, WaveformPanel
 from sdp.ui.waveform_widget import NO_SOURCE_MESSAGE, WaveformWidget
 
@@ -69,9 +70,7 @@ def data(*, complete: bool, duration_ms: int = 10_000) -> WaveformData:
 
 
 def status(panel: WaveformPanel) -> str:
-    label = panel.findChild(QLabel, "waveformStatusLabel")
-    assert label is not None
-    return label.text()
+    return panel.waveform_widget.status_text
 
 
 def test_structure_and_initial_state(
@@ -81,8 +80,8 @@ def test_structure_and_initial_state(
     assert panel.objectName() == "waveformPanel"
     assert panel.waveform_analysis is service
     assert len(panel.findChildren(WaveformWidget)) == 1
+    assert panel.findChild(QLabel, "waveformStatusLabel") is None
     assert status(panel) == NO_SOURCE_MESSAGE
-    assert panel.waveform_widget.status_text == NO_SOURCE_MESSAGE
 
 
 def test_source_started_partial_finished_and_cache_hit_states(
@@ -242,3 +241,156 @@ def test_panel_has_no_backend_dependency() -> None:
     source = module.read_text(encoding="utf-8")
     assert "qt_backend" not in source
     assert "QMediaPlayer" not in source
+
+
+# -- PlaybackController → 実Service → worker → Panel → Widget ---------------
+
+
+def test_integrated_service_displays_decode_and_cache_hit(tmp_path: Path, qtbot: QtBot) -> None:
+    """実Serviceのworker完了とcache hitがPanelを通ってWidgetへ届く。"""
+    source = tmp_path / "統合.wav"
+    source.write_bytes(b"audio")
+    backend = FakePlaybackBackend()
+    controller = PlaybackController(backend)
+    cache_directory = tmp_path / "cache"
+
+    def decode(path: Path, cancelled: Callable[[], bool]) -> Iterator[DecodedChunk]:
+        del path
+        if not cancelled():
+            yield DecodedChunk(np.ones(2_000, dtype=np.float32), 1_000)
+
+    integrated_service = WaveformAnalysisService(
+        controller,
+        cache_directory,
+        decode_function=decode,
+    )
+    integrated_panel = WaveformPanel(controller, integrated_service)
+    qtbot.addWidget(integrated_panel)
+    finished = QSignalSpy(integrated_service.analysis_finished)
+    integrated_service.start()
+    try:
+        controller.load(source)
+        qtbot.waitUntil(lambda: finished.count() == 1, timeout=5_000)
+        assert integrated_panel.waveform_widget.waveform_data is not None
+        assert integrated_panel.waveform_widget.waveform_data.complete
+        assert status(integrated_panel) == ""
+        qtbot.waitUntil(lambda: any(cache_directory.glob("*.npz")), timeout=5_000)
+
+        controller.load(source)
+        qtbot.waitUntil(lambda: finished.count() == 2, timeout=5_000)
+        assert finished.at(1)[3] is True
+        assert integrated_panel.waveform_widget.waveform_data is not None
+        assert status(integrated_panel) == ""
+    finally:
+        integrated_service.shutdown()
+
+
+def test_integrated_precheck_failure_reaches_panel_terminal_state(
+    tmp_path: Path, qtbot: QtBot
+) -> None:
+    """source通知後の事前確認失敗もstarted→failedとなり解析中表示を残さない。"""
+    source = tmp_path / "削除される.wav"
+    source.write_bytes(b"audio")
+    backend = FakePlaybackBackend()
+    controller = PlaybackController(backend)
+    integrated_service = WaveformAnalysisService(controller, tmp_path / "cache")
+    integrated_panel = WaveformPanel(controller, integrated_service)
+    qtbot.addWidget(integrated_panel)
+    started = QSignalSpy(integrated_service.analysis_started)
+    failed = QSignalSpy(integrated_service.analysis_failed)
+
+    def remove_before_service(value: object) -> None:
+        if isinstance(value, Path):
+            value.unlink()
+
+    # Panel→削除注入→Serviceの順にsource_changedを処理させる。
+    controller.source_changed.connect(remove_before_service)
+    integrated_service.start()
+    try:
+        controller.load(source)
+        assert started.count() == 1
+        assert failed.count() == 1
+        assert started.at(0)[:2] == failed.at(0)[:2]
+        assert status(integrated_panel) == FAILED_MESSAGE
+        assert ANALYZING_MESSAGE not in status(integrated_panel)
+        assert controller.state is PlaybackState.STOPPED
+    finally:
+        integrated_service.shutdown()
+
+
+def test_integrated_decode_failure_reaches_panel_without_playback_error(
+    tmp_path: Path, qtbot: QtBot
+) -> None:
+    """worker decode失敗はPanelだけを失敗表示にし、再生状態を変更しない。"""
+    source = tmp_path / "失敗.wav"
+    source.write_bytes(b"audio")
+    backend = FakePlaybackBackend()
+    controller = PlaybackController(backend)
+
+    def failing_decode(path: Path, cancelled: Callable[[], bool]) -> Iterator[DecodedChunk]:
+        del path, cancelled
+        raise OSError("decode failure detail")
+        yield  # pragma: no cover
+
+    integrated_service = WaveformAnalysisService(
+        controller,
+        tmp_path / "cache",
+        decode_function=failing_decode,
+    )
+    integrated_panel = WaveformPanel(controller, integrated_service)
+    qtbot.addWidget(integrated_panel)
+    failed = QSignalSpy(integrated_service.analysis_failed)
+    integrated_service.start()
+    try:
+        controller.load(source)
+        qtbot.waitUntil(lambda: failed.count() == 1, timeout=5_000)
+        assert status(integrated_panel) == FAILED_MESSAGE
+        assert "decode failure" not in status(integrated_panel)
+        assert controller.state is PlaybackState.STOPPED
+    finally:
+        integrated_service.shutdown()
+
+
+def test_integrated_source_switch_discards_old_result(tmp_path: Path, qtbot: QtBot) -> None:
+    """A解析中のB切替で即時clearし、Bの完了だけをWidgetへ反映する。"""
+    first = tmp_path / "A.wav"
+    second = tmp_path / "B.wav"
+    first.write_bytes(b"A")
+    second.write_bytes(b"B")
+    entered = threading.Event()
+    release = threading.Event()
+    backend = FakePlaybackBackend()
+    controller = PlaybackController(backend)
+
+    def controlled_decode(path: Path, cancelled: Callable[[], bool]) -> Iterator[DecodedChunk]:
+        if path == first.resolve():
+            entered.set()
+            release.wait(timeout=5)
+        if not cancelled():
+            value = 0.25 if path == first.resolve() else 0.75
+            yield DecodedChunk(np.full(2_000, value, dtype=np.float32), 1_000)
+
+    integrated_service = WaveformAnalysisService(
+        controller,
+        tmp_path / "cache",
+        decode_function=controlled_decode,
+    )
+    integrated_panel = WaveformPanel(controller, integrated_service)
+    qtbot.addWidget(integrated_panel)
+    finished = QSignalSpy(integrated_service.analysis_finished)
+    integrated_service.start()
+    try:
+        controller.load(first)
+        assert entered.wait(timeout=5)
+        controller.load(second)
+        assert integrated_panel.waveform_widget.waveform_data is None
+        release.set()
+        qtbot.waitUntil(lambda: finished.count() == 1, timeout=5_000)
+        assert finished.at(0)[0] == second.resolve()
+        displayed = integrated_panel.waveform_widget.waveform_data
+        assert displayed is not None
+        assert displayed.complete
+        assert status(integrated_panel) == ""
+    finally:
+        release.set()
+        integrated_service.shutdown()

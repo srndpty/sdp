@@ -3,7 +3,6 @@
 import numpy as np
 import pytest
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication
 from pytestqt.qtbot import QtBot
 
 from sdp.core.analysis.waveform import WaveformData
@@ -51,16 +50,26 @@ def test_repeated_position_updates_keep_gui_heartbeat(
     widget.set_waveform_data(long_waveform)
     widget.show()
     heartbeats: list[int] = []
-    timer = QTimer(widget)
-    timer.setInterval(0)
-    timer.timeout.connect(lambda: heartbeats.append(1))
-    timer.start()
+    updates: list[int] = []
+    heartbeat_timer = QTimer(widget)
+    heartbeat_timer.setInterval(0)
+    heartbeat_timer.timeout.connect(lambda: heartbeats.append(1))
+    update_timer = QTimer(widget)
+    update_timer.setInterval(0)
 
-    for index in range(100):
+    def update_position() -> None:
+        index = len(updates)
         widget.set_position(1_800_000 + index * 20)
         widget.grab()
-        QApplication.processEvents()
+        updates.append(index)
+        if len(updates) == 100:
+            update_timer.stop()
 
-    timer.stop()
+    update_timer.timeout.connect(update_position)
+    heartbeat_timer.start()
+    update_timer.start()
+    qtbot.waitUntil(lambda: len(updates) == 100, timeout=10_000)
+
+    heartbeat_timer.stop()
     assert heartbeats
     assert widget.last_waveform_line_count <= widget.width()

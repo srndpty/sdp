@@ -185,7 +185,13 @@ class WaveformWidget(QWidget):
 
         if self._status_text:
             painter.setPen(QPen(palette.color(QPalette.ColorRole.PlaceholderText), 1.0))
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._status_text)
+            status_rect = self.rect().adjusted(6, 6, -6, -6)
+            alignment = (
+                Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+                if columns is not None and bool(columns.valid.any())
+                else Qt.AlignmentFlag.AlignCenter
+            )
+            painter.drawText(status_rect, alignment, self._status_text)
         painter.end()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
