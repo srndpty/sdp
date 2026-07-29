@@ -36,19 +36,20 @@
 | `services/logging_setup.py` | ログファイルの UTF-8 出力、多重初期化でハンドラーが増えないこと、出力先変更時のハンドラー置換、ローテーション設定、出力先の決定、未捕捉例外フックの記録と多重インストールの抑止 |
 | `ui/player_controls.py` の時間整形 | `m:ss` / `h:mm:ss` の境界値と負値の扱い |
 | `services/settings.py` | 往復、欠落キーの既定値補完、未知キーの無視、アトミック書き込み |
-| `playlist/persistence.py` | `playlist.json` の往復（順序・entry_id・日本語パス）、未作成時の空リスト、ファイル状態を保存しないこと、アトミック書き込みと失敗時の既存ファイル保持、保存前のID重複検証、schema version の厳密な整数判定、破損データごとの明示的エラー、未知キーの無視（将来は M3U8 も） |
+| `playlist/persistence.py` | `playlist.json` の往復（順序・entry_id・日本語パス）、未作成時の空リスト、ファイル状態を保存しないこと、アトミック書き込みと失敗時の既存ファイル保持、保存前のID重複検証、schema version の厳密な整数判定、非UTF-8を含む破損データごとの明示的エラー、未知キーの無視（将来は M3U8 も） |
 
 ## 3. Qt 統合テスト（pytest-qt、`QT_QPA_PLATFORM=offscreen`）
 
 | 対象 | 検証内容 |
 |---|---|
-| `PlaylistModel` | 全テストで `QAbstractItemModelTester`（Fatal）を取り付ける。一括追加・指定位置への挿入・削除・全消去・`moveRows`（前後・複数行・不正引数）、entry_id の索引追随、role ごとの `data` / `headerData` と安定した `roleNames`、欠損の再確認と `dataChanged` の範囲、1000 件の一括追加が単一の `rowsInserted` 通知になること。将来 URL ドロップの MIME 処理を追加する |
+| `PlaylistModel` | 全テストで `QAbstractItemModelTester`（Fatal）を取り付ける。一括追加・指定位置への挿入・削除・全消去・`moveRows`（前後・複数行・不正引数）、entry_id の索引追随、role ごとの `data` / `headerData` と安定した `roleNames`、外部URLと内部MIMEのCopyAction限定D&D、可否照会で警告しないこと、欠損の再確認と `dataChanged` の範囲、1000 件の一括追加が単一の `rowsInserted` 通知になること |
 | `PlaybackController` | **FakeBackend**（`IPlaybackBackend` のテストダブル）を使い、状態遷移・曲終了時の次曲送り・エラー時の方針を `qtbot.waitSignal` で検証 |
 | `QtMultimediaBackend` | Qt enum 写像の完全性（値が増えたら失敗する）、エラー変換、故障注入による変換失敗・再入ガード、状態通知の重複抑制、音を鳴らさない load・source差し替え・再ロード。所有する QMediaPlayer / QAudioOutput は `findChildren` で取得し、テストのために公開 API を増やさない |
 | `SingleInstanceService` | 同一プロセス内でサーバーとクライアントを往復させる |
 | `PlayerControls` | **FakeBackend + 実 PlaybackController** で、状態ごとのボタン活性、シーク（ドラッグ中の非同期更新の抑止、有効なpress/releaseでの1回だけのseek、source・duration変更による古い操作の取消）、音量・ミュートの往復とフィードバックループの不在を検証する。子ウィジェットは `objectName` で取得する |
 | `MainWindow` | `QFileDialog.getOpenFileName` を差し替え、キャンセル / 選択、ファイル名とタイトルの更新、`MediaStatus` とエラー表示（具体的エラーの優先、`detail` を出さないこと）、source解除、終了アクションを検証する |
-| `app.py` の配線 | Backend → Controller → MainWindow を組み立てられること。イベントループは起動しない |
+| `app.py` の配線 | Backend → Controller → PlaylistModel → 永続化サービス → MainWindow を組み立てられること。イベントループは起動しない |
+| プレイリストの永続化ライフサイクル | 保存先の決定、ファイル未作成での空起動、順序・entry_id・重複行・日本語パス・欠損行の復元、並べ替え / 削除 / 全消去後の保存、読み書き I/O エラーのログ記録。**破損ファイルではクラッシュせず空で起動し、その起動の保存を無効化して既存ファイルを上書きしないこと** |
 | UI 層の依存 | `src/sdp/ui/` 配下を再帰走査し、`qt_backend` / `QMediaPlayer` / `QAudioOutput` 自身またはその配下をimportしていないことを標準ライブラリの `ast` で検査する（親モジュール経由も完全修飾して判定し、新しい依存は追加しない） |
 | `MetadataReader` | 実ファイルに対する非同期完了シグナル |
 | 可視化ウィジェット | 表示 ON/OFF でタイマーと PCM タップが停止すること（SPEC-04） |
@@ -100,6 +101,27 @@ GUI と実音を伴うため自動化しない。**最初は音量を下げる�
 - [ ] 壊れたファイル・音声でないファイルを選んでもクラッシュせず、エラーが表示される
 - [ ] ウィンドウを閉じて正常終了する
 - [ ] `%LOCALAPPDATA%\sdp\logs\sdp.log` が生成される
+
+## 6.2 P2-B 手動スモーク（プレイリストと D&D）
+
+D&D は実際のマウス操作でしか確認できないため自動化しない。
+
+- [ ] 「ファイルを追加...」で複数選択し、選択順のまま追加される
+- [ ] 同じファイルを 2 回追加でき、2 行として並ぶ
+- [ ] Explorer から 3 件以上を D&D で追加でき、元の順序が保たれる
+- [ ] 日本語・空白を含むパスを D&D できる
+- [ ] ディレクトリを D&D しても追加されない
+- [ ] 行を上方向・下方向へ D&D で移動できる
+- [ ] 連続した複数行をまとめて D&D で移動できる
+- [ ] 並べ替え後に行が重複も消失もしない
+- [ ] 非連続の複数行を D&D しても壊れない（移動しないだけ）
+- [ ] 複数選択した行をまとめて削除できる
+- [ ] 全消去のキャンセルで消えない / 確認で消える
+- [ ] 見つからないファイルがグレー表示になり、行は残る
+- [ ] アプリを終了して再起動すると、順序と重複行が復元される
+- [ ] `%LOCALAPPDATA%\sdp\playlist.json` の内容が想定どおり
+- [ ] 壊れた `playlist.json` で起動してもクラッシュせず、終了しても上書きされない
+- [ ] 単曲再生（開く / 再生 / シーク等）が従来どおり動く
 
 ## 7. 手動チェックリスト（リリース前）
 

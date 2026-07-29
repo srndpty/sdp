@@ -170,6 +170,15 @@ def test_missing_file_returns_empty_playlist(tmp_path: Path) -> None:
     assert load_playlist(tmp_path / "存在しない.json") == []
 
 
+def test_non_utf8_file_raises_playlist_file_error(tmp_path: Path) -> None:
+    """UTF-8として読めない内容もデータ形式エラーへ正規化する。"""
+    file_path = tmp_path / "playlist.json"
+    file_path.write_bytes(b"\x80\x81\xff")
+
+    with pytest.raises(PlaylistFileError, match="UTF-8"):
+        load_playlist(file_path)
+
+
 @pytest.mark.parametrize("version", [True, 1.0, "1", None])
 def test_schema_version_requires_an_exact_integer(tmp_path: Path, version: object) -> None:
     """bool・float・文字列・nullをschema version 1として受理しない。"""

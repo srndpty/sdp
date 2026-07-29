@@ -14,12 +14,18 @@ UI_DIR = Path(__file__).resolve().parents[3] / "src" / "sdp" / "ui"
 FORBIDDEN_MODULES = {
     "sdp.core.playback.qt_backend",
     "PySide6.QtMultimedia",
+    # 永続化は composition root と services の責務。UI は playlist.json を知らない。
+    "sdp.core.playlist.persistence",
+    "sdp.services.playlist_session",
 }
 FORBIDDEN_NAMES = {
     "QtMultimediaBackend",
     "QMediaPlayer",
     "QAudioOutput",
     "QAudioBufferOutput",
+    "save_playlist",
+    "load_playlist",
+    "PlaylistSession",
 }
 
 

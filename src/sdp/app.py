@@ -8,12 +8,15 @@ UI は PlaybackController しか知らない。
 
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
 from sdp.core.playback.controller import PlaybackController
 from sdp.core.playback.qt_backend import QtMultimediaBackend
+from sdp.core.playlist.model import PlaylistModel
 from sdp.services import logging_setup
+from sdp.services.playlist_session import PlaylistSession, default_playlist_path
 from sdp.ui.main_window import MainWindow
 
 APPLICATION_NAME = "sdp"
@@ -22,28 +25,44 @@ ORGANIZATION_NAME = "sdp"
 
 @dataclass(frozen=True, slots=True)
 class PlayerComposition:
-    """組み立て済みの再生一式。
+    """組み立て済みのアプリ一式。
 
-    Backend・Controller・MainWindow はいずれも QObject の親を持たないため、
-    この dataclass への参照が生きているあいだだけ寿命が保証される。
-    :func:`run` はイベントループの実行中これを保持し続ける。
-    グローバル変数へは置かない。
+    Backend・Controller・PlaylistModel・永続化サービス・MainWindow はいずれも
+    QObject の親を持たないため、この dataclass への参照が生きているあいだだけ
+    寿命が保証される。:func:`run` はイベントループの実行中これを保持し続ける。
+    グローバル変数へは置かない。MainWindow に Backend は所有させない。
     """
 
     backend: QtMultimediaBackend
     controller: PlaybackController
+    playlist_model: PlaylistModel
+    playlist_session: PlaylistSession
     window: MainWindow
 
 
-def build_player() -> PlayerComposition:
-    """Backend → Controller → MainWindow の順に組み立てる。
+def build_player(playlist_file: Path | None = None) -> PlayerComposition:
+    """Backend → Controller → PlaylistModel → MainWindow の順に組み立てる。
+
+    保存済みプレイリストの復元もここで行う（UI は永続化を知らない）。
+    ``playlist_file`` はテストから保存先を差し替えるための入口。
 
     QApplication が既に存在していることが前提（ウィジェットの生成に必要）。
     """
     backend = QtMultimediaBackend()
     controller = PlaybackController(backend)
-    window = MainWindow(controller)
-    return PlayerComposition(backend=backend, controller=controller, window=window)
+    playlist_model = PlaylistModel()
+    session = PlaylistSession(default_playlist_path() if playlist_file is None else playlist_file)
+    restore_message = session.load_into(playlist_model)
+    window = MainWindow(controller, playlist_model)
+    if restore_message is not None:
+        window.show_status_message(restore_message)
+    return PlayerComposition(
+        backend=backend,
+        controller=controller,
+        playlist_model=playlist_model,
+        playlist_session=session,
+        window=window,
+    )
 
 
 def create_application(argv: list[str]) -> QApplication:
@@ -72,4 +91,7 @@ def run(argv: list[str] | None = None) -> int:
     # composition はイベントループ実行中ずっと参照され続ける（寿命の保証）。
     composition = build_player()
     composition.window.show()
-    return app.exec()
+    exit_code = app.exec()
+    # ウィンドウが閉じた後なので、保存の失敗はログへ残すだけにする。
+    composition.playlist_session.save_from(composition.playlist_model)
+    return exit_code

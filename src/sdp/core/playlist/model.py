@@ -5,6 +5,8 @@
 保存先のパスは持たない（それぞれ Controller・設定・永続化の責務）。
 """
 
+import json
+import logging
 from collections.abc import Iterable, Sequence
 from enum import IntEnum
 from pathlib import Path
@@ -13,6 +15,7 @@ from typing import Any
 from PySide6.QtCore import (
     QAbstractTableModel,
     QByteArray,
+    QMimeData,
     QModelIndex,
     QObject,
     QPersistentModelIndex,
@@ -20,6 +23,19 @@ from PySide6.QtCore import (
 )
 
 from sdp.core.playlist.entry import FileStatus, PlaylistEntry, create_entry
+
+_logger = logging.getLogger(__name__)
+
+INTERNAL_MIME_TYPE = "application/x-sdp-playlist-entry-ids"
+"""内部並べ替え用の MIME 型。
+
+中身は entry_id の JSON 配列（UTF-8）。パスや行番号ではなく entry_id を運ぶ。
+パスは重複しうるし、行番号はドラッグ中に変化しうるため、
+行の安定した同一性は entry_id だけだという理由による。
+"""
+
+URI_LIST_MIME_TYPE = "text/uri-list"
+"""外部（Explorer など）からのファイル D&D で受け取る MIME 型。"""
 
 ENTRY_ID_ROLE = int(Qt.ItemDataRole.UserRole)
 """エントリの entry_id（``str``）を取得する role。"""
@@ -173,6 +189,162 @@ class PlaylistModel(QAbstractTableModel):
         self._entries[insert_at:insert_at] = moving
         self._rebuild_index()
         self.endMoveRows()
+        return True
+
+    # -- ドラッグ＆ドロップ -------------------------------------------------
+
+    def flags(self, index: QModelIndex | QPersistentModelIndex) -> Qt.ItemFlag:
+        """行はドラッグ可能・選択可能。ドロップはルート（行と行の間）だけで受ける。
+
+        行自身をドロップ可能にすると「行の上へ落とす」解釈が生まれ、
+        並べ替えの意味が曖昧になるため付けない。編集とチェックも許可しない。
+        """
+        if not index.isValid():
+            return Qt.ItemFlag.ItemIsDropEnabled
+        return (
+            Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsDragEnabled
+        )
+
+    def supportedDragActions(self) -> Qt.DropAction:
+        return Qt.DropAction.CopyAction
+
+    def supportedDropActions(self) -> Qt.DropAction:
+        # 外部ドラッグ元へ Move 成功を返すと、元ファイルを削除される恐れがある。
+        # 内部並べ替えも転送上は Copy とし、意味上の移動は _drop_internal で行う。
+        return Qt.DropAction.CopyAction
+
+    def mimeTypes(self) -> list[str]:
+        return [INTERNAL_MIME_TYPE, URI_LIST_MIME_TYPE]
+
+    def mimeData(self, indexes: Iterable[QModelIndex | QPersistentModelIndex]) -> QMimeData:
+        """選択された行の entry_id を内部 MIME へ詰める。
+
+        列ごとに index が渡るため行で重複を除き、現在の行順に並べる。
+        """
+        rows = sorted({index.row() for index in indexes if index.isValid()})
+        entry_ids = [self._entries[row].entry_id for row in rows if 0 <= row < len(self._entries)]
+        mime = QMimeData()
+        mime.setData(INTERNAL_MIME_TYPE, QByteArray(json.dumps(entry_ids).encode("utf-8")))
+        return mime
+
+    def canDropMimeData(
+        self,
+        data: QMimeData,
+        action: Qt.DropAction,
+        row: int,
+        column: int,
+        parent: QModelIndex | QPersistentModelIndex,
+    ) -> bool:
+        if action != Qt.DropAction.CopyAction or column not in (-1, 0):
+            return False
+        destination = self.drop_row(row, parent)
+        if data.hasFormat(INTERNAL_MIME_TYPE):
+            rows = self._parse_internal_mime(data, log_failure=False)
+            if rows is None:
+                return False
+            # moveRows が拒否する no-op の位置ではドロップ表示も出さない。
+            return not rows[0] <= destination <= rows[0] + len(rows)
+        # 外部 URL はここでは軽い判定に留める。ドラッグ中に何度も呼ばれるため、
+        # ディレクトリ判定などのファイルシステムアクセスは dropMimeData 側で行う。
+        return data.hasUrls() and any(url.isLocalFile() for url in data.urls())
+
+    def dropMimeData(
+        self,
+        data: QMimeData,
+        action: Qt.DropAction,
+        row: int,
+        column: int,
+        parent: QModelIndex | QPersistentModelIndex,
+    ) -> bool:
+        """ドロップを受け付ける。不正なデータでは例外を投げず ``False`` を返す。"""
+        if action == Qt.DropAction.IgnoreAction:
+            return True
+        if action != Qt.DropAction.CopyAction or column not in (-1, 0):
+            return False
+        destination = self.drop_row(row, parent)
+        if data.hasFormat(INTERNAL_MIME_TYPE):
+            # 転送は Copy だが、内部 MIME の意味はプレイリスト行の移動。
+            return self._drop_internal(data, destination)
+        if data.hasUrls():
+            return self._drop_urls(data, destination)
+        return False
+
+    def drop_row(self, row: int, parent: QModelIndex | QPersistentModelIndex) -> int:
+        """ドロップ先の行番号を決める（決定はこの 1 か所へ集約する）。
+
+        - 行の上（有効な parent）へのドロップ → その行の前
+        - 行と行の間 → その位置
+        - 最終行より下・空のプレイリスト（``row < 0``） → 末尾
+        """
+        if parent.isValid():
+            return parent.row()
+        if row < 0:
+            return len(self._entries)
+        return min(row, len(self._entries))
+
+    def _parse_internal_mime(self, data: QMimeData, *, log_failure: bool) -> list[int] | None:
+        """内部 MIME を現在の行番号の昇順リストへ変換する。
+
+        壊れたデータ・未知の entry_id・非連続の選択では ``None`` を返す。
+        非連続の複数行ドラッグは P2-B では対応せず、安全に拒否する
+        （途中の行を巻き込まずに移動する意味を一意に決められないため）。
+        """
+        payload = bytes(data.data(INTERNAL_MIME_TYPE).data())
+        try:
+            parsed: object = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            if log_failure:
+                _logger.warning("内部 D&D の MIME データを解釈できません。")
+            return None
+        if not isinstance(parsed, list):
+            if log_failure:
+                _logger.warning("内部 D&D の MIME データが配列ではありません。")
+            return None
+        rows: list[int] = []
+        for value in parsed:  # pyright: ignore[reportUnknownVariableType]
+            if not isinstance(value, str):
+                if log_failure:
+                    _logger.warning("内部 D&D の entry_id が文字列ではありません。")
+                return None
+            row = self._row_by_entry_id.get(value)
+            if row is None:
+                if log_failure:
+                    _logger.warning("内部 D&D に未知の entry_id が含まれています。")
+                return None
+            rows.append(row)
+        if not rows:
+            return None
+        rows.sort()
+        if rows[-1] - rows[0] + 1 != len(rows):
+            if log_failure:
+                _logger.warning("非連続の複数行ドラッグには対応していません。")
+            return None
+        return rows
+
+    def _drop_internal(self, data: QMimeData, destination: int) -> bool:
+        rows = self._parse_internal_mime(data, log_failure=True)
+        if rows is None:
+            return False
+        return self.moveRows(_ROOT, rows[0], len(rows), _ROOT, destination)
+
+    def _drop_urls(self, data: QMimeData, destination: int) -> bool:
+        """ローカルファイルの URL だけを順序どおり挿入する。
+
+        ディレクトリと非ローカル URL は無視する。拡張子では判定しない。
+        ドロップ直前に消えていたファイルは、欠損エントリとして追加される
+        （行を消さずに保持するという :mod:`sdp.core.playlist.entry` の契約に従う）。
+        """
+        paths: list[Path] = []
+        for url in data.urls():
+            if not url.isLocalFile():
+                continue
+            path = Path(url.toLocalFile())
+            if path.is_dir():
+                continue
+            paths.append(path)
+        if not paths:
+            return False
+        self.insert_paths(destination, paths)
         return True
 
     # -- 変更 ---------------------------------------------------------------
