@@ -15,7 +15,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimedia import QAudioBufferOutput, QAudioOutput, QMediaPlayer
 from PySide6.QtTest import QSignalSpy
 from pytestqt.qtbot import QtBot
 
@@ -638,3 +638,68 @@ def test_controller_keeps_requested_rate_against_float32_readback(qtbot: QtBot) 
     assert controller.playback_rate == requested
     assert spy.count() == 1
     assert spy.at(0)[0] == pytest.approx(requested)
+
+
+# -- QAudioBufferOutput（P5-A の補助ポート）---------------------------------
+
+
+def test_audio_buffer_output_is_owned_and_attached(backend: QtMultimediaBackend) -> None:
+    """QAudioBufferOutput を子として所有し、QMediaPlayer へ設定している。"""
+    outputs = backend.findChildren(QAudioBufferOutput)
+
+    assert len(outputs) == 1
+    assert backend.audio_buffer_output is outputs[0]
+    assert player_of(backend).audioBufferOutput() is outputs[0]
+
+
+def test_normal_audio_output_is_preserved(backend: QtMultimediaBackend) -> None:
+    """PCM タップを付けても通常の音声出力経路は維持される。"""
+    assert player_of(backend).audioOutput() is audio_output_of(backend)
+    assert len(backend.findChildren(QAudioOutput)) == 1
+
+
+def test_audio_buffer_output_uses_the_native_format(backend: QtMultimediaBackend) -> None:
+    """format を指定せず、デコード直後のネイティブ形式を受け取る。"""
+    assert not backend.audio_buffer_output.format().isValid()
+
+
+def test_audio_buffer_output_is_not_part_of_the_backend_contract() -> None:
+    """PlaybackBackend の一般インターフェースへ PCM 責務を追加していない。"""
+    assert not hasattr(PlaybackBackend, "audio_buffer_output")
+    assert hasattr(QtMultimediaBackend, "audio_buffer_output")
+
+
+def test_audio_buffer_output_does_not_change_the_playback_contract(
+    backend: QtMultimediaBackend, tmp_path: Path
+) -> None:
+    """source・state・position・duration・rate・pitch の契約を変えない。"""
+    source = tmp_path / "無音.wav"
+    write_silent_wav(source, 200)
+
+    backend.load(source)
+
+    assert backend.state is PlaybackState.STOPPED
+    assert backend.position_ms == 0
+    assert backend.duration_ms == 0
+
+    backend.set_playback_rate(1.5)
+    backend.set_pitch_compensation(False)
+
+    assert backend.playback_rate == pytest.approx(1.5, rel=1e-6)
+    assert backend.pitch_compensation is False
+
+
+def test_audio_buffer_output_is_destroyed_with_the_backend(qtbot: QtBot) -> None:
+    """Backend の破棄で QAudioBufferOutput も破棄される。"""
+    del qtbot
+    backend = QtMultimediaBackend()
+    destroyed: list[str] = []
+
+    def record_buffer_output(*_: object) -> None:
+        destroyed.append("buffer_output")
+
+    backend.audio_buffer_output.destroyed.connect(record_buffer_output)
+
+    del backend
+
+    assert destroyed == ["buffer_output"]

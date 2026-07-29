@@ -9,14 +9,10 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 from PySide6.QtCore import QElapsedTimer, QObject, QThread, QUrl, Signal, Slot
-from PySide6.QtMultimedia import QAudioBuffer, QAudioDecoder, QAudioFormat
+from PySide6.QtMultimedia import QAudioDecoder
 
-from sdp.core.analysis.waveform import (
-    PcmSampleFormat,
-    WaveformData,
-    WaveformReducer,
-    pcm_bytes_to_mono,
-)
+from sdp.core.analysis.pcm import audio_buffer_to_mono
+from sdp.core.analysis.waveform import WaveformData, WaveformReducer
 from sdp.core.analysis.waveform_cache import (
     MAX_WAVEFORM_CACHE_BYTES,
     WaveformCache,
@@ -205,7 +201,7 @@ class _WaveformWorker(QObject):
             return
         buffer = decoder.read()
         try:
-            samples, sample_rate = _buffer_to_mono(buffer)
+            samples, sample_rate = audio_buffer_to_mono(buffer)
             self._append_mono(request, samples, sample_rate)
         except ValueError as error:
             self._fail(request, str(error))
@@ -453,36 +449,3 @@ def _key_still_matches(request: WaveformRequest) -> bool:
         return WaveformCacheKey.from_path(request.path) == request.cache_key
     except OSError:
         return False
-
-
-def _buffer_to_mono(buffer: QAudioBuffer) -> tuple[NDArray[np.float32], int]:
-    audio_format = buffer.format()
-    channels = audio_format.channelCount()
-    sample_rate = audio_format.sampleRate()
-    if sample_rate < 1:
-        raise ValueError("QAudioBufferのsample rateが不正です")
-    sample_format = _map_sample_format(audio_format.sampleFormat())
-    raw_data: object = buffer.constData()
-    # PySide stubはNoneを含めないが、P0実測では無効bufferでNoneになり得た。
-    if raw_data is None:  # pyright: ignore[reportUnnecessaryComparison]
-        raise ValueError("QAudioBuffer.constData()がNoneを返しました")
-    try:
-        raw = bytes(raw_data)
-    except (TypeError, ValueError) as error:
-        raise ValueError("QAudioBufferのPCMをbytesへ変換できません") from error
-    if len(raw) != buffer.byteCount():
-        raise ValueError("QAudioBufferのbyteCountとPCM長が一致しません")
-    return pcm_bytes_to_mono(raw, sample_format, channels), sample_rate
-
-
-def _map_sample_format(value: QAudioFormat.SampleFormat) -> PcmSampleFormat:
-    mapping = {
-        QAudioFormat.SampleFormat.UInt8: PcmSampleFormat.UINT8,
-        QAudioFormat.SampleFormat.Int16: PcmSampleFormat.INT16,
-        QAudioFormat.SampleFormat.Int32: PcmSampleFormat.INT32,
-        QAudioFormat.SampleFormat.Float: PcmSampleFormat.FLOAT,
-    }
-    try:
-        return mapping[value]
-    except KeyError as error:
-        raise ValueError(f"未対応のQAudioFormat.SampleFormatです: {value.name}") from error
