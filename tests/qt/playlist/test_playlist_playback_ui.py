@@ -20,6 +20,7 @@ from sdp.core.playback.controller import PlaybackController
 from sdp.core.playlist.model import Column, PlaylistModel
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.core.playlist.types import RepeatMode
+from sdp.services.waveform_analysis import WaveformAnalysisService
 from sdp.ui import playlist_view as playlist_view_module
 from sdp.ui.main_window import MainWindow
 from sdp.ui.player_controls import PlayerControls
@@ -374,10 +375,11 @@ def wired_window(qtbot: QtBot, tmp_path: Path) -> Iterator[tuple[MainWindow, Pla
     playback = PlaybackController(backend)
     model = PlaylistModel()
     playlist_playback = PlaylistPlaybackController(playback, model)
-    window = MainWindow(playback, model, playlist_playback)
+    waveform_analysis = WaveformAnalysisService(playback, tmp_path / "waveform-cache")
+    window = MainWindow(playback, model, playlist_playback, waveform_analysis)
     qtbot.addWidget(window)
-    del tmp_path
     yield window, model
+    waveform_analysis.shutdown()
 
 
 def test_activation_reaches_the_playlist_playback_controller(
@@ -419,7 +421,7 @@ def test_navigation_buttons_reach_the_controller(
 
 
 def test_window_applies_navigation_snapshot_from_prepopulated_model(
-    qtbot: QtBot, audio_files: list[Path]
+    qtbot: QtBot, audio_files: list[Path], tmp_path: Path
 ) -> None:
     """接続前に確定した前後曲可否もMainWindow構築時に反映する。"""
     backend = FakePlaybackBackend()
@@ -428,7 +430,8 @@ def test_window_applies_navigation_snapshot_from_prepopulated_model(
     entry_ids = model.add_paths(audio_files)
     playlist_playback = PlaylistPlaybackController(playback, model)
 
-    window = MainWindow(playback, model, playlist_playback)
+    waveform_analysis = WaveformAnalysisService(playback, tmp_path / "waveform-cache")
+    window = MainWindow(playback, model, playlist_playback, waveform_analysis)
     qtbot.addWidget(window)
     controls = window.findChild(PlayerControls)
     assert controls is not None
@@ -439,6 +442,7 @@ def test_window_applies_navigation_snapshot_from_prepopulated_model(
 
     control_button(controls, "nextTrackButton").click()
     assert playlist_playback.current_entry_id == entry_ids[0]
+    waveform_analysis.shutdown()
 
 
 def test_playlist_playback_messages_reach_the_status_bar(
@@ -578,7 +582,9 @@ def test_repeat_and_shuffle_requests_reach_the_controller(
     assert not shuffle_button.isChecked()
 
 
-def test_initial_repeat_and_shuffle_state_is_applied_on_wiring(qtbot: QtBot) -> None:
+def test_initial_repeat_and_shuffle_state_is_applied_on_wiring(
+    qtbot: QtBot, tmp_path: Path
+) -> None:
     """接続直後に現在の repeat / shuffle 状態が UI へ反映される。"""
     playback = PlaybackController(FakePlaybackBackend())
     model = PlaylistModel()
@@ -586,13 +592,15 @@ def test_initial_repeat_and_shuffle_state_is_applied_on_wiring(qtbot: QtBot) -> 
     playlist_playback.set_repeat_mode(RepeatMode.ALL)
     playlist_playback.set_shuffle_enabled(True)
 
-    window = MainWindow(playback, model, playlist_playback)
+    waveform_analysis = WaveformAnalysisService(playback, tmp_path / "waveform-cache")
+    window = MainWindow(playback, model, playlist_playback, waveform_analysis)
     qtbot.addWidget(window)
 
     controls = window.findChild(PlayerControls)
     assert controls is not None
     assert control_button(controls, "repeatModeButton").text() == "リピート: 全曲"
     assert control_button(controls, "shuffleButton").isChecked()
+    waveform_analysis.shutdown()
 
 
 def test_playlist_view_does_not_know_repeat_or_shuffle() -> None:

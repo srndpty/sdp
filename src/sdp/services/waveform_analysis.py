@@ -384,14 +384,16 @@ class WaveformAnalysisService(QObject):
             return
         if not isinstance(source, Path):
             return
+        self._next_token += 1
+        token = self._next_token
         try:
             key = WaveformCacheKey.from_path(source)
         except OSError as error:
-            self._next_token += 1
-            self.analysis_failed.emit(source, self._next_token, str(error))
+            # worker開始前の失敗でもPanelが同じライフサイクルで終端できるようにする。
+            self.analysis_started.emit(source, token)
+            self.analysis_failed.emit(source, token, str(error))
             return
-        self._next_token += 1
-        request = WaveformRequest(path=key.path, token=self._next_token, cache_key=key)
+        request = WaveformRequest(path=key.path, token=token, cache_key=key)
         self._request = request
         self._cancellations.discard(request.token)
         self._analyze_requested.emit(request)

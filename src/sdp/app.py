@@ -83,7 +83,7 @@ def build_player(
         if waveform_cache_directory is None
         else waveform_cache_directory,
     )
-    window = MainWindow(controller, playlist_model, playlist_playback)
+    window = MainWindow(controller, playlist_model, playlist_playback, waveform_analysis)
     restore_messages = [
         message for message in (restore_message, settings_restore_message) if message is not None
     ]

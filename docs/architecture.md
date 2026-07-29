@@ -49,6 +49,7 @@ sdp/
 │   │       ├── pcm_tap.py        # QAudioBufferOutput → 正規化 → mono 化 → リングバッファ
 │   │       ├── spectrum.py       # Hann 窓・FFT・バンド集約・平滑化（純粋関数中心）
 │   │       ├── waveform.py       # WaveformData、PCM正規化、増分min/max縮約
+│   │       ├── waveform_projection.py # 中央固定窓のpixel min/max投影と座標変換
 │   │       └── waveform_cache.py # npz キャッシュ、キー生成、LRU 容量管理
 │   ├── services/
 │   │   ├── waveform_analysis.py # QAudioDecoder workerと現在sourceの解析調停
@@ -62,6 +63,7 @@ sdp/
 │       ├── speed_panel.py    # 速度スライダー・プリセット・ピッチ補正トグル
 │       ├── playlist_view.py  # QTableView と D&D、コンテキストメニュー
 │       ├── waveform_widget.py# 追従波形（QPainter 自前描画）
+│       ├── waveform_panel.py # 再生・解析Signalと波形Widgetの調停
 │       ├── spectrum_widget.py# スペクトラム（QPainter 自前描画）
 │       ├── level_meter.py    # Peak / RMS メーター
 │       └── shortcuts.py      # QShortcut 定義の一元管理
@@ -95,8 +97,11 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 | `PlaylistModel` | 行データ、並べ替え、D&D、欠損フラグ、重複許可（entry_id 採番） | 再生状態の所有（現在行は Controller が entry_id で参照する） |
 | `MetadataReader` | ワーカーで Mutagen による読み取りを行い、シグナルで Model へ反映する | GUI スレッドでのブロッキング I/O |
 | `WaveformData` / `WaveformReducer` | Qt非依存のread-only min/max波形と、全PCMを保持しない増分縮約 | デコード、thread、描画 |
+| `WaveformColumns` / `project_waveform` | Qt非依存の60秒表示窓、bucketからpixel列へのpeak再集約、時刻とx座標の変換 | QWidget、QPainter、Controller、cache |
 | `WaveformAnalysisService` | 専用QThreadのQAudioDecoder、現在sourceのrequest token、部分／完了／失敗通知、cache I/Oの調停 | QWidget、seek、PlaylistModel、再生状態の変更 |
 | `WaveformCache` | キー生成（path + size + mtime + 解析バージョン）、npz の読み書き、破損検出、LRU 削除 | 解析処理そのもの |
+| `WaveformWidget` | pixel列のpaletteベースQPainter描画、中央線、drag preview、release時のseek要求 | Controller、解析Service、cache、decoder |
+| `WaveformPanel` | Controllerと解析ServiceのSignal接続、path/token照合、表示状態とseek委譲 | 波形投影、cache、Backend、再生順 |
 | `PcmTap` / `PcmRingBuffer` | QAudioBuffer の受領、float32 mono への正規化、リングバッファへの書き込み、スナップショット読み出し | FFT、描画 |
 | 各可視化ウィジェット | 固定 FPS タイマーでスナップショットを取得し、`spectrum.py` の純粋関数を通して描画する。hide / 最小化でタイマー停止と PCM タップ解除 | PCM 取得の詳細 |
 | `SettingsSession` | 速度・ピッチ設定の復元、変更監視、デバウンス／終了時保存 | UI、プレイリスト、P6以降の設定 |
@@ -292,12 +297,12 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 ```
 UI 操作 → PlayerControls ──(メソッド呼び出し)──→ PlaybackController ──→ PlaybackBackend
                                                    │ current_entry_changed(entry_id)
-Backend ──position_changed / duration_changed──→ Controller ──→ PlayerControls / WaveformWidget
+Backend ──position_changed / duration_changed──→ Controller ──→ PlayerControls / WaveformPanel
 Backend ──media_status_changed(END_OF_MEDIA)──→ Controller（次曲を決定）
 Backend ──error_occurred(PlaybackError)──→ Controller（該当エントリにエラーを記録し方針を適用）→ PlaylistModel
 QAudioBufferOutput ──audioBufferReceived──→ PcmTap（軽量変換のみ）→ PcmRingBuffer
 QTimer(30FPS) → SpectrumWidget: PcmRingBuffer.snapshot() → FFT → 描画
-WaveformAnalysisService(worker) ──partial / finished(WaveformData)──→ P4-B WaveformWidget
+WaveformAnalysisService(worker) ──partial / finished(WaveformData)──→ WaveformPanel ──→ WaveformWidget
 MetadataReader(worker) ──metadataReady(entry_id, tags)──→ PlaylistModel
 SingleInstanceService ──filesReceived(paths)──→ PlaylistModel へ追加 + Controller で再生 + 前面化
 ```
@@ -395,7 +400,8 @@ UI が Backend を直接触ることは禁止し、import 構成のレビュー�
   cache境界で行い、現在sourceが解析中に変化した場合は専用の`analysis_failed`で必ず要求を終端する。
   source変更とshutdownではthread-safeなcancel状態を即時設定してQAudioDecoderへstopを要求し、workerが
   cancel処理を終えたtokenはregistryから回収する。解析失敗はPlaybackControllerの状態や再生エラーへ
-  混ぜない。
+  混ぜない。request生成前のpath事前確認に失敗した場合もtokenを先に採番し、同じpath/tokenで
+  `analysis_started`、`analysis_failed`の順に通知してUIの解析状態を必ず終端する。
 - **cache key**: 解決済み絶対path、size、mtime_ns、analysis version 1、20ms bucket、mono format
   version 1をcanonical JSONからSHA-256化する。ファイル名はhashだけで、生pathを含めない。
 - **npz schema**: minimum、maximum、bucket_duration_ms、duration_ms、analysis_version、
@@ -413,7 +419,30 @@ UI が Backend を直接触ることは禁止し、import 構成のレビュー�
   `QThread.terminate()`を使わず終了まで待ち、実行中QThreadを所有したままQObjectを破棄しない。
   Qt内部decodeや注入された同期処理が戻らない場合の厳密な終了期限は保証しない。厳密な期限が
   必要になった場合は解析を終了可能な子プロセスへ隔離する。
-- P4-Aでは解析・cacheまでを実装し、画面表示、±30秒追従、クリック／ドラッグseekはP4-Bで追加する。
+- **表示投影**: `project_waveform()`は現在位置を中心とする固定60秒窓だけを、Widget幅と同数の
+  read-only `WaveformColumns`へ再集約する。1pixelに複数bucketが重なる場合はminimumの最小と
+  maximumの最大を採用し、peakを平均で失わない。全trackを走査せず、表示窓と交差する約3,000
+  bucketとpixel列だけを処理する。音源先頭より前、末尾より後、partialの未解析範囲は
+  `valid=False`として空白にし、表示窓を音源側へ寄せないため現在位置線は常に中央となる。
+- **描画**: `WaveformWidget`はQPaletteのBase／Mid／Text／Highlight／Link／PlaceholderTextを
+  使い、各有効pixelにつき最大1本の縦線、振幅0線、中央の現在位置線、drag previewと時刻を
+  QPainterで描く。同一data・中心位置・幅の投影はWidget内で再利用する。
+- **表示調停**: `WaveformPanel`はControllerのsource／position／durationとServiceの
+  started／partial／finished／failed／clearedをWidgetへ接続する。startedでactive path/tokenを
+  記録し、一致しない結果は無視する。source変更とclearでは旧波形・active token・dragを即時解除する。
+  sourceなし、解析中、部分表示、完了、失敗をWidget内の1か所だけに短い日本語で表示し、生のdecoder
+  errorは表示しない。波形がない状態では中央、partial表示中は左上へ描き、別QLabelの表示切替による
+  Panel高の変動を作らない。
+- **duration**: シーク上限は正の`PlaybackController.duration_ms`を優先し、それが未確定の場合だけ
+  completeな`WaveformData.duration_ms`を使う。partialのdurationは総時間として扱わない。
+  描画のbucket時刻は常に`WaveformData.bucket_duration_ms`から求め、Controller durationへ引き延ばさない。
+- **マウスシーク**: xは固定表示窓の`center - 30秒 + x / width * 60秒`へ写し、0～durationへ
+  clampしてhalf-upで丸める。左press時の中心位置をdrag終了まで固定し、move中はpreviewだけを更新、
+  releaseで1回だけController.seekへ委譲する。source変更、clear、hide、disableでdragを取り消す。
+- **composition**: MainWindowはPlayerControls、SpeedPanel、WaveformPanel、PlaylistViewの順に配置する。
+  `app.py`がP4-Aと同じWaveformAnalysisServiceをPanelへ渡し、start／shutdown順序は変更しない。
+- P4は解析・cache・追従表示・クリック／ドラッグseekまで実装済み。P5でPCM tap、スペクトラム、
+  レベルメーターを追加する。
 
 ---
 
