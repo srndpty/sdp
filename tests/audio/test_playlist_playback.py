@@ -16,6 +16,7 @@ from sdp.core.playback.qt_backend import QtMultimediaBackend
 from sdp.core.playback.types import PlaybackState
 from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
+from sdp.core.playlist.types import RepeatMode
 
 LOAD_TIMEOUT_MS = 10_000
 ACTION_TIMEOUT_MS = 5_000
@@ -97,4 +98,61 @@ def test_missing_entry_is_skipped_during_auto_advance(
     qtbot.waitUntil(lambda: controller.current_entry_id == entry_ids[2], timeout=TRACK_TIMEOUT_MS)
     assert playback.source == third.resolve()
     assert playlist.entry_at(1).is_missing
+    assert error_spy.count() == 0
+
+
+def test_repeat_one_replays_the_same_entry(
+    controller: PlaylistPlaybackController,
+    playback: PlaybackController,
+    playlist: PlaylistModel,
+    test_audio_dir: Path,
+    qtbot: QtBot,
+) -> None:
+    """Repeat ONE では曲が終わると同じ entry を読み込み直して再生する。"""
+    source = test_audio_dir / "sine440.wav"
+    entry_ids = playlist.add_paths([source, test_audio_dir / "sine440.mp3"])
+    error_spy = QSignalSpy(playback.error_occurred)
+    sources: list[object] = []
+    playback.source_changed.connect(sources.append)
+
+    assert controller.play_entry(entry_ids[0]) is True
+    controller.set_repeat_mode(RepeatMode.ONE)
+    qtbot.waitUntil(lambda: playback.duration_ms > 0, timeout=LOAD_TIMEOUT_MS)
+    qtbot.waitUntil(lambda: playback.position_ms > 0, timeout=ACTION_TIMEOUT_MS)
+
+    # 曲が終わって同じ source が読み込み直され、位置がまた進む。
+    qtbot.waitUntil(lambda: len(sources) >= 2, timeout=TRACK_TIMEOUT_MS)
+    assert controller.current_entry_id == entry_ids[0]
+    assert playback.source == source.resolve()
+    qtbot.waitUntil(lambda: playback.position_ms > 0, timeout=ACTION_TIMEOUT_MS)
+
+    # 1 回の終了で多重に読み込み直していない（2 回目の終了までは 2 世代）。
+    assert len(sources) == 2
+    controller.set_repeat_mode(RepeatMode.OFF)
+    playback.stop()
+    assert error_spy.count() == 0
+
+
+def test_repeat_all_wraps_to_the_first_entry(
+    controller: PlaylistPlaybackController,
+    playback: PlaybackController,
+    playlist: PlaylistModel,
+    test_audio_dir: Path,
+    qtbot: QtBot,
+) -> None:
+    """Repeat ALL では最後の曲の後に先頭へ折り返す。"""
+    first = test_audio_dir / "sine440.wav"
+    last = test_audio_dir / "sine440.mp3"
+    entry_ids = playlist.add_paths([first, last])
+    error_spy = QSignalSpy(playback.error_occurred)
+
+    controller.set_repeat_mode(RepeatMode.ALL)
+    assert controller.play_entry(entry_ids[1]) is True
+    qtbot.waitUntil(lambda: playback.duration_ms > 0, timeout=LOAD_TIMEOUT_MS)
+
+    qtbot.waitUntil(lambda: controller.current_entry_id == entry_ids[0], timeout=TRACK_TIMEOUT_MS)
+    assert playback.source == first.resolve()
+    qtbot.waitUntil(lambda: playback.position_ms > 0, timeout=ACTION_TIMEOUT_MS)
+
+    playback.stop()
     assert error_spy.count() == 0
