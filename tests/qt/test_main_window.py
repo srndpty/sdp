@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QLabel, QTableView
+from PySide6.QtWidgets import QDoubleSpinBox, QLabel, QTableView
 from pytestqt.qtbot import QtBot
 
 from fakes.fake_playback_backend import FakePlaybackBackend
@@ -21,10 +21,12 @@ from sdp.core.playback.types import (
 )
 from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
+from sdp.core.playlist.types import RepeatMode
 from sdp.ui import main_window as main_window_module
 from sdp.ui.main_window import MainWindow
 from sdp.ui.player_controls import PlayerControls
 from sdp.ui.playlist_view import PlaylistView
+from sdp.ui.speed_panel import SpeedPanel
 
 
 @pytest.fixture
@@ -118,8 +120,10 @@ def test_main_window_delegates_to_child_widgets(
 ) -> None:
     """再生は PlayerControls、プレイリスト操作は PlaylistView へ委譲する。"""
     controls = window.findChild(PlayerControls)
+    speed_panels = window.findChildren(SpeedPanel)
     playlist_views = window.findChildren(PlaylistView)
     assert controls is not None
+    assert len(speed_panels) == 1
     assert len(playlist_views) == 1
     assert playlist_views[0].findChild(QTableView, "playlistTable") is not None
 
@@ -129,11 +133,71 @@ def test_main_window_delegates_to_child_widgets(
         "stop",
         "seek",
         "set_volume",
+        "set_playback_rate",
+        "set_pitch_compensation",
         "add_files",
         "remove_selected",
         "clear_playlist",
     ):
         assert not hasattr(window, forbidden), forbidden
+
+
+def test_speed_panel_keeps_controller_state_across_source_changes(
+    window: MainWindow,
+    controller: PlaybackController,
+    backend: FakePlaybackBackend,
+    audio_file: Path,
+) -> None:
+    """直接loadでsourceが変わっても速度・ピッチ表示を維持する。"""
+    spin_box = window.findChild(QDoubleSpinBox, "playbackRateSpinBox")
+    assert spin_box is not None
+    controller.set_playback_rate(1.5)
+    controller.set_pitch_compensation(False)
+    backend.calls.clear()
+
+    controller.load(audio_file)
+
+    assert spin_box.value() == 1.5
+    assert controller.pitch_compensation is False
+    assert backend.call_names() == ["load"]
+
+
+def test_speed_panel_state_survives_playlist_switch_and_repeat_one(
+    window: MainWindow,
+    controller: PlaybackController,
+    backend: FakePlaybackBackend,
+    playlist_model: PlaylistModel,
+    playlist_playback: PlaylistPlaybackController,
+    tmp_path: Path,
+    qtbot: QtBot,
+) -> None:
+    """プレイリスト曲切替とRepeat ONEのreload後も速度・pitchを維持する。"""
+    sources = [tmp_path / "曲A.wav", tmp_path / "曲B.wav"]
+    for source in sources:
+        source.write_bytes(b"x")
+    entry_ids = playlist_model.add_paths(sources)
+    spin_box = window.findChild(QDoubleSpinBox, "playbackRateSpinBox")
+    assert spin_box is not None
+    controller.set_playback_rate(1.25)
+    controller.set_pitch_compensation(False)
+
+    assert playlist_playback.play_entry(entry_ids[0]) is True
+    assert playlist_playback.play_entry(entry_ids[1]) is True
+    playlist_playback.set_repeat_mode(RepeatMode.ONE)
+    backend.emit_position(100)
+    backend.emit_media_status(MediaStatus.END_OF_MEDIA)
+    qtbot.waitUntil(lambda: len(backend.call_args("load")) == 3)
+
+    assert controller.playback_rate == 1.25
+    assert controller.pitch_compensation is False
+    assert spin_box.value() == 1.25
+    assert backend.call_args("set_playback_rate") == [(1.25,)]
+    assert backend.call_args("set_pitch_compensation") == [(False,)]
+    assert backend.call_args("load") == [
+        (sources[0].resolve(),),
+        (sources[1].resolve(),),
+        (sources[1].resolve(),),
+    ]
 
 
 def test_playlist_view_uses_the_given_model(

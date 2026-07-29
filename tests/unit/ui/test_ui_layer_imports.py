@@ -70,6 +70,25 @@ def test_parent_module_import_is_expanded_to_forbidden_child() -> None:
     assert forbidden_modules(modules) == {"sdp.core.playback.qt_backend"}
 
 
+def test_speed_panel_does_not_import_playlist_or_metadata() -> None:
+    """速度UIは単曲Controllerだけを知り、playlist・metadataへ依存しない。"""
+    source = (UI_DIR / "speed_panel.py").read_text(encoding="utf-8")
+    modules, names = imported_modules_and_names(source)
+    forbidden_modules_for_panel = {
+        "sdp.core.playlist.model",
+        "sdp.core.playlist.playback_controller",
+        "sdp.core.metadata.reader",
+    }
+    forbidden_names_for_panel = {
+        "PlaylistModel",
+        "PlaylistPlaybackController",
+        "MetadataReader",
+    }
+
+    assert not (modules & forbidden_modules_for_panel)
+    assert not (names & forbidden_names_for_panel)
+
+
 @pytest.mark.parametrize(
     "module_path", ui_modules(), ids=lambda path: path.relative_to(UI_DIR).as_posix()
 )
