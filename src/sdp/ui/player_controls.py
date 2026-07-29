@@ -16,6 +16,13 @@ from PySide6.QtWidgets import (
 
 from sdp.core.playback.controller import PlaybackController
 from sdp.core.playback.types import PlaybackState
+from sdp.core.playlist.types import RepeatMode
+
+_REPEAT_LABELS: dict[RepeatMode, str] = {
+    RepeatMode.OFF: "リピート: オフ",
+    RepeatMode.ALL: "リピート: 全曲",
+    RepeatMode.ONE: "リピート: 1曲",
+}
 
 _STATE_LABELS: dict[PlaybackState, str] = {
     PlaybackState.NO_MEDIA: "ファイルが選択されていません",
@@ -59,12 +66,26 @@ class PlayerControls(QWidget):
     next_requested = Signal()
     """次の曲が要求された。"""
 
+    repeat_mode_requested = Signal()
+    """リピートの切り替えが要求された。次のモードを決めるのは Controller。"""
+
+    shuffle_toggled = Signal(bool)
+    """シャッフルの ON/OFF が要求された。"""
+
     def __init__(self, controller: PlaybackController, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._controller = controller
         # ユーザーがシークバーをドラッグしている間は、Backend からの位置通知で
         # つまみを動かさない（操作が奪われるため）。
         self._is_seeking = False
+
+        self._repeat_button = QPushButton(_REPEAT_LABELS[RepeatMode.OFF])
+        self._repeat_button.setObjectName("repeatModeButton")
+        self._repeat_button.setToolTip("リピートの種類を切り替えます（オフ → 全曲 → 1曲）")
+        self._shuffle_button = QPushButton("シャッフル")
+        self._shuffle_button.setObjectName("shuffleButton")
+        self._shuffle_button.setCheckable(True)
+        self._shuffle_button.setToolTip("プレイリストをランダムな順で再生します")
 
         self._previous_button = QPushButton("前の曲")
         self._previous_button.setObjectName("previousTrackButton")
@@ -121,6 +142,11 @@ class PlayerControls(QWidget):
         button_row.addStretch(1)
         button_row.addWidget(self._state_label)
 
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(self._repeat_button)
+        mode_row.addWidget(self._shuffle_button)
+        mode_row.addStretch(1)
+
         volume_row = QHBoxLayout()
         volume_row.addWidget(QLabel("音量"))
         volume_row.addWidget(self._volume_slider, stretch=1)
@@ -129,12 +155,15 @@ class PlayerControls(QWidget):
         layout = QGridLayout(self)
         layout.addLayout(seek_row, 0, 0)
         layout.addLayout(button_row, 1, 0)
-        layout.addLayout(volume_row, 2, 0)
+        layout.addLayout(mode_row, 2, 0)
+        layout.addLayout(volume_row, 3, 0)
 
     def _connect_widgets(self) -> None:
         # 前後曲は再生実装へ触らず、要求としてだけ外へ出す（配線は MainWindow）。
         self._previous_button.clicked.connect(self.previous_requested)
         self._next_button.clicked.connect(self.next_requested)
+        self._repeat_button.clicked.connect(self.repeat_mode_requested)
+        self._shuffle_button.toggled.connect(self.shuffle_toggled)
         self._play_button.clicked.connect(self._on_play_clicked)
         self._pause_button.clicked.connect(self._on_pause_clicked)
         self._stop_button.clicked.connect(self._on_stop_clicked)
@@ -166,6 +195,21 @@ class PlayerControls(QWidget):
         """前後曲ボタンの活性を設定する。判定はプレイリスト側の責務。"""
         self._previous_button.setEnabled(previous)
         self._next_button.setEnabled(next_)
+
+    def set_repeat_mode(self, mode: RepeatMode) -> None:
+        """リピートの表示を更新する。モードを決めるのは Controller。
+
+        色ではなく文字列で区別する。未知の値は曖昧な表示へ丸めず ``KeyError``。
+        """
+        self._repeat_button.setText(_REPEAT_LABELS[mode])
+
+    def set_shuffle_enabled(self, enabled: bool) -> None:
+        """シャッフルボタンの状態を同期する。
+
+        UI 更新が Controller への再設定を呼び戻さないよう、シグナルを止めて反映する。
+        """
+        with QSignalBlocker(self._shuffle_button):
+            self._shuffle_button.setChecked(enabled)
 
     # -- ウィジェット操作 ---------------------------------------------------
 

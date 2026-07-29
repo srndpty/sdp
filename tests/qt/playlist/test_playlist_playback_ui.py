@@ -19,6 +19,7 @@ from fakes.fake_playback_backend import FakePlaybackBackend
 from sdp.core.playback.controller import PlaybackController
 from sdp.core.playlist.model import Column, PlaylistModel
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
+from sdp.core.playlist.types import RepeatMode
 from sdp.ui import playlist_view as playlist_view_module
 from sdp.ui.main_window import MainWindow
 from sdp.ui.player_controls import PlayerControls
@@ -468,3 +469,141 @@ def test_main_window_has_no_track_search_logic(
     window, _ = wired_window
     for forbidden in ("play_next", "play_previous", "play_entry", "_find_playable_row"):
         assert not hasattr(window, forbidden), forbidden
+
+
+# -- リピート・シャッフル UI ------------------------------------------------
+
+
+def test_repeat_and_shuffle_buttons_exist_with_initial_state(
+    controls: PlayerControls,
+) -> None:
+    """リピートは「オフ」表示、シャッフルは未チェックで始まる。"""
+    assert control_button(controls, "repeatModeButton").text() == "リピート: オフ"
+    assert not control_button(controls, "shuffleButton").isChecked()
+    assert control_button(controls, "shuffleButton").isCheckable()
+
+
+def test_repeat_button_emits_a_request_once(controls: PlayerControls) -> None:
+    """リピートボタンは要求を 1 回出すだけで、自分では表示を変えない。"""
+    requests: list[int] = []
+    controls.repeat_mode_requested.connect(lambda: requests.append(1))
+
+    control_button(controls, "repeatModeButton").click()
+
+    assert requests == [1]
+    assert control_button(controls, "repeatModeButton").text() == "リピート: オフ"
+
+
+def test_shuffle_button_emits_a_bool_once(controls: PlayerControls) -> None:
+    """シャッフルボタンは ON/OFF を bool で 1 回ずつ出す。"""
+    toggles: list[bool] = []
+    controls.shuffle_toggled.connect(toggles.append)
+
+    control_button(controls, "shuffleButton").click()
+    control_button(controls, "shuffleButton").click()
+
+    assert toggles == [True, False]
+
+
+@pytest.mark.parametrize(
+    ("mode", "text"),
+    [
+        (RepeatMode.OFF, "リピート: オフ"),
+        (RepeatMode.ALL, "リピート: 全曲"),
+        (RepeatMode.ONE, "リピート: 1曲"),
+    ],
+)
+def test_repeat_mode_is_displayed_as_text(
+    controls: PlayerControls, mode: RepeatMode, text: str
+) -> None:
+    """モードは色ではなく文字列で区別できる。"""
+    controls.set_repeat_mode(mode)
+
+    assert control_button(controls, "repeatModeButton").text() == text
+
+
+def test_unknown_repeat_mode_is_not_rounded(controls: PlayerControls) -> None:
+    """未知の値を曖昧な表示へ丸めない。"""
+    with pytest.raises(KeyError):
+        controls.set_repeat_mode("ALL")  # pyright: ignore[reportArgumentType]
+
+
+def test_shuffle_state_from_the_controller_does_not_loop_back(
+    controls: PlayerControls,
+) -> None:
+    """Controller 由来の更新で checked が同期し、要求シグナルを出し直さない。"""
+    toggles: list[bool] = []
+    controls.shuffle_toggled.connect(toggles.append)
+
+    controls.set_shuffle_enabled(True)
+
+    assert control_button(controls, "shuffleButton").isChecked()
+    assert toggles == []
+
+
+def test_playback_state_changes_do_not_break_repeat_and_shuffle(
+    controls: PlayerControls,
+) -> None:
+    """再生状態の更新でリピート表示やシャッフル状態が壊れない。"""
+    controls.set_repeat_mode(RepeatMode.ONE)
+    controls.set_shuffle_enabled(True)
+
+    control_button(controls, "playButton").click()
+
+    assert control_button(controls, "repeatModeButton").text() == "リピート: 1曲"
+    assert control_button(controls, "shuffleButton").isChecked()
+
+
+def test_repeat_and_shuffle_requests_reach_the_controller(
+    wired_window: tuple[MainWindow, PlaylistModel], audio_files: list[Path]
+) -> None:
+    """ボタン操作が PlaylistPlaybackController まで届き、状態が UI へ返る。"""
+    window, model = wired_window
+    model.add_paths(audio_files)
+    controls = window.findChild(PlayerControls)
+    assert controls is not None
+    repeat_button = control_button(controls, "repeatModeButton")
+    shuffle_button = control_button(controls, "shuffleButton")
+
+    repeat_button.click()
+    assert repeat_button.text() == "リピート: 全曲"
+    repeat_button.click()
+    assert repeat_button.text() == "リピート: 1曲"
+    repeat_button.click()
+    assert repeat_button.text() == "リピート: オフ"
+
+    shuffle_button.click()
+    assert shuffle_button.isChecked()
+    shuffle_button.click()
+    assert not shuffle_button.isChecked()
+
+
+def test_initial_repeat_and_shuffle_state_is_applied_on_wiring(qtbot: QtBot) -> None:
+    """接続直後に現在の repeat / shuffle 状態が UI へ反映される。"""
+    playback = PlaybackController(FakePlaybackBackend())
+    model = PlaylistModel()
+    playlist_playback = PlaylistPlaybackController(playback, model)
+    playlist_playback.set_repeat_mode(RepeatMode.ALL)
+    playlist_playback.set_shuffle_enabled(True)
+
+    window = MainWindow(playback, model, playlist_playback)
+    qtbot.addWidget(window)
+
+    controls = window.findChild(PlayerControls)
+    assert controls is not None
+    assert control_button(controls, "repeatModeButton").text() == "リピート: 全曲"
+    assert control_button(controls, "shuffleButton").isChecked()
+
+
+def test_playlist_view_does_not_know_repeat_or_shuffle() -> None:
+    """PlaylistView はリピートもシャッフルも知らない。"""
+    for forbidden in ("RepeatMode", "PlaylistPlaybackController"):
+        assert not hasattr(playlist_view_module, forbidden), forbidden
+
+
+def test_player_controls_does_not_hold_the_playlist_controller(
+    controls: PlayerControls,
+) -> None:
+    """PlayerControls は PlaylistPlaybackController を保持しない。"""
+    for forbidden in ("playlist_playback", "play_next", "play_previous", "cycle_repeat_mode"):
+        assert not hasattr(controls, forbidden), forbidden

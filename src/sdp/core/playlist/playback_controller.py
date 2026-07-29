@@ -6,9 +6,11 @@ PlaybackController は「1 つの source の再生」だけを担当し、曲順
 依存の向き: PlaylistPlaybackController → PlaybackController → PlaybackBackend
              PlaylistPlaybackController → PlaylistModel
 
-リピートとシャッフルは P2-C2 で追加する。
+リピート・シャッフル・再生履歴もここが持つ。プレイリストの表示順（Model の行順）は
+シャッフルで変更せず、再生順だけを別に管理する。
 """
 
+import random
 from enum import Enum, auto
 from pathlib import Path
 
@@ -17,6 +19,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from sdp.core.playback.controller import PlaybackController
 from sdp.core.playback.types import MediaStatus
 from sdp.core.playlist.model import PlaylistModel
+from sdp.core.playlist.types import RepeatMode, next_repeat_mode
 
 MISSING_FILE_MESSAGE = "ファイルが見つからないため再生できません。"
 END_OF_PLAYLIST_MESSAGE = "プレイリストの最後まで再生しました。"
@@ -46,15 +49,30 @@ class PlaylistPlaybackController(QObject):
 
     message_requested = Signal(str)
 
+    repeat_mode_changed = Signal(RepeatMode)
+    shuffle_enabled_changed = Signal(bool)
+
     def __init__(
         self,
         playback: PlaybackController,
         playlist: PlaylistModel,
+        *,
+        rng: random.Random | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._playback = playback
         self._playlist = playlist
+        # モジュールのグローバル random 状態へ依存しない。テストだけ seed を注入する。
+        self._rng = random.Random() if rng is None else rng
+        self._repeat_mode = RepeatMode.OFF
+        self._shuffle_enabled = False
+        # シャッフル中に実際に通った順序。cursor が現在 entry の位置を指す。
+        # 「前の曲」は再抽選ではなく、この履歴を戻る操作にする。
+        self._history: list[str] = []
+        self._history_cursor = -1
+        # 現在のシャッフルサイクルで再生済みの entry_id。
+        self._visited: set[str] = set()
         self._current_entry_id: str | None = None
         # play_entry() から load している最中だけ設定する。source_changed を
         # 受けたときに「自分が読み込んだのか、外から開かれたのか」を区別する。
@@ -97,6 +115,48 @@ class PlaylistPlaybackController(QObject):
     def can_play_next(self) -> bool:
         return self._can_play_next
 
+    @property
+    def repeat_mode(self) -> RepeatMode:
+        return self._repeat_mode
+
+    @property
+    def shuffle_enabled(self) -> bool:
+        return self._shuffle_enabled
+
+    # -- 設定 ---------------------------------------------------------------
+
+    def set_repeat_mode(self, mode: RepeatMode) -> None:
+        """繰り返しの種類を設定する。不正な値は silent fallback せず ``TypeError``。"""
+        # 型注釈があるため静的には不要だが、UI やシグナル経由の呼び出しは実行時に
+        # 型検査されない。既定値へ丸めず、その場で誤りを検出できるようにする。
+        if not isinstance(mode, RepeatMode):  # pyright: ignore[reportUnnecessaryIsInstance]
+            raise TypeError(f"RepeatMode を指定してください: {mode!r}")
+        if mode is self._repeat_mode:
+            return
+        self._repeat_mode = mode
+        self.repeat_mode_changed.emit(mode)
+        self._update_navigation_availability()
+
+    def cycle_repeat_mode(self) -> None:
+        """OFF → ALL → ONE → OFF の順で切り替える。"""
+        self.set_repeat_mode(next_repeat_mode(self._repeat_mode))
+
+    def set_shuffle_enabled(self, enabled: bool) -> None:
+        """シャッフルを切り替える。再生中の音声は止めず、読み込み直しもしない。
+
+        ON にした時点の現在 entry は、そのシャッフルセッションの最初の訪問済みとして扱う。
+        OFF にすると履歴とサイクルを破棄し、次の曲送りから Model の行順を使う。
+        再度 ON にしても古い履歴は復元せず、新しいセッションとして始める。
+        """
+        if type(enabled) is not bool:
+            raise TypeError(f"bool を指定してください: {enabled!r}")
+        if enabled == self._shuffle_enabled:
+            return
+        self._shuffle_enabled = enabled
+        self._reset_shuffle_session()
+        self.shuffle_enabled_changed.emit(enabled)
+        self._update_navigation_availability()
+
     # -- 操作 ---------------------------------------------------------------
 
     def play_entry(self, entry_id: str) -> bool:
@@ -105,18 +165,34 @@ class PlaylistPlaybackController(QObject):
         ユーザーが明示的に選んだ操作のため、**欠損していても別の曲へは移動しない**。
         実際にデコード・再生開始できたかは、PlaybackController の状態・エラーシグナルで
         後から通知される。再生エラーでも現在entryは維持し、自動スキップしない。
+
+        シャッフル中は、要求が成立してから履歴へ反映する（未来履歴は切り捨てる）。
         """
-        return self._attempt_play_entry(entry_id, report_missing=True) is _PlayAttempt.STARTED
+        started = self._attempt_play_entry(entry_id, report_missing=True) is _PlayAttempt.STARTED
+        if started and self._shuffle_enabled:
+            self._append_history(entry_id)
+        return started
 
     def play_next(self) -> bool:
-        """次の再生可能な entry へ進む。末尾で折り返さない（P2-C2 の Repeat ALL の責務）。"""
+        """次の再生可能な entry へ進む。
+
+        シャッフル中は「未来履歴 → 未訪問候補 → （Repeat ALL なら）新サイクル」の順。
+        Repeat ONE は自動の曲終わりだけへ効き、手動の「次の曲」は妨げない。
+        """
+        if self._shuffle_enabled:
+            return self._play_shuffled_next() is _PlayAttempt.STARTED
         return self._play_candidates(forward=True) is _PlayAttempt.STARTED
 
     def play_previous(self) -> bool:
-        """前の再生可能な entry へ戻る。先頭で折り返さない。
+        """前の再生可能な entry へ戻る。
 
-        「数秒以上再生していたら曲頭へ戻す」という挙動は P2-C1 では入れない。
+        シャッフル中は再抽選せず、実際に通った履歴を戻る。履歴の先頭より前へは進まない
+        （Repeat ALL でも折り返さない。折り返すのはシャッフル OFF の行順のときだけ）。
+
+        「数秒以上再生していたら曲頭へ戻す」という挙動は入れない。
         """
+        if self._shuffle_enabled:
+            return self._play_shuffled_previous()
         return self._play_candidates(forward=False) is _PlayAttempt.STARTED
 
     # -- 内部: 再生 ---------------------------------------------------------
@@ -181,6 +257,8 @@ class PlaylistPlaybackController(QObject):
         """現在位置から指定方向にあるentry_idを曲順で返す。
 
         現在 entry が無い場合は、前方探索なら先頭から、後方探索なら末尾から探す。
+        Repeat ALL では端で折り返し、最後に現在 entry 自身も候補へ含める
+        （利用可能な entry が 1 件だけのときに繰り返せるようにするため）。
         entry_idのスナップショットにすることで、状態更新中の行変化に影響されない。
         """
         total = self._playlist.rowCount()
@@ -193,12 +271,149 @@ class PlaylistPlaybackController(QObject):
         )
         if forward:
             start = 0 if current_row is None else current_row + 1
-            candidates = range(start, total)
+            rows = list(range(start, total))
+            if self._repeat_mode is RepeatMode.ALL and current_row is not None:
+                rows.extend(range(current_row + 1))
         else:
             start = total - 1 if current_row is None else current_row - 1
-            candidates = range(start, -1, -1)
+            rows = list(range(start, -1, -1))
+            if self._repeat_mode is RepeatMode.ALL and current_row is not None:
+                rows.extend(range(total - 1, current_row - 1, -1))
 
-        return tuple(self._playlist.entry_at(row).entry_id for row in candidates)
+        return tuple(self._playlist.entry_at(row).entry_id for row in rows)
+
+    # -- 内部: シャッフル ---------------------------------------------------
+
+    def _play_shuffled_next(self) -> _PlayAttempt:
+        """未来履歴 → 未訪問候補 → 新サイクルの順に試す。"""
+        history_attempt = self._play_history_forward()
+        if history_attempt is not _PlayAttempt.NOT_FOUND:
+            return history_attempt
+        candidate_attempt = self._play_random_candidates(self._unvisited_entry_ids())
+        if candidate_attempt is not _PlayAttempt.NOT_FOUND:
+            return candidate_attempt
+        if self._repeat_mode is not RepeatMode.ALL:
+            # Repeat ONE でも手動の「次の曲」は OFF と同じ扱い（現在曲を繰り返さない）。
+            return _PlayAttempt.NOT_FOUND
+        return self._start_new_shuffle_cycle()
+
+    def _play_shuffled_previous(self) -> bool:
+        """履歴を戻る。新しい候補は選ばない。"""
+        if self._current_entry_id is None:
+            return False
+        index = self._history_cursor - 1
+        while index >= 0:
+            entry_id = self._history[index]
+            attempt = self._attempt_play_entry(entry_id, report_missing=False)
+            if attempt is _PlayAttempt.STARTED:
+                self._history_cursor = index
+                self._update_navigation_availability()
+                return True
+            if attempt is _PlayAttempt.REJECTED:
+                return False
+            # 削除済み・欠損の履歴要素は取り除いて安全に飛ばす。
+            del self._history[index]
+            self._history_cursor -= 1
+            index -= 1
+        return False
+
+    def _play_history_forward(self) -> _PlayAttempt:
+        """previous で戻ったあとの「次の曲」で、まず履歴の未来側へ進む。"""
+        index = self._history_cursor + 1
+        while index < len(self._history):
+            entry_id = self._history[index]
+            attempt = self._attempt_play_entry(entry_id, report_missing=False)
+            if attempt is _PlayAttempt.STARTED:
+                self._history_cursor = index
+                self._visited.add(entry_id)
+                self._update_navigation_availability()
+                return attempt
+            if attempt is _PlayAttempt.REJECTED:
+                return attempt
+            del self._history[index]
+        return _PlayAttempt.NOT_FOUND
+
+    def _play_random_candidates(self, entry_ids: list[str]) -> _PlayAttempt:
+        """候補をランダム順に試し、最初に再生できたものを履歴へ積む。
+
+        欠損や削除済みは飛ばす（候補は有限なので探索も有限で終わる）。
+        デコード失敗のような同期的に判定できない失敗では次候補へ移らない。
+        """
+        self._rng.shuffle(entry_ids)
+        for entry_id in entry_ids:
+            attempt = self._attempt_play_entry(entry_id, report_missing=False)
+            if attempt is _PlayAttempt.STARTED:
+                self._append_history(entry_id)
+                return attempt
+            if attempt is _PlayAttempt.REJECTED:
+                return attempt
+        return _PlayAttempt.NOT_FOUND
+
+    def _start_new_shuffle_cycle(self) -> _PlayAttempt:
+        """Repeat ALL で全候補を消化したあと、新しいサイクルを始める。"""
+        candidates = self._available_entry_ids()
+        if not candidates:
+            return _PlayAttempt.NOT_FOUND
+        self._visited.clear()
+        if len(candidates) > 1 and self._current_entry_id in candidates:
+            # 候補が 2 件以上あるなら、サイクル境界で直前の曲を即座に選び直さない。
+            candidates.remove(self._current_entry_id)
+        return self._play_random_candidates(candidates)
+
+    def _available_entry_ids(self) -> list[str]:
+        """保持済みの状態で再生できそうな entry_id（ファイルへは触らない）。"""
+        return [entry.entry_id for entry in self._playlist.entries() if not entry.is_missing]
+
+    def _unvisited_entry_ids(self) -> list[str]:
+        return [
+            entry_id for entry_id in self._available_entry_ids() if entry_id not in self._visited
+        ]
+
+    def _append_history(self, entry_id: str) -> None:
+        """履歴の現在位置より後ろを捨て、末尾へ追加する。
+
+        現在位置と同じ entry_id なら重複追加しない。
+        """
+        self._visited.add(entry_id)
+        if 0 <= self._history_cursor < len(self._history):
+            if self._history[self._history_cursor] == entry_id:
+                self._update_navigation_availability()
+                return
+            del self._history[self._history_cursor + 1 :]
+        self._history.append(entry_id)
+        self._history_cursor = len(self._history) - 1
+        self._update_navigation_availability()
+
+    def _reset_shuffle_session(self) -> None:
+        """履歴とサイクルを捨てる。現在 entry と再生中の音声はそのまま。"""
+        self._history.clear()
+        self._visited.clear()
+        self._history_cursor = -1
+        if self._shuffle_enabled and self._current_entry_id is not None:
+            # ON にした時点の現在 entry を、このセッションの最初の訪問済みとして扱う。
+            self._history.append(self._current_entry_id)
+            self._history_cursor = 0
+            self._visited.add(self._current_entry_id)
+
+    def _prune_history(self) -> None:
+        """プレイリストから消えた entry を履歴から取り除き、cursor を保つ。"""
+        existing_ids = {entry.entry_id for entry in self._playlist.entries()}
+        old_history = self._history
+        old_cursor = self._history_cursor
+        new_history: list[str] = []
+        new_cursor = -1
+
+        for old_index, entry_id in enumerate(old_history):
+            if entry_id not in existing_ids:
+                continue
+            new_history.append(entry_id)
+            if old_index <= old_cursor:
+                new_cursor = len(new_history) - 1
+
+        self._history = new_history
+        self._history_cursor = new_cursor
+        # 未来履歴から外れていても、Modelに残る訪問済みentryは維持する。
+        self._visited.intersection_update(existing_ids)
 
     # -- 内部: 通知の受信 ---------------------------------------------------
 
@@ -251,6 +466,20 @@ class PlaylistPlaybackController(QObject):
         if self._current_entry_id != entry_id or self._playback.source != source:
             # 遅延している間に手動で切り替わった。古い通知は適用しない。
             return
+
+        if self._repeat_mode is RepeatMode.ONE:
+            # 現在 entry を読み込み直して再生する（seek(0) では Backend の状態差を隠す）。
+            # 履歴とサイクルの消化状態は進めない。
+            self._attempt_play_entry(entry_id, report_missing=False)
+            return
+
+        if self._shuffle_enabled:
+            attempt = self._play_shuffled_next()
+            if attempt is _PlayAttempt.NOT_FOUND:
+                self.message_requested.emit(END_OF_PLAYLIST_MESSAGE)
+                self._update_navigation_availability()
+            return
+
         attempt = self._play_candidates(forward=True)
         if attempt is _PlayAttempt.NOT_FOUND:
             # 末尾。current_entry_id は最後の entry のまま保つ。
@@ -260,6 +489,9 @@ class PlaylistPlaybackController(QObject):
     def _on_playlist_rows_changed(self, parent: object, first: int, last: int) -> None:
         del parent, first, last
         self._drop_current_if_gone()
+        # 現在 entry が残っている場合は、消えた entry だけ履歴から取り除く。
+        # 追加された entry は未訪問なので、自然に次のサイクルの候補へ入る。
+        self._prune_history()
         self._update_navigation_availability()
 
     def _on_playlist_rows_moved(
@@ -277,6 +509,7 @@ class PlaylistPlaybackController(QObject):
 
     def _on_playlist_reset(self) -> None:
         self._drop_current_if_gone()
+        self._prune_history()
         self._update_navigation_availability()
 
     def _on_playlist_data_changed(self, top_left: object, bottom_right: object) -> None:
@@ -301,6 +534,12 @@ class PlaylistPlaybackController(QObject):
         if entry_id == self._current_entry_id:
             return
         self._current_entry_id = entry_id
+        if entry_id is None:
+            # 現在 entry の削除、または「開く...」による直接読み込み。
+            # シャッフルのセッションは意味を失うため捨てる（設定自体は変えない）。
+            self._history.clear()
+            self._visited.clear()
+            self._history_cursor = -1
         self.current_entry_changed.emit(entry_id)
         self._update_navigation_availability()
 
@@ -311,13 +550,43 @@ class PlaylistPlaybackController(QObject):
         （モデル変更のたびに全行を stat しないため）。実際の可否は
         :meth:`play_next` / :meth:`play_previous` の探索時に確定する。
         """
-        can_previous = self._has_available_row(forward=False)
-        can_next = self._has_available_row(forward=True)
+        can_previous, can_next = self._compute_navigation_availability()
         if (can_previous, can_next) == (self._can_play_previous, self._can_play_next):
             return
         self._can_play_previous = can_previous
         self._can_play_next = can_next
         self.navigation_availability_changed.emit(can_previous, can_next)
+
+    def _compute_navigation_availability(self) -> tuple[bool, bool]:
+        """リピート・シャッフルを踏まえた前後曲の可否。
+
+        Repeat ONE は自動の曲終わりだけへ効くので、手動の可否は OFF と同じ。
+        """
+        if self._shuffle_enabled:
+            return self._compute_shuffle_navigation()
+        if self._repeat_mode is RepeatMode.ALL:
+            available = any(not entry.is_missing for entry in self._playlist.entries())
+            return (available, available)
+        return (self._has_available_row(forward=False), self._has_available_row(forward=True))
+
+    def _compute_shuffle_navigation(self) -> tuple[bool, bool]:
+        if self._current_entry_id is None:
+            return (False, bool(self._available_entry_ids()))
+        can_previous = self._has_playable_history(range(self._history_cursor - 1, -1, -1))
+        can_next = (
+            self._has_playable_history(range(self._history_cursor + 1, len(self._history)))
+            or bool(self._unvisited_entry_ids())
+            or (self._repeat_mode is RepeatMode.ALL and bool(self._available_entry_ids()))
+        )
+        return (can_previous, can_next)
+
+    def _has_playable_history(self, indexes: range) -> bool:
+        for index in indexes:
+            entry_id = self._history[index]
+            row = self._playlist.row_of_entry_id(entry_id)
+            if row is not None and not self._playlist.entry_at(row).is_missing:
+                return True
+        return False
 
     def _has_available_row(self, *, forward: bool) -> bool:
         total = self._playlist.rowCount()
