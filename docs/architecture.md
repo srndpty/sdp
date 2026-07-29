@@ -379,7 +379,7 @@ Mutagen による非同期メタデータ取得と表示（P2-D）。
 
 実装済みなのは `ui/playlist_view.py` と `services/playlist_session.py`、
 および Model の D&D。プレイリストからの逐次再生・現在曲・前後曲・
-リピート・シャッフルはP2-Cで実装済み。メタデータは未実装（P2-D）。
+リピート・シャッフルはP2-C、メタデータはP2-Dで実装済み。
 
 - **`PlaylistView`**: 受け取るのは `PlaylistModel` だけ。表示、ファイル追加、
   削除、全消去、選択に応じたボタン活性、短いステータスメッセージの要求
@@ -513,7 +513,8 @@ Mutagen による非同期メタデータ取得と表示（P2-D）。
   欠損になったら値を捨てて `NOT_REQUESTED` へ戻し、復活したら読み直せるようにする。
 - **`PlaylistEntry`**: `metadata`（不変値）と `metadata_status` を持つだけで、
   読み取りはしない。`LOADED` のときだけ値を持ち、それ以外は `None`。
-  メタデータ更新で entry_id・path・file_status は変えない。
+  メタデータ更新で entry_id・path・file_status は変えず、内部限定のcloneは
+  `__post_init__`を通さないためGUIスレッドでファイル状態を再調査しない。
 - **タグの正規化**: easy tags の複数値に備え、title / album は最初の非空値、
   artist は非空値を順序どおり `/` で結合（1 件なら区切りなし）。前後の空白は除去し、
   空だけなら `None`。文字列でない値は無理に文字列化せず無視する。
@@ -529,12 +530,16 @@ Mutagen による非同期メタデータ取得と表示（P2-D）。
 - **古い結果の防止**: 要求ごとに単調増加のトークンを付け、結果には
   entry_id・path・token を含める。反映前に「shutdown していない」「最新トークン」
   「entry がまだある」「path が一致」「欠損していない」「`LOADING` である」を確認する。
-  **パスから別 entry へ結果を流用しない。** 破棄は通常運転で起こるため debug ログのみ。
+  **パスから別 entry へ結果を流用しない。** 削除・欠損・reset・適用不能で不要になった
+  tokenは回収し、古い結果で新しいtokenを消さない。破棄は通常運転で起こるためdebugログのみ。
 - **反映は GUI スレッド**: ワーカーの結果シグナルは自動的にキュー接続で GUI スレッドへ渡る。
   Model の更新は entry_id 単位（`mark_metadata_loading` / `apply_metadata` /
   `mark_metadata_failed` / `clear_metadata`）で、`beginResetModel` は使わない。
-- **shutdown**: 新規要求を止め、トークンを無効化し、未開始タスクを `clear()` し、
-  最大数秒だけ待つ。実行中の同期 I/O は強制終了せず、結果を無視する論理キャンセル。
+- **shutdown（協調的停止）**: 新規要求を止め、トークンを無効化し、未開始タスクを
+  `clear()`し、`shutdown()`内では最大3秒だけ待つ。実行中の同期I/Oは強制終了せず、
+  結果を無視する論理キャンセルとする。ただしQThreadPool破棄は実行中タスクを待つため、
+  ネットワークドライブや故障媒体でI/O自体が戻らない場合、**プロセス終了の3秒上限は
+  保証しない**。厳密な終了期限が必要になった場合は読取を終了可能な子プロセスへ隔離する。
 - **列と role**: タイトル / アーティスト / アルバム / 長さ / パスの 5 列
   （`Column.NAME` は `TITLE` の別名として残す）。
   role は `TITLE_ROLE` / `ARTIST_ROLE` / `ALBUM_ROLE` / `DURATION_MS_ROLE` /
@@ -544,7 +549,8 @@ Mutagen による非同期メタデータ取得と表示（P2-D）。
   追加直後から曲を識別できる（「読み込み中...」でタイトルを置き換えない）。
 - **`dataChanged` の範囲**: `LOADING` は状態 role だけ、`LOADED` / `FAILED` は
   タイトルから長さまでの列を表示 role と各メタデータ role で通知する。
-  値が変わらなければ通知しない。
+  ファイル状態の変化ではメタデータ破棄も伴うため、タイトルからパスまでを
+  file status・全メタデータ・表示・ツールチップroleで通知する。値が変わらなければ通知しない。
 - **再生制御との分離**: `PlaylistPlaybackController` は `dataChanged` の roles を見て、
   **メタデータだけの変化では何もしない**（曲順・履歴・可否・現在 entry を触らない）。
   roles が空なら従来どおり可否を計算し直す。

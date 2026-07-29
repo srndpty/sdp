@@ -563,9 +563,14 @@ class PlaylistModel(QAbstractTableModel):
             return False
         self._entries[row] = refreshed
         self.dataChanged.emit(
-            self.index(row, 0),
-            self.index(row, len(Column) - 1),
-            [FILE_STATUS_ROLE],
+            self.index(row, Column.TITLE),
+            self.index(row, Column.PATH),
+            [
+                FILE_STATUS_ROLE,
+                *METADATA_ROLES,
+                int(Qt.ItemDataRole.DisplayRole),
+                int(Qt.ItemDataRole.ToolTipRole),
+            ],
         )
         return True
 

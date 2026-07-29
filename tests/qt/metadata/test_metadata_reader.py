@@ -299,6 +299,30 @@ def test_result_for_a_removed_entry_is_discarded(
     assert playlist.rowCount() == 0
 
 
+def test_removing_many_loading_entries_reclaims_tokens(
+    playlist: PlaylistModel, tmp_path: Path, qtbot: QtBot
+) -> None:
+    """大量削除でtokenを回収し、遅れて届く結果も適用しない。"""
+    paths = [tmp_path / f"削除曲 {index:03d}.wav" for index in range(100)]
+    for path in paths:
+        path.write_bytes(b"x")
+    read_function = RecordingReader()
+    read_function.hold()
+    reader = MetadataReader(playlist, read_function=read_function, max_threads=1)
+    playlist.add_paths(paths)
+    reader.start()
+    qtbot.waitUntil(lambda: read_function.started.is_set(), timeout=WAIT_TIMEOUT_MS)
+    assert len(reader._tokens) == 100  # pyright: ignore[reportPrivateUsage]
+
+    assert playlist.removeRows(0, 100) is True
+
+    assert reader._tokens == {}  # pyright: ignore[reportPrivateUsage]
+    read_function.release()
+    qtbot.wait(50)
+    assert playlist.rowCount() == 0
+    reader.shutdown(timeout_ms=2_000)
+
+
 def test_result_from_before_a_reset_is_discarded(
     reader: MetadataReader,
     playlist: PlaylistModel,
@@ -367,13 +391,14 @@ def test_result_with_a_different_path_is_ignored(
             metadata=TrackMetadata(title="別ファイル"),
         )
     )
+    assert entry_ids[0] not in reader._tokens  # pyright: ignore[reportPrivateUsage]
+    assert playlist.entry_at(0).metadata_status is MetadataStatus.FAILED
+    assert playlist.entry_at(0).metadata is None
     read_function.release()
+    qtbot.wait(50)
 
-    qtbot.waitUntil(
-        lambda: playlist.entry_at(0).metadata_status is MetadataStatus.LOADED,
-        timeout=WAIT_TIMEOUT_MS,
-    )
-    assert playlist.entry_at(0).metadata == SAMPLE
+    # 同じtokenの遅延結果も復活させない。
+    assert playlist.entry_at(0).metadata_status is MetadataStatus.FAILED
 
 
 def test_result_for_a_file_that_disappeared_is_ignored(
@@ -391,6 +416,7 @@ def test_result_for_a_file_that_disappeared_is_ignored(
 
     audio_files[0].unlink()
     playlist.refresh_entry_status(entry_ids[0])
+    assert entry_ids[0] not in reader._tokens  # pyright: ignore[reportPrivateUsage]
     read_function.release()
     qtbot.wait(50)
 
@@ -499,6 +525,31 @@ def test_shutdown_clears_pending_tasks_and_returns(
     assert reader.is_running is False
     # 全 50 件が実行される前に終わっている。
     assert read_function.call_count() < len(paths)
+
+
+def test_shutdown_timeout_is_only_a_logical_cancellation(
+    playlist: PlaylistModel,
+    audio_files: list[Path],
+    qtbot: QtBot,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """実行中I/Oは強制停止せず、待機timeout後は警告して論理キャンセルする。"""
+    read_function = RecordingReader()
+    read_function.hold()
+    reader = MetadataReader(playlist, read_function=read_function, max_threads=1)
+    playlist.add_paths(audio_files[:1])
+    reader.start()
+    qtbot.waitUntil(lambda: read_function.started.is_set(), timeout=WAIT_TIMEOUT_MS)
+
+    with caplog.at_level("WARNING"):
+        reader.shutdown(timeout_ms=10)
+
+    assert not reader.is_running
+    assert "終了待ちがタイムアウト" in caplog.text
+
+    # QThreadPool破棄は実行中タスクを待つため、テストの終了前に協調的に解放する。
+    read_function.release()
+    assert reader._pool.waitForDone(2_000)  # pyright: ignore[reportPrivateUsage]
 
 
 def test_shutdown_is_idempotent(reader: MetadataReader) -> None:

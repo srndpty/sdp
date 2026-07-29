@@ -13,6 +13,7 @@ from sdp.core.playlist.model import (
     ALBUM_ROLE,
     ARTIST_ROLE,
     DURATION_MS_ROLE,
+    FILE_STATUS_ROLE,
     METADATA_FAILED_TOOLTIP,
     METADATA_STATUS_ROLE,
     TITLE_ROLE,
@@ -190,6 +191,25 @@ def test_metadata_update_keeps_identity(model: PlaylistModel, audio_files: list[
     )
 
 
+def test_metadata_transitions_do_not_probe_the_filesystem(
+    model: PlaylistModel,
+    audio_files: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """メタデータだけの不変更新ではGUIスレッドからファイル状態を再調査しない。"""
+    entry_ids = model.add_paths(audio_files[:1])
+
+    def unexpected_probe(path: Path) -> object:
+        raise AssertionError(f"不要なファイル状態調査: {path}")
+
+    monkeypatch.setattr("sdp.core.playlist.entry.probe_file_status", unexpected_probe)
+
+    assert model.mark_metadata_loading(entry_ids[0]) is True
+    assert model.apply_metadata(entry_ids[0], SAMPLE) is True
+    assert model.mark_metadata_failed(entry_ids[0]) is True
+    assert model.clear_metadata(entry_ids[0]) is True
+
+
 # -- role -------------------------------------------------------------------
 
 
@@ -360,6 +380,32 @@ def test_metadata_is_dropped_when_the_file_disappears(
     assert entry.metadata is None
     assert entry.metadata_status is MetadataStatus.NOT_REQUESTED
     assert display(model, 0, Column.TITLE) == audio_files[0].name
+
+
+def test_file_status_change_notifies_metadata_and_display_roles(
+    model: PlaylistModel, audio_files: list[Path]
+) -> None:
+    """欠損化で破棄されるメタデータを、全関連roleと列範囲で通知する。"""
+    entry_ids = model.add_paths(audio_files[:1])
+    model.apply_metadata(entry_ids[0], SAMPLE)
+    changes = record_changes(model)
+    audio_files[0].unlink()
+
+    assert model.refresh_entry_status(entry_ids[0]) is True
+
+    assert len(changes) == 1
+    first_column, last_column, roles = changes[0]
+    assert (first_column, last_column) == (Column.TITLE, Column.PATH)
+    assert {
+        FILE_STATUS_ROLE,
+        TITLE_ROLE,
+        ARTIST_ROLE,
+        ALBUM_ROLE,
+        DURATION_MS_ROLE,
+        METADATA_STATUS_ROLE,
+        int(Qt.ItemDataRole.DisplayRole),
+        int(Qt.ItemDataRole.ToolTipRole),
+    } <= set(roles)
 
 
 def test_restored_file_becomes_requestable_again(model: PlaylistModel, tmp_path: Path) -> None:

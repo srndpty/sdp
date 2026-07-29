@@ -124,9 +124,12 @@ class PlaylistEntry:
     def _with_metadata(
         self, metadata: TrackMetadata | None, status: MetadataStatus
     ) -> "PlaylistEntry":
-        """entry_id・path・file_status を変えずにメタデータだけ差し替える。"""
-        clone = PlaylistEntry(entry_id=self.entry_id, path=self.path)
-        # __post_init__ が再度 stat するが、ファイル状態はこの操作で変えない。
+        """entry_id・path・file_status を変えず、ファイルを再調査せずに複製する。"""
+        # 通常構築と状態再確認は __post_init__ を通すが、メタデータ更新はGUIスレッドで
+        # 頻発するため、内部限定の複製ではファイルシステムへ触れない。
+        clone = object.__new__(PlaylistEntry)
+        object.__setattr__(clone, "entry_id", self.entry_id)
+        object.__setattr__(clone, "path", self.path)
         object.__setattr__(clone, "file_status", self.file_status)
         object.__setattr__(clone, "metadata", metadata)
         object.__setattr__(clone, "metadata_status", status)

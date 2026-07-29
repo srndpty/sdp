@@ -273,6 +273,31 @@ def test_directory_raises(tmp_path: Path) -> None:
         read_track_metadata(tmp_path)
 
 
+@pytest.mark.parametrize("attribute", ["tags", "info"])
+def test_extraction_exceptions_are_normalized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, attribute: str
+) -> None:
+    """Mutagen objectの属性取得失敗も専用例外へcause付きで正規化する。"""
+    path = tmp_path / "壊れたプロパティ.wav"
+
+    class BrokenAudio:
+        def __getattribute__(self, name: str) -> object:
+            if name == attribute:
+                raise RuntimeError(f"{attribute}取得失敗")
+            return super().__getattribute__(name)
+
+    def open_broken_audio(requested: Path) -> BrokenAudio:
+        del requested
+        return BrokenAudio()
+
+    monkeypatch.setattr("sdp.core.metadata.reader._open_audio", open_broken_audio)
+
+    with pytest.raises(MetadataReadError) as error:
+        read_track_metadata(path)
+
+    assert isinstance(error.value.__cause__, RuntimeError)
+
+
 def test_reading_does_not_modify_the_file(test_audio_dir: Path, tmp_path: Path) -> None:
     """読み取りで元ファイルを書き換えない。"""
     path = copy_source(test_audio_dir, tmp_path, "sine440.mp3")

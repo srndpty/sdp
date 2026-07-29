@@ -53,14 +53,17 @@ def read_track_metadata(path: Path) -> TrackMetadata:
     if audio is None:
         raise MetadataReadError(f"未対応の形式です: {path}")
 
-    tags: object = getattr(audio, "tags", None)
-    info: object = getattr(audio, "info", None)
-    return TrackMetadata(
-        title=_first_text(tags, "title"),
-        artist=_joined_text(tags, "artist"),
-        album=_first_text(tags, "album"),
-        duration_ms=_duration_ms(info),
-    )
+    try:
+        tags: object = getattr(audio, "tags", None)
+        info: object = getattr(audio, "info", None)
+        return TrackMetadata(
+            title=_first_text(tags, "title"),
+            artist=_joined_text(tags, "artist"),
+            album=_first_text(tags, "album"),
+            duration_ms=_duration_ms(info),
+        )
+    except Exception as error:
+        raise MetadataReadError(f"メタデータ抽出に失敗しました: {path}") from error
 
 
 def _open_audio(path: Path) -> object:
@@ -241,15 +244,18 @@ class MetadataReader(QObject):
             return
         self._started = True
         self._playlist.rowsInserted.connect(self._on_rows_inserted)
+        self._playlist.rowsRemoved.connect(self._on_rows_removed)
         self._playlist.dataChanged.connect(self._on_data_changed)
         self._playlist.modelReset.connect(self._on_model_reset)
         self._schedule_all()
 
     def shutdown(self, timeout_ms: int = SHUTDOWN_TIMEOUT_MS) -> None:
-        """新しい要求を止め、未開始のタスクを捨てて短時間だけ待つ。
+        """新しい要求を止め、未開始のタスクを捨てて協調的に停止する。
 
         実行中の Mutagen の同期 I/O は強制終了しない。トークンを無効化して
-        結果を無視する論理キャンセルで足りる。
+        結果を無視する論理キャンセルを行う。``timeout_ms`` はこのメソッド内での
+        待機上限であり、実行中I/Oが戻らなければ、後のQThreadPool破棄でプロセス終了が
+        遅れる可能性がある。厳密な終了時刻は保証しない。
         """
         if self._shutdown:
             return
@@ -257,6 +263,7 @@ class MetadataReader(QObject):
         self._tokens.clear()
         if self._started:
             self._playlist.rowsInserted.disconnect(self._on_rows_inserted)
+            self._playlist.rowsRemoved.disconnect(self._on_rows_removed)
             self._playlist.dataChanged.disconnect(self._on_data_changed)
             self._playlist.modelReset.disconnect(self._on_model_reset)
         self._pool.clear()
@@ -272,6 +279,14 @@ class MetadataReader(QObject):
         for row in range(first, last + 1):
             if 0 <= row < self._playlist.rowCount():
                 self._schedule_entry(row)
+
+    def _on_rows_removed(self, parent: QModelIndex, first: int, last: int) -> None:
+        """Modelから消えたentryの最新tokenを破棄する。"""
+        del parent, first, last
+        existing_ids = {entry.entry_id for entry in self._playlist.entries()}
+        self._tokens = {
+            entry_id: token for entry_id, token in self._tokens.items() if entry_id in existing_ids
+        }
 
     def _on_data_changed(
         self, top_left: QModelIndex, bottom_right: QModelIndex, roles: list[int]
@@ -302,6 +317,7 @@ class MetadataReader(QObject):
         entry = self._playlist.entry_at(row)
         if entry.is_missing:
             # 欠損中は要求しない。復活したときの dataChanged で改めて要求する。
+            self._tokens.pop(entry.entry_id, None)
             return
         if entry.metadata_status is not MetadataStatus.NOT_REQUESTED:
             return
@@ -324,6 +340,16 @@ class MetadataReader(QObject):
         if not isinstance(result, MetadataResult):
             return
         if not self._is_applicable(result):
+            # 同じentryの新しい要求がある場合は、そのtokenを古い結果で消さない。
+            if self._tokens.get(result.entry_id) == result.token:
+                self._tokens.pop(result.entry_id, None)
+                row = self._playlist.row_of_entry_id(result.entry_id)
+                if row is not None:
+                    entry = self._playlist.entry_at(row)
+                    if not entry.is_missing and entry.metadata_status is MetadataStatus.LOADING:
+                        # 現在要求の結果なのにpathなどが一致しない異常。LOADINGへ
+                        # 固着させず失敗として閉じるが、値は適用しない。
+                        self._playlist.mark_metadata_failed(result.entry_id)
             # 削除・reset・再要求・欠損・shutdown と競合しただけなので、
             # 通常運転で大量に起こりうる。警告は出さない。
             _logger.debug(
