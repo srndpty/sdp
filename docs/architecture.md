@@ -347,8 +347,9 @@ UI が Backend を直接触ることは禁止し、import 構成のレビュー�
 実装済みなのは `entry.py` / `model.py` / `persistence.py`（P2-A）、
 `ui/playlist_view.py` / `services/playlist_session.py` / Model の D&D（P2-B）、
 `playback_controller.py` と前後曲 UI（P2-C1）、
-リピート・シャッフル・再生履歴（P2-C2）。
-タイトル等のメタデータ列は P2-D で追加する。
+リピート・シャッフル・再生履歴（P2-C2）、
+Mutagen による非同期メタデータ取得と表示（P2-D）。
+これで P2 は完了。次は P3（再生速度とピッチの操作 UI）。
 
 - **`PlaylistEntry`**: 不変 dataclass。`entry_id`（`str`）/ `path`（絶対 `Path`）/
   `file_status`（`AVAILABLE` / `MISSING`）だけを持つ。
@@ -378,7 +379,7 @@ UI が Backend を直接触ることは禁止し、import 構成のレビュー�
 
 実装済みなのは `ui/playlist_view.py` と `services/playlist_session.py`、
 および Model の D&D。プレイリストからの逐次再生・現在曲・前後曲・
-リピート・シャッフルはP2-Cで実装済み。メタデータは未実装（P2-D）。
+リピート・シャッフルはP2-C、メタデータはP2-Dで実装済み。
 
 - **`PlaylistView`**: 受け取るのは `PlaylistModel` だけ。表示、ファイル追加、
   削除、全消去、選択に応じたボタン活性、短いステータスメッセージの要求
@@ -496,8 +497,69 @@ UI が Backend を直接触ることは禁止し、import 構成のレビュー�
   `MainWindow` は配線後にControllerの現在値を一度反映するため、復元済みModelでも
   起動直後から前後曲ボタンが正しく活性化される。次曲探索や欠損スキップの判断は持たない。
 - **永続化しないもの**: `current_entry_id`、現在行、再生位置、前後曲の履歴、
-  リピート設定、シャッフル設定、シャッフルの履歴とサイクル。
+  リピート設定、シャッフル設定、シャッフルの履歴とサイクル、
+  メタデータ（タイトル・アーティスト・アルバム・長さ・読み取り状態）。
   復元の必要性は P6 以降で判断する。
+
+### 8.2 メタデータ（P2-D）
+
+- **`TrackMetadata`**（`core/metadata/types.py`。Qt 非依存の不変 dataclass）:
+  `title` / `artist` / `album` / `duration_ms`（いずれも省略可）。
+  entry_id・path・読み込み状態・エラー文字列・UI の表現は持たない。
+  Mutagen のオブジェクトはワーカースレッドの外へ出さない。
+- **`MetadataStatus`**: `NOT_REQUESTED` →（要求）→ `LOADING` →
+  `LOADED` または `FAILED`。ファイルの欠損は `FileStatus` が表すので
+  ここへ `MISSING` は入れない。**タグが 1 件も無くても `LOADED`**（失敗ではない）。
+  欠損になったら値を捨てて `NOT_REQUESTED` へ戻し、復活したら読み直せるようにする。
+- **`PlaylistEntry`**: `metadata`（不変値）と `metadata_status` を持つだけで、
+  読み取りはしない。`LOADED` のときだけ値を持ち、それ以外は `None`。
+  メタデータ更新で entry_id・path・file_status は変えず、内部限定のcloneは
+  `__post_init__`を通さないためGUIスレッドでファイル状態を再調査しない。
+- **タグの正規化**: easy tags の複数値に備え、title / album は最初の非空値、
+  artist は非空値を順序どおり `/` で結合（1 件なら区切りなし）。前後の空白は除去し、
+  空だけなら `None`。文字列でない値は無理に文字列化せず無視する。
+- **長さ**: `info.length`（秒）を `round(seconds * 1000)` でミリ秒へ。
+  取得できない・NaN・inf・負値は `None`（0:00 と偽らない）。
+  長さが取れないだけでタグは捨てない。**再生中の `PlaybackController.duration_ms`
+  とは別物**で、同期させない。
+- **`MetadataReader`**: Model の既存・追加・欠損復活エントリを読み取り対象にし、
+  **専用 QThreadPool**（最大 4、`idealThreadCount` を考慮）へ `QRunnable` を投入する。
+  UI・再生制御・永続化は知らない。**Mutagen を GUI スレッドで呼ばない。**
+  ワーカーは Model にも QWidget にも触れず、読み取って結果を返すだけ。
+  未対応形式・破損・I/O失敗は通常の読取失敗として扱う。属性取得や抽出ロジックの
+  予期しない例外は純粋関数で変換せず、ワーカーで traceback 付きのエラーログへ残す。
+  いずれの例外もスレッド外へは漏らさない（`BaseException` は捕まえない）。
+- **古い結果の防止**: 要求ごとに単調増加のトークンを付け、結果には
+  entry_id・path・token を含める。反映前に「shutdown していない」「最新トークン」
+  「entry がまだある」「path が一致」「欠損していない」「`LOADING` である」を確認する。
+  **パスから別 entry へ結果を流用しない。** 削除・欠損・reset・適用不能で不要になった
+  tokenは回収し、古い結果で新しいtokenを消さない。破棄は通常運転で起こるためdebugログのみ。
+- **反映は GUI スレッド**: ワーカーの結果シグナルは自動的にキュー接続で GUI スレッドへ渡る。
+  Model の更新は entry_id 単位（`mark_metadata_loading` / `apply_metadata` /
+  `mark_metadata_failed` / `clear_metadata`）で、`beginResetModel` は使わない。
+- **shutdown（協調的停止）**: 新規要求を止め、トークンを無効化し、未開始タスクを
+  `clear()`し、`shutdown()`内では最大3秒だけ待つ。実行中の同期I/Oは強制終了せず、
+  結果を無視する論理キャンセルとする。ただしQThreadPool破棄は実行中タスクを待つため、
+  ネットワークドライブや故障媒体でI/O自体が戻らない場合、**プロセス終了の3秒上限は
+  保証しない**。厳密な終了期限が必要になった場合は読取を終了可能な子プロセスへ隔離する。
+- **列と role**: タイトル / アーティスト / アルバム / 長さ / パスの 5 列
+  （`Column.NAME` は `TITLE` の別名として残す）。
+  role は `TITLE_ROLE` / `ARTIST_ROLE` / `ALBUM_ROLE` / `DURATION_MS_ROLE` /
+  `METADATA_STATUS_ROLE` で、表示文字列ではなく意味上の値を返す。
+- **タイトルのフォールバック**: 表示は `metadata.title` → ファイル名 → パス全体の順。
+  未要求・読み取り中・失敗のいずれでも常にファイル名が出るので、
+  追加直後から曲を識別できる（「読み込み中...」でタイトルを置き換えない）。
+- **`dataChanged` の範囲**: `LOADING` は状態 role だけ、`LOADED` / `FAILED` は
+  タイトルから長さまでの列を表示 role と各メタデータ role で通知する。
+  ファイル状態の変化ではメタデータ破棄も伴うため、タイトルからパスまでを
+  file status・全メタデータ・表示・ツールチップroleで通知する。値が変わらなければ通知しない。
+- **再生制御との分離**: `PlaylistPlaybackController` は `dataChanged` の roles を見て、
+  **メタデータだけの変化では何もしない**（曲順・履歴・可否・現在 entry を触らない）。
+  roles が空なら従来どおり可否を計算し直す。
+- **非同期更新列のリサイズ**: `ResizeToContents` は `dataChanged` のたびに全行を
+  走査するため、メタデータ列では使わない（1000 件で O(n^2) 相当になる）。
+- **1000 件のスレッド境界**: 追加もスケジュールも GUI スレッドで完結し（同期読取をしない）、
+  読み取りだけがワーカーで並列に走る。GUI のタイマーとボタンは動き続ける。
 
 #### リピート・シャッフル・再生履歴（P2-C2）
 

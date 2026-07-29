@@ -187,8 +187,8 @@ def test_entry_is_immutable(audio_file: Path) -> None:
 
 
 def test_entry_has_no_playback_or_ui_state(audio_file: Path) -> None:
-    """再生状態・UI 状態を持たない。"""
+    """再生状態・UI 状態を持たない（メタデータは P2-D で追加した値なので別）。"""
     entry = create_entry(audio_file)
 
-    for forbidden in ("is_current", "is_selected", "current", "selected", "metadata", "title"):
+    for forbidden in ("is_current", "is_selected", "current", "selected", "playback_error"):
         assert not hasattr(entry, forbidden), forbidden

@@ -15,6 +15,7 @@ from PySide6.QtTest import QSignalSpy
 from pytestqt.qtbot import QtBot
 
 from fakes.fake_playback_backend import FakePlaybackBackend
+from sdp.core.metadata.types import TrackMetadata
 from sdp.core.playback.controller import PlaybackController
 from sdp.core.playback.types import MediaStatus, PlaybackError, PlaybackErrorCode
 from sdp.core.playlist.model import PlaylistModel
@@ -23,6 +24,7 @@ from sdp.core.playlist.playback_controller import (
     MISSING_FILE_MESSAGE,
     PlaylistPlaybackController,
 )
+from sdp.core.playlist.types import RepeatMode
 
 WAIT_TIMEOUT_MS = 2_000
 
@@ -808,3 +810,106 @@ def test_auto_advance_continues_after_candidate_vanishes_before_load(
 
     assert controller.current_entry_id == entry_ids[2]
     assert playlist.entry_at(1).is_missing
+
+
+# -- メタデータ更新との分離 --------------------------------------------------
+
+
+def test_metadata_only_changes_do_not_touch_playback_state(
+    controller: PlaylistPlaybackController,
+    playlist: PlaylistModel,
+    backend: FakePlaybackBackend,
+    audio_files: list[Path],
+) -> None:
+    """メタデータだけの dataChanged では再生制御が何もしない。"""
+    entry_ids = playlist.add_paths(audio_files)
+    controller.play_entry(entry_ids[1])
+    controller.set_repeat_mode(RepeatMode.ALL)
+    controller.set_shuffle_enabled(True)
+    controller.play_next()
+    before = (
+        controller.current_entry_id,
+        controller.repeat_mode,
+        controller.shuffle_enabled,
+        controller.can_play_previous,
+        controller.can_play_next,
+    )
+    backend.calls.clear()
+    navigation_spy = QSignalSpy(controller.navigation_availability_changed)
+    current_spy = QSignalSpy(controller.current_entry_changed)
+
+    for entry_id in entry_ids:
+        playlist.mark_metadata_loading(entry_id)
+        playlist.apply_metadata(entry_id, TrackMetadata(title="曲", duration_ms=1234))
+    playlist.mark_metadata_failed(entry_ids[0])
+
+    assert (
+        controller.current_entry_id,
+        controller.repeat_mode,
+        controller.shuffle_enabled,
+        controller.can_play_previous,
+        controller.can_play_next,
+    ) == before
+    assert navigation_spy.count() == 0
+    assert current_spy.count() == 0
+    assert backend.call_names() == []
+
+
+def test_metadata_changes_do_not_disturb_the_shuffle_history(
+    controller: PlaylistPlaybackController,
+    playlist: PlaylistModel,
+    audio_files: list[Path],
+) -> None:
+    """メタデータ更新でシャッフル履歴が乱れない。"""
+    playlist.add_paths(audio_files)
+    controller.set_shuffle_enabled(True)
+    controller.play_next()
+    first = controller.current_entry_id
+    controller.play_next()
+
+    for entry in playlist.entries():
+        playlist.apply_metadata(entry.entry_id, TrackMetadata(title="曲"))
+
+    assert controller.play_previous() is True
+    assert controller.current_entry_id == first
+
+
+def test_file_status_changes_still_update_navigation(
+    controller: PlaylistPlaybackController,
+    playlist: PlaylistModel,
+    audio_files: list[Path],
+) -> None:
+    """FILE_STATUS_ROLE の変化では従来どおり可否を更新する。"""
+    entry_ids = playlist.add_paths(audio_files[:2])
+    controller.play_entry(entry_ids[0])
+    assert controller.can_play_next is True
+
+    audio_files[1].unlink()
+    playlist.refresh_entry_status(entry_ids[1])
+
+    assert controller.can_play_next is False
+
+
+def test_metadata_failure_does_not_change_playability(
+    controller: PlaylistPlaybackController,
+    playlist: PlaylistModel,
+    audio_files: list[Path],
+) -> None:
+    """メタデータ読み取りに失敗しても再生できる。"""
+    entry_ids = playlist.add_paths(audio_files)
+    playlist.mark_metadata_failed(entry_ids[0])
+
+    assert controller.play_entry(entry_ids[0]) is True
+    assert controller.current_entry_id == entry_ids[0]
+
+
+def test_entry_can_be_played_while_metadata_is_loading(
+    controller: PlaylistPlaybackController,
+    playlist: PlaylistModel,
+    audio_files: list[Path],
+) -> None:
+    """メタデータ読み取り中でも再生できる。"""
+    entry_ids = playlist.add_paths(audio_files)
+    playlist.mark_metadata_loading(entry_ids[0])
+
+    assert controller.play_entry(entry_ids[0]) is True

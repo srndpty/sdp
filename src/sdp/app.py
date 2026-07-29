@@ -12,6 +12,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
+from sdp.core.metadata.reader import MetadataReader
 from sdp.core.playback.controller import PlaybackController
 from sdp.core.playback.qt_backend import QtMultimediaBackend
 from sdp.core.playlist.model import PlaylistModel
@@ -39,6 +40,7 @@ class PlayerComposition:
     playlist_model: PlaylistModel
     playlist_playback: PlaylistPlaybackController
     playlist_session: PlaylistSession
+    metadata_reader: MetadataReader
     window: MainWindow
 
 
@@ -57,6 +59,8 @@ def build_player(playlist_file: Path | None = None) -> PlayerComposition:
     playlist_playback = PlaylistPlaybackController(controller, playlist_model)
     session = PlaylistSession(default_playlist_path() if playlist_file is None else playlist_file)
     restore_message = session.load_into(playlist_model)
+    # 生成だけで読み取りは始めない（start() は run() が呼ぶ）。
+    metadata_reader = MetadataReader(playlist_model)
     window = MainWindow(controller, playlist_model, playlist_playback)
     if restore_message is not None:
         window.show_status_message(restore_message)
@@ -66,6 +70,7 @@ def build_player(playlist_file: Path | None = None) -> PlayerComposition:
         playlist_model=playlist_model,
         playlist_playback=playlist_playback,
         playlist_session=session,
+        metadata_reader=metadata_reader,
         window=window,
     )
 
@@ -95,8 +100,12 @@ def run(argv: list[str] | None = None) -> int:
     app = create_application(list(argv if argv is not None else sys.argv))
     # composition はイベントループ実行中ずっと参照され続ける（寿命の保証）。
     composition = build_player()
+    # メタデータの読み取りはここで開始する（GUI スレッドはブロックしない）。
+    composition.metadata_reader.start()
     composition.window.show()
     exit_code = app.exec()
-    # ウィンドウが閉じた後なので、保存の失敗はログへ残すだけにする。
+    # ワーカーを止めてから保存する。保存の失敗はログへ残すだけにする
+    # （ウィンドウが閉じた後でユーザーへ提示できないため）。
+    composition.metadata_reader.shutdown()
     composition.playlist_session.save_from(composition.playlist_model)
     return exit_code

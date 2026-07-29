@@ -14,9 +14,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from sdp.core.metadata.types import format_duration_ms
 from sdp.core.playback.controller import PlaybackController
 from sdp.core.playback.types import PlaybackState
 from sdp.core.playlist.types import RepeatMode
+
+__all__ = ["PlayerControls", "format_duration_ms"]
+"""``format_duration_ms`` は core 側の実装をそのまま使う（実装を二重に持たない）。"""
 
 _REPEAT_LABELS: dict[RepeatMode, str] = {
     RepeatMode.OFF: "リピート: オフ",
@@ -32,22 +36,6 @@ _STATE_LABELS: dict[PlaybackState, str] = {
 }
 
 _VOLUME_SLIDER_MAX = 100
-
-
-def format_duration_ms(milliseconds: int) -> str:
-    """ミリ秒を表示用の文字列へ変換する（純粋関数）。
-
-    1 時間未満は ``m:ss``、1 時間以上は ``h:mm:ss``。
-
-    負値は 0 として扱う。Qt は読み込み直後や停止直後に一時的な負の位置を返しうるため、
-    UI 境界では例外にせず 0 表示にする方が実用的（値の検証は Controller の責務）。
-    """
-    total_seconds = max(milliseconds, 0) // 1000
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    if hours > 0:
-        return f"{hours}:{minutes:02d}:{seconds:02d}"
-    return f"{minutes}:{seconds:02d}"
 
 
 class PlayerControls(QWidget):

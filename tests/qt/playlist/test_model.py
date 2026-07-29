@@ -15,6 +15,7 @@ from sdp.core.playlist.entry import FileStatus, create_entry
 from sdp.core.playlist.model import (
     ENTRY_ID_ROLE,
     FILE_STATUS_ROLE,
+    METADATA_ROLES,
     PATH_ROLE,
     Column,
     PlaylistModel,
@@ -234,8 +235,8 @@ def test_header_data(model: PlaylistModel, audio_files: list[Path]) -> None:
     model.add_paths(audio_files[:1])
 
     assert (
-        model.headerData(Column.NAME, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole)
-        == "ファイル名"
+        model.headerData(Column.TITLE, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole)
+        == "タイトル"
     )
     assert (
         model.headerData(Column.PATH, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole)
@@ -397,7 +398,15 @@ def test_refresh_file_status_updates_changed_rows(
     assert changed == 1
     assert model.entry_at(1).file_status is FileStatus.MISSING
     assert model.entry_at(0).file_status is FileStatus.AVAILABLE
-    assert changes == [(1, 1, (FILE_STATUS_ROLE,))]
+    assert len(changes) == 1
+    first_row, last_row, roles = changes[0]
+    assert (first_row, last_row) == (1, 1)
+    assert set(roles) == {
+        FILE_STATUS_ROLE,
+        *METADATA_ROLES,
+        int(Qt.ItemDataRole.DisplayRole),
+        int(Qt.ItemDataRole.ToolTipRole),
+    }
 
 
 def test_refresh_file_status_detects_restored_file(model: PlaylistModel, tmp_path: Path) -> None:

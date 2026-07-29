@@ -1,13 +1,16 @@
 """プレイリストの 1 行を表すデータ構造。
 
 再生状態（現在再生中・選択中）や UI 状態は持たない。
-メタデータ関連の状態も持たない（必要性は P2-D で判断する）。
+メタデータは値（TrackMetadata）と読み込み状態を不変値として保持するだけで、
+読み取り処理そのものは :mod:`sdp.core.metadata.reader` の責務。
 """
 
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
+
+from sdp.core.metadata.types import MetadataStatus, TrackMetadata
 
 
 class FileStatus(Enum):
@@ -56,6 +59,8 @@ class PlaylistEntry:
     entry_id: str
     path: Path
     file_status: FileStatus = field(init=False)
+    metadata: TrackMetadata | None = field(init=False, default=None)
+    metadata_status: MetadataStatus = field(init=False, default=MetadataStatus.NOT_REQUESTED)
 
     def __post_init__(self) -> None:
         if not self.entry_id:
@@ -73,16 +78,62 @@ class PlaylistEntry:
     def is_missing(self) -> bool:
         return self.file_status is FileStatus.MISSING
 
+    @property
+    def display_title(self) -> str:
+        """表示に使うタイトル。
+
+        メタデータが無い・読み取り中・失敗のいずれでも、常に何かが表示されるよう
+        ファイル名（それも取れなければパス全体）へフォールバックする。
+        """
+        if self.metadata is not None and self.metadata.title:
+            return self.metadata.title
+        return self.path.name or str(self.path)
+
     def with_refreshed_status(self) -> "PlaylistEntry":
         """ファイル状態を再確認した新しいエントリを返す。
 
         ファイルが削除・復元された場合に Model 側が行を差し替えるために使う。
         状態が変わらない場合は自分自身を返すため、呼び出し側は同一性で判定できる。
+
+        状態が変わった場合はメタデータを捨てて ``NOT_REQUESTED`` へ戻す。
+        欠損中は表示をファイル名へ戻し、復活後は読み直せるようにするため。
         """
         refreshed = PlaylistEntry(entry_id=self.entry_id, path=self.path)
         if refreshed.file_status is self.file_status:
             return self
         return refreshed
+
+    # -- メタデータ（不変更新） ---------------------------------------------
+
+    def with_metadata_loading(self) -> "PlaylistEntry":
+        """読み取り中にする。値はまだ持たない。"""
+        return self._with_metadata(None, MetadataStatus.LOADING)
+
+    def with_metadata(self, metadata: TrackMetadata) -> "PlaylistEntry":
+        """読み取れた値を保持する。"""
+        return self._with_metadata(metadata, MetadataStatus.LOADED)
+
+    def with_metadata_failed(self) -> "PlaylistEntry":
+        """読み取りに失敗した。値は持たず、表示はファイル名へフォールバックする。"""
+        return self._with_metadata(None, MetadataStatus.FAILED)
+
+    def without_metadata(self) -> "PlaylistEntry":
+        """メタデータを捨てて未要求へ戻す（再読み取り可能にする）。"""
+        return self._with_metadata(None, MetadataStatus.NOT_REQUESTED)
+
+    def _with_metadata(
+        self, metadata: TrackMetadata | None, status: MetadataStatus
+    ) -> "PlaylistEntry":
+        """entry_id・path・file_status を変えず、ファイルを再調査せずに複製する。"""
+        # 通常構築と状態再確認は __post_init__ を通すが、メタデータ更新はGUIスレッドで
+        # 頻発するため、内部限定の複製ではファイルシステムへ触れない。
+        clone = object.__new__(PlaylistEntry)
+        object.__setattr__(clone, "entry_id", self.entry_id)
+        object.__setattr__(clone, "path", self.path)
+        object.__setattr__(clone, "file_status", self.file_status)
+        object.__setattr__(clone, "metadata", metadata)
+        object.__setattr__(clone, "metadata_status", status)
+        return clone
 
 
 def create_entry(path: Path, *, entry_id: str | None = None) -> PlaylistEntry:
