@@ -18,7 +18,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from sdp.core.playback.controller import PlaybackController
 from sdp.core.playback.types import MediaStatus
-from sdp.core.playlist.model import PlaylistModel
+from sdp.core.playlist.model import FILE_STATUS_ROLE, PlaylistModel
 from sdp.core.playlist.types import RepeatMode, next_repeat_mode
 
 MISSING_FILE_MESSAGE = "ファイルが見つからないため再生できません。"
@@ -512,9 +512,19 @@ class PlaylistPlaybackController(QObject):
         self._prune_history()
         self._update_navigation_availability()
 
-    def _on_playlist_data_changed(self, top_left: object, bottom_right: object) -> None:
-        # 欠損状態の変化で前後曲の可否が変わりうる。
+    def _on_playlist_data_changed(
+        self, top_left: object, bottom_right: object, roles: list[int]
+    ) -> None:
+        """ファイル状態の変化だけに反応する。
+
+        メタデータだけの更新（P2-D）で曲順・履歴・可否を計算し直さない。
+        roles が空の場合は「全 role が変わった」という Qt の慣例に従い、
+        従来どおり可否を計算し直す。
+        """
         del top_left, bottom_right
+        if roles and FILE_STATUS_ROLE not in roles:
+            return
+        # 欠損状態の変化で前後曲の可否が変わりうる。
         self._update_navigation_availability()
 
     # -- 内部: 状態の更新 ---------------------------------------------------
