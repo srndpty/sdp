@@ -48,9 +48,10 @@ sdp/
 │   │       ├── ring_buffer.py    # 固定長 PCM リングバッファ
 │   │       ├── pcm_tap.py        # QAudioBufferOutput → 正規化 → mono 化 → リングバッファ
 │   │       ├── spectrum.py       # Hann 窓・FFT・バンド集約・平滑化（純粋関数中心）
-│   │       ├── waveform.py       # WaveformAnalyzer（QAudioDecoder ワーカー、envelope 縮約）
+│   │       ├── waveform.py       # WaveformData、PCM正規化、増分min/max縮約
 │   │       └── waveform_cache.py # npz キャッシュ、キー生成、LRU 容量管理
 │   ├── services/
+│   │   ├── waveform_analysis.py # QAudioDecoder workerと現在sourceの解析調停
 │   │   ├── settings.py       # 設定 dataclass と JSON 入出力、スキーマバージョン
 │   │   ├── single_instance.py# QLocalServer / QLocalSocket と QLockFile
 │   │   ├── win_integration.py# ms-settings の起動、対応形式のプローブ
@@ -93,7 +94,8 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 | `PlaylistPlaybackController` | 「今どの entry を再生中か」の唯一の管理者。順次再生、前後曲、曲終了時の次曲決定、欠損スキップ | デコード、描画、行データの所有 |
 | `PlaylistModel` | 行データ、並べ替え、D&D、欠損フラグ、重複許可（entry_id 採番） | 再生状態の所有（現在行は Controller が entry_id で参照する） |
 | `MetadataReader` | ワーカーで Mutagen による読み取りを行い、シグナルで Model へ反映する | GUI スレッドでのブロッキング I/O |
-| `WaveformAnalyzer` | 専用 QThread で QAudioDecoder を駆動し、envelope を生成する。進捗 / 完了 / 失敗をシグナルで通知 | 描画 |
+| `WaveformData` / `WaveformReducer` | Qt非依存のread-only min/max波形と、全PCMを保持しない増分縮約 | デコード、thread、描画 |
+| `WaveformAnalysisService` | 専用QThreadのQAudioDecoder、現在sourceのrequest token、部分／完了／失敗通知、cache I/Oの調停 | QWidget、seek、PlaylistModel、再生状態の変更 |
 | `WaveformCache` | キー生成（path + size + mtime + 解析バージョン）、npz の読み書き、破損検出、LRU 削除 | 解析処理そのもの |
 | `PcmTap` / `PcmRingBuffer` | QAudioBuffer の受領、float32 mono への正規化、リングバッファへの書き込み、スナップショット読み出し | FFT、描画 |
 | 各可視化ウィジェット | 固定 FPS タイマーでスナップショットを取得し、`spectrum.py` の純粋関数を通して描画する。hide / 最小化でタイマー停止と PCM タップ解除 | PCM 取得の詳細 |
@@ -295,7 +297,7 @@ Backend ──media_status_changed(END_OF_MEDIA)──→ Controller（次曲を
 Backend ──error_occurred(PlaybackError)──→ Controller（該当エントリにエラーを記録し方針を適用）→ PlaylistModel
 QAudioBufferOutput ──audioBufferReceived──→ PcmTap（軽量変換のみ）→ PcmRingBuffer
 QTimer(30FPS) → SpectrumWidget: PcmRingBuffer.snapshot() → FFT → 描画
-WaveformAnalyzer(worker) ──progress / finished(envelope)──→ WaveformWidget（部分描画）
+WaveformAnalysisService(worker) ──partial / finished(WaveformData)──→ P4-B WaveformWidget
 MetadataReader(worker) ──metadataReady(entry_id, tags)──→ PlaylistModel
 SingleInstanceService ──filesReceived(paths)──→ PlaylistModel へ追加 + Controller で再生 + 前面化
 ```
@@ -311,7 +313,7 @@ UI が Backend を直接触ることは禁止し、import 構成のレビュー�
 |---|---|---|
 | GUI（メイン） | UI、Controller、Model、PcmTap の受信、FFT、描画 | **P0-C で実測済み**: 4096 点 FFT は平均 0.02ms、30FPS で回しても CPU 占有 0.06%。コールバック全体でも 0.03%。GUI スレッド実行で問題ない |
 | Qt Multimedia 内部 | デコードと音声出力 | Qt が管理する。直接は触らない |
-| WaveformAnalyzer 用 QThread | QAudioDecoder（イベントループが必要）と NumPy による縮約 | 1 ファイル 1 ジョブ。曲切り替え時は先行ジョブをキャンセルする |
+| WaveformAnalysisService 用 QThread | QAudioDecoder、NumPy縮約、npz cache I/O、LRU | 現在sourceの1ジョブ。source切替時は先行tokenを論理キャンセルする |
 | QThreadPool | メタデータ読み取り（QRunnable） | 大量 D&D 時はキューで処理する |
 
 **リングバッファのロック方針**: **P0-C で実測により確定**
@@ -373,20 +375,41 @@ UI が Backend を直接触ることは禁止し、import 構成のレビュー�
 
 ## 7. 波形解析・縮約・キャッシュ
 
-- 解析は QAudioDecoder で全量をデコードしつつ、**フル PCM を保持せず**逐次
-  min/max peak envelope（既定 100 peak-pair/秒、mono）へ縮約する。
-  60 分の音源で envelope は約 360k float32 × 2 ≈ 2.9MB。
-- 表示は ±30 秒（約 6000 peak-pair）を切り出し、ウィジェット幅に応じてビン集約して描画する。
-  中央線は固定で、`positionChanged` によりオフセットを更新する。
-  クリック / ドラッグは x 座標を秒へ変換して `seek` する。
-- 解析中は解析済み範囲のみを描画し、薄い進捗表示を添える。
-  解析失敗や未対応形式の場合はプレースホルダ表示のみで再生を継続する（NF-01、WAVE-05）。
-- キャッシュは `%LOCALAPPDATA%\sdp\waveforms\<sha1(絶対パス)>.npz`。
-  npz 内にメタ情報（path / size / mtime_ns / 解析バージョン / peaks_per_sec）を同梱し、
-  読み込み時に照合する。不一致または読み込み例外の場合は無効化して再解析する。
-  総容量が上限（既定 500MB）を超えたら、別途保持する index.json の参照時刻で LRU 削除する。
-- mpv へ切り替えた場合は、この envelope とは別に「位置駆動スペクトラム用」の粗い PCM
-  （例: 8kHz mono）が必要になる。60 分で約 115MB となりディスクキャッシュ化が要る（U8 で評価）。
+- **データ型**: `WaveformData`は1次元float32の`minimum`／`maximum`、実bucket幅、
+  duration、completeを持つ。shape、有限性、-1～1、min≦maxを検証し、入力をコピーして
+  read-only化する。QAudioBuffer、path、例外は保持しない。
+- **PCM正規化**: QAudioFormatのUInt8／Int16／Int32／FloatをNumPyで[-1, 1]へ正規化し、
+  interleaved channelをframeごとに平均してmono化する。frame途中のbytes、channel／sample rate
+  不正、未知formatは明示的に失敗する。Windows上の実測ではWAVがInt16、MP3がFloatだった。
+- **増分縮約**: 基準bucketは20ms。`frames_per_bucket = max(1, round(sample_rate * 0.020))`
+  とし、実bucket幅はframe数／sample rateから算出する。`WaveformReducer`は完成bucketの
+  min/maxと1bucket未満の端数だけを保持し、chunk境界を跨ぐ端数を次chunkへ引き継ぐ。
+  完了snapshotだけが最後の不完全bucketを含む。60分では約180,000 bucket、配列本体は約1.44MB。
+- **thread境界**: `_WaveformWorker`を専用QThreadへmoveし、そのthread上でQAudioDecoderを生成する。
+  bufferReadyごとにbytes化、正規化、縮約を行い、GUIへは不変なWaveformDataだけをqueued Signalで
+  返す。最初の完成bucket、その後1024bucket増加または250ms経過でpartialを通知し、完了時は
+  必ず最終結果を通知する。GUI threadではdecode、全sample縮約、cache走査を行わない。
+- **現在sourceとcancel**: `WaveformAnalysisService`はPlaybackControllerの`source`と
+  `source_changed`だけを使用する。単調増加tokenとpath、size、mtimeを結果ごとに照合し、source変更、
+  shutdown、ファイル更新後の古いpartial／完了／cache保存を捨てる。workerはdecode開始、buffer前後、
+  partial、cache保存、完了の境界でthread-safeなcancel状態を確認し、QAudioDecoderへstopを要求する。
+  解析失敗は専用Signalとログだけで扱い、PlaybackControllerの状態や再生エラーへ混ぜない。
+- **cache key**: 解決済み絶対path、size、mtime_ns、analysis version 1、20ms bucket、mono format
+  version 1をcanonical JSONからSHA-256化する。ファイル名はhashだけで、生pathを含めない。
+- **npz schema**: minimum、maximum、bucket_duration_ms、duration_ms、analysis_version、
+  format_version、file_size、file_mtime_ns、completeを保存する。`allow_pickle=False`で読み、
+  必須field、scalar型、dtype、shape、有限性、範囲、complete、key属性を再検証する。
+- **保存と破損**: `%LOCALAPPDATA%\sdp\cache\waveforms`へ同一directoryの一時ファイルを
+  flush／fsyncしてから`os.replace`する。部分結果は保存しない。zip破損や検証不一致はログへ残し、
+  破損cacheを削除してmissとして再解析する。cache失敗は再生や解析済み結果を失敗扱いにしない。
+- **LRU**: hit時にcacheファイルのmtimeを利用時刻として更新する。保存後にworker threadで`.npz`だけを
+  走査し、mtime・名前の決定的順で500MB以下まで削除する。temp／他形式／現在保存したcacheは削除せず、
+  個別削除失敗はログに残して後続を処理する。
+- **ライフサイクル**: `build_player()`はserviceを保持するだけでthreadを開始しない。`run()`は
+  metadata開始後にserviceをstartし、終了時はmetadataより先にserviceをshutdownする。shutdownは
+  token無効化、decoder停止要求、thread quit、明示timeout付きwaitを行う。Qt内部decodeや注入された
+  同期処理が戻らない場合の厳密な終了期限は保証しない。
+- P4-Aでは解析・cacheまでを実装し、画面表示、±30秒追従、クリック／ドラッグseekはP4-Bで追加する。
 
 ---
 

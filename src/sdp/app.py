@@ -20,7 +20,8 @@ from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.services import logging_setup
 from sdp.services.playlist_session import PlaylistSession, default_playlist_path
 from sdp.services.settings import SettingsSession
-from sdp.services.user_paths import default_settings_path
+from sdp.services.user_paths import default_settings_path, default_waveform_cache_directory
+from sdp.services.waveform_analysis import WaveformAnalysisService
 from sdp.ui.main_window import MainWindow
 
 APPLICATION_NAME = "sdp"
@@ -44,19 +45,22 @@ class PlayerComposition:
     playlist_session: PlaylistSession
     settings_session: SettingsSession
     metadata_reader: MetadataReader
+    waveform_analysis: WaveformAnalysisService
     window: MainWindow
 
 
 def build_player(
     playlist_file: Path | None = None,
     settings_file: Path | None = None,
+    waveform_cache_directory: Path | None = None,
 ) -> PlayerComposition:
     """Backend → Controller → PlaylistModel → プレイリスト再生 → MainWindow の順に組み立てる。
 
     保存済み設定をControllerへ適用してから、プレイリストとUIを構築する
     （UI は永続化を知らない）。
     保存対象は ``PlaylistModel.entries()`` だけで、現在 entry や再生位置は保存しない。
-    ``playlist_file`` と ``settings_file`` はテストから保存先を差し替えるための入口。
+    ``playlist_file``、``settings_file``、``waveform_cache_directory``は
+    テストから保存先を差し替えるための入口。
 
     QApplication が既に存在していることが前提（ウィジェットの生成に必要）。
     """
@@ -73,6 +77,12 @@ def build_player(
     restore_message = session.load_into(playlist_model)
     # 生成だけで読み取りは始めない（start() は run() が呼ぶ）。
     metadata_reader = MetadataReader(playlist_model)
+    waveform_analysis = WaveformAnalysisService(
+        controller,
+        default_waveform_cache_directory()
+        if waveform_cache_directory is None
+        else waveform_cache_directory,
+    )
     window = MainWindow(controller, playlist_model, playlist_playback)
     restore_messages = [
         message for message in (restore_message, settings_restore_message) if message is not None
@@ -87,6 +97,7 @@ def build_player(
         playlist_session=session,
         settings_session=settings_session,
         metadata_reader=metadata_reader,
+        waveform_analysis=waveform_analysis,
         window=window,
     )
 
@@ -120,10 +131,12 @@ def run(argv: list[str] | None = None) -> int:
     composition.settings_session.start()
     # メタデータの読み取りはここで開始する（GUI スレッドはブロックしない）。
     composition.metadata_reader.start()
+    composition.waveform_analysis.start()
     composition.window.show()
     exit_code = app.exec()
     # ワーカーを止めてから保存する。保存の失敗はログへ残すだけにする
     # （ウィンドウが閉じた後でユーザーへ提示できないため）。
+    composition.waveform_analysis.shutdown()
     composition.metadata_reader.shutdown()
     composition.settings_session.flush()
     composition.playlist_session.save_from(composition.playlist_model)
