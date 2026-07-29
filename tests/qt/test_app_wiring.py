@@ -39,6 +39,8 @@ from sdp.ui.main_window import MainWindow
 from sdp.ui.player_controls import PlayerControls
 from sdp.ui.playlist_view import PlaylistView
 from sdp.ui.speed_panel import SpeedPanel
+from sdp.ui.waveform_panel import WaveformPanel
+from sdp.ui.waveform_widget import WaveformWidget
 
 
 @pytest.fixture
@@ -120,9 +122,13 @@ def test_window_uses_the_wired_objects(composition: app_module.PlayerComposition
     """MainWindow の子ウィジェットが配線済みの Controller と Model を使う。"""
     controls = composition.window.findChild(PlayerControls)
     speed_panel = composition.window.findChild(SpeedPanel)
+    waveform_panel = composition.window.findChild(WaveformPanel)
     playlist_view = composition.window.findChild(PlaylistView)
     assert controls is not None
     assert speed_panel is not None
+    assert waveform_panel is not None
+    assert waveform_panel.waveform_analysis is composition.waveform_analysis
+    assert len(waveform_panel.findChildren(WaveformWidget)) == 1
     assert playlist_view is not None
 
     composition.controller.set_volume(0.5)
@@ -267,6 +273,9 @@ def test_run_starts_and_stops_background_services_in_order(
     def ignore_logging_setup() -> None:
         return None
 
+    def skip_window_show(window: MainWindow) -> None:
+        del window
+
     def injected_playlist_path() -> Path:
         return playlist_file
 
@@ -286,6 +295,9 @@ def test_run_starts_and_stops_background_services_in_order(
     monkeypatch.setattr(WaveformAnalysisService, "shutdown", record_waveform_shutdown)
     monkeypatch.setattr(app_module, "default_playlist_path", injected_playlist_path)
     monkeypatch.setattr(app_module, "create_application", create_immediate_application)
+    # fake execは実event loopと「ウィンドウを閉じてから戻る」契約を再現しないため、
+    # queued paintを残さない。表示・描画は専用Qtテストで検証する。
+    monkeypatch.setattr(MainWindow, "show", skip_window_show)
     monkeypatch.setattr(app_module.logging_setup, "configure_logging", ignore_logging_setup)
     monkeypatch.setattr(app_module.logging_setup, "install_excepthook", ignore_logging_setup)
     assert app_module.run([]) == 0

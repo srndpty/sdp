@@ -245,12 +245,15 @@ MVP にも初回完成版にも含めない。
 
 - **目的**: WAVE-01〜05。mpv へ切り替えた場合にも可視化の基盤となる中核機能。
 - **変更ファイル**: `src/sdp/core/analysis/{waveform,waveform_cache}.py`、
-  `src/sdp/ui/waveform_widget.py`、`src/sdp/ui/main_window.py`
+  `src/sdp/core/analysis/waveform_projection.py`、
+  `src/sdp/services/waveform_analysis.py`、
+  `src/sdp/ui/{waveform_widget,waveform_panel,main_window}.py`
 - **受け入れ条件**: 再生位置中央固定で ±30 秒がスクロール表示され、クリック / ドラッグで
   シークでき、60 分音源の解析中も UI 操作でき部分描画される。キャッシュヒット時は即表示。
   更新日時・サイズ・解析バージョンの変化と破損キャッシュで再解析される。
   容量上限を超えると LRU で削除される。解析失敗でも再生が継続する。
-- **テスト**: 縮約結果の数値検証、キャッシュ無効化のマトリクス、解析ワーカーのキャンセル。
+- **テスト**: 縮約結果、pixel投影、x→時刻、QPainter描画、click／drag、path／token照合、
+  キャッシュ無効化のマトリクス、解析ワーカーのキャンセル、180,000 bucketの表示応答性。
 
 ### P5: スペクトラムと追加ビジュアライザー（PR#8: PCM タップとスペクトラム、PR#9: レベルメーター）
 — **ここまでで sdp らしい初回完成版**

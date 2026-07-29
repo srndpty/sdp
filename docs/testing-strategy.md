@@ -63,6 +63,10 @@
 | `MetadataReader` | 実ファイルに対する非同期完了、GUIスレッドでの反映、entry_id・token・path照合、削除・欠損・不適用結果のtoken回収、shutdown後の論理キャンセル、専用poolの並列上限。実行中の同期I/Oを強制停止できないことは協調的shutdownの制約として扱う |
 | `WaveformAnalysisService` | fake decode境界でstart冪等、source監視、source変更時の即時clear、partial／完了／失敗、cache hit／破損miss、request tokenと回収、source切替cancel、stale結果・旧cache保存防止、解析中のsize／mtime変更を終端失敗にすること、読取中削除、GUI thread受信、stat再確認とLRUがworker側であること、縮約中のGUI heartbeat、60分相当stream、timeout後もthread終了まで待つshutdown／QObject削除を検証する |
 | 実`QAudioDecoder` | 音声出力deviceを使わず、WAVとMP3のPCM、実duration、有限min/max、partial、decoderのthread affinity、不正ファイル、decoder生成後のsource切替cancel、shutdown後のthread終了を通常CIで検証する |
+| `WaveformColumns` / 投影 | 配列の不変性、固定60秒窓、0幅・空・無音、1対1、複数bucketのpixel集約、1bucketの複数pixel展開、peak保持、先頭／末尾空白、partial未解析範囲、x→時刻とclamp、180,000 bucketから固定幅だけを生成することを純粋テストする |
+| `WaveformWidget` | QPainter描画、palette変更、resizeと投影cache、線数がpixel幅以下、source／durationなし、左右クリック、中央・端・音源端のclamp、drag move中の非通知、固定中心のpreview、release時1回、clear／source変更／hide／disableでの取消をQTestで検証する |
+| `WaveformPanel` | sourceなし、started／partial／finished／cache hit／failed／cleared、path・token不一致の無視、生error非表示、position追従、Controller duration優先とcomplete fallback、partial duration非採用、解析中・失敗後のseek、source切替中のdrag取消をFakeBackendで検証する |
+| 波形描画性能 | 180,000 bucketを800／1,920／3,840pxへ投影し、出力・描画線が幅以下であること、100回のposition更新中もGUI heartbeatが継続することを厳格な時間上限なしで確認する |
 | 可視化ウィジェット | 表示 ON/OFF でタイマーと PCM タップが停止すること（SPEC-04） |
 
 ## 4. 実音再生テスト（`audio` マーカー。ローカル手動実行のみ）
@@ -237,6 +241,17 @@ P4-Aには表示Widgetがないため、ログと`%LOCALAPPDATA%\sdp\cache\wavef
 - [ ] 解析中も再生、シーク、速度、pitch、プレイリスト操作が応答する
 - [ ] 終了時にwaveformAnalysisThreadが残らない
 - [ ] cacheは500MB上限のLRU対象となり、音源directoryへファイルを作らない
+
+## 6.9 P4-B 手動スモーク（追従波形とマウスシーク）
+
+- [ ] sourceなし、解析中、partial、完了、cache hit、解析失敗の各表示が判別できる
+- [ ] 現在位置線が中央に固定され、先頭・末尾の範囲外は空白になる
+- [ ] 再生・一時停止・0.5／1.0／2.0倍・seek後も波形が位置へ追従する
+- [ ] 左クリックで1回seekし、右・中央クリックではseekしない
+- [ ] drag中はpreviewだけが動き、releaseで1回だけseekする
+- [ ] drag中の曲切替、連続次曲、Repeat ONE／ALL、shuffleで新曲を誤seekしない
+- [ ] WAV／MP3／30～60分音源と100%／可能なら150%表示倍率でresize・操作が重くならない
+- [ ] 解析失敗中も再生UI、プレイリスト、速度・ピッチ操作を継続できる
 
 ## 7. 手動チェックリスト（リリース前）
 

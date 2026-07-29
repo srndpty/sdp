@@ -21,10 +21,12 @@ from sdp.core.playback.controller import PlaybackController
 from sdp.core.playback.types import MediaStatus, PlaybackError
 from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
+from sdp.services.waveform_analysis import WaveformAnalysisService
 from sdp.ui.player_controls import PlayerControls
 from sdp.ui.playlist_view import PlaylistView
 from sdp.ui.shortcuts import ShortcutManager
 from sdp.ui.speed_panel import SpeedPanel
+from sdp.ui.waveform_panel import WaveformPanel
 
 WINDOW_TITLE = "sdp"
 NO_FILE_TEXT = "ファイル未選択"
@@ -56,10 +58,11 @@ _MEDIA_STATUS_MESSAGES: dict[MediaStatus, str] = {
 
 
 class MainWindow(QMainWindow):
-    """メインウィンドウ。受け取るのは PlaybackController と PlaylistModel だけ。
+    """メインウィンドウ。アプリ層で組み立て済みの依存だけを受け取る。
 
     レイアウト骨格・メニュー・ステータス表示に徹し、再生操作は PlayerControls、
-    プレイリスト操作は PlaylistView へ委譲する。永続化（playlist.json）は知らない。
+    波形操作はWaveformPanel、プレイリスト操作はPlaylistViewへ委譲する。
+    永続化（playlist.json）は知らない。
     """
 
     def __init__(
@@ -67,6 +70,7 @@ class MainWindow(QMainWindow):
         controller: PlaybackController,
         playlist_model: PlaylistModel,
         playlist_playback: PlaylistPlaybackController,
+        waveform_analysis: WaveformAnalysisService,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -79,6 +83,7 @@ class MainWindow(QMainWindow):
         self._file_name_label.setObjectName("fileNameLabel")
         self._controls = PlayerControls(controller)
         self._speed_panel = SpeedPanel(controller)
+        self._waveform_panel = WaveformPanel(controller, waveform_analysis)
         self._playlist_view = PlaylistView(playlist_model)
 
         player_panel = QWidget()
@@ -87,6 +92,7 @@ class MainWindow(QMainWindow):
         player_layout.addWidget(self._file_name_label)
         player_layout.addWidget(self._controls)
         player_layout.addWidget(self._speed_panel)
+        player_layout.addWidget(self._waveform_panel)
 
         splitter = QSplitter(Qt.Orientation.Vertical, self)
         splitter.addWidget(player_panel)
