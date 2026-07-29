@@ -19,6 +19,8 @@ from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.services import logging_setup
 from sdp.services.playlist_session import PlaylistSession, default_playlist_path
+from sdp.services.settings import SettingsSession
+from sdp.services.user_paths import default_settings_path
 from sdp.ui.main_window import MainWindow
 
 APPLICATION_NAME = "sdp"
@@ -40,21 +42,31 @@ class PlayerComposition:
     playlist_model: PlaylistModel
     playlist_playback: PlaylistPlaybackController
     playlist_session: PlaylistSession
+    settings_session: SettingsSession
     metadata_reader: MetadataReader
     window: MainWindow
 
 
-def build_player(playlist_file: Path | None = None) -> PlayerComposition:
+def build_player(
+    playlist_file: Path | None = None,
+    settings_file: Path | None = None,
+) -> PlayerComposition:
     """Backend → Controller → PlaylistModel → プレイリスト再生 → MainWindow の順に組み立てる。
 
-    保存済みプレイリストの復元もここで行う（UI は永続化を知らない）。
+    保存済み設定をControllerへ適用してから、プレイリストとUIを構築する
+    （UI は永続化を知らない）。
     保存対象は ``PlaylistModel.entries()`` だけで、現在 entry や再生位置は保存しない。
-    ``playlist_file`` はテストから保存先を差し替えるための入口。
+    ``playlist_file`` と ``settings_file`` はテストから保存先を差し替えるための入口。
 
     QApplication が既に存在していることが前提（ウィジェットの生成に必要）。
     """
     backend = QtMultimediaBackend()
     controller = PlaybackController(backend)
+    settings_session = SettingsSession(
+        default_settings_path() if settings_file is None else settings_file,
+        controller,
+    )
+    settings_restore_message = settings_session.load()
     playlist_model = PlaylistModel()
     playlist_playback = PlaylistPlaybackController(controller, playlist_model)
     session = PlaylistSession(default_playlist_path() if playlist_file is None else playlist_file)
@@ -64,12 +76,15 @@ def build_player(playlist_file: Path | None = None) -> PlayerComposition:
     window = MainWindow(controller, playlist_model, playlist_playback)
     if restore_message is not None:
         window.show_status_message(restore_message)
+    if settings_restore_message is not None:
+        window.show_status_message(settings_restore_message)
     return PlayerComposition(
         backend=backend,
         controller=controller,
         playlist_model=playlist_model,
         playlist_playback=playlist_playback,
         playlist_session=session,
+        settings_session=settings_session,
         metadata_reader=metadata_reader,
         window=window,
     )
@@ -100,6 +115,8 @@ def run(argv: list[str] | None = None) -> int:
     app = create_application(list(argv if argv is not None else sys.argv))
     # composition はイベントループ実行中ずっと参照され続ける（寿命の保証）。
     composition = build_player()
+    # 復元完了後から変更監視を始める（load中のSignalを自動保存扱いしない）。
+    composition.settings_session.start()
     # メタデータの読み取りはここで開始する（GUI スレッドはブロックしない）。
     composition.metadata_reader.start()
     composition.window.show()
@@ -107,5 +124,7 @@ def run(argv: list[str] | None = None) -> int:
     # ワーカーを止めてから保存する。保存の失敗はログへ残すだけにする
     # （ウィンドウが閉じた後でユーザーへ提示できないため）。
     composition.metadata_reader.shutdown()
+    composition.settings_session.flush()
     composition.playlist_session.save_from(composition.playlist_model)
+    composition.settings_session.stop()
     return exit_code

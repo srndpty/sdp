@@ -89,6 +89,7 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 | `QtMultimediaBackend` | QMediaPlayer / QAudioOutput の所有（QAudioBufferOutput は P5 で追加）と、上記インターフェースへの変換。Qt の enum・QUrl・エラーをアプリ内の型へ写す | 曲順ロジック、値の検証 |
 | `PlaybackController` | 1 つの source の再生（読み込み・状態・位置・音量・速度）と Backend との境界 | 曲順、プレイリストの知識 |
 | `SpeedPanel` | 0.5～2.0倍の速度操作、プリセット、ピッチ補正切替とControllerとの双方向同期 | Backend、プレイリスト、メタデータ、永続化 |
+| `ShortcutManager` | WindowShortcutの生成、フォーカスに応じた抑止、Controller群への操作委譲 | Backend、Modelの直接操作、設定保存 |
 | `PlaylistPlaybackController` | 「今どの entry を再生中か」の唯一の管理者。順次再生、前後曲、曲終了時の次曲決定、欠損スキップ | デコード、描画、行データの所有 |
 | `PlaylistModel` | 行データ、並べ替え、D&D、欠損フラグ、重複許可（entry_id 採番） | 再生状態の所有（現在行は Controller が entry_id で参照する） |
 | `MetadataReader` | ワーカーで Mutagen による読み取りを行い、シグナルで Model へ反映する | GUI スレッドでのブロッキング I/O |
@@ -96,7 +97,7 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 | `WaveformCache` | キー生成（path + size + mtime + 解析バージョン）、npz の読み書き、破損検出、LRU 削除 | 解析処理そのもの |
 | `PcmTap` / `PcmRingBuffer` | QAudioBuffer の受領、float32 mono への正規化、リングバッファへの書き込み、スナップショット読み出し | FFT、描画 |
 | 各可視化ウィジェット | 固定 FPS タイマーでスナップショットを取得し、`spectrum.py` の純粋関数を通して描画する。hide / 最小化でタイマー停止と PCM タップ解除 | PCM 取得の詳細 |
-| `SettingsService` | 型付き設定の読み書き、既定値、スキーマバージョン | 任意キーの雑多な保存 |
+| `SettingsSession` | 速度・ピッチ設定の復元、変更監視、デバウンス／終了時保存 | UI、プレイリスト、P6以降の設定 |
 | `SingleInstanceService` | サーバー / クライアントの判定、パス転送、受信通知 | 受け取ったファイルの解釈 |
 
 ### 3.1 再生層と UI の契約（P1 で確定した範囲）
@@ -105,7 +106,7 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 `qt_backend.py`（P1-B）、`app.py` / `ui/main_window.py` / `ui/player_controls.py` /
 `services/logging_setup.py`（P1-C）。
 曲順・リピート・シャッフルとプレイリストはP2、速度・ピッチの操作UI
-（`speed_panel.py`）はP3-Aで実装済み。ショートカットと設定永続化はP3-B、
+（`speed_panel.py`）はP3-A、ショートカットと速度・ピッチ設定永続化はP3-Bで実装済み。
 可視化は後続フェーズで実装する。
 
 - **状態とエラーの型**（`types.py`。すべて Qt 非依存）
@@ -166,7 +167,37 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
   区別し、色だけに依存しない。切替は再生中も即時反映する。
 - **セッション内設定**: sourceなしでも変更できる。速度・ピッチ変更はload／再生状態／positionを
   操作しない。直接load、プレイリスト曲切替、自動次曲、Repeat ONE／ALL、シャッフルでも
-  1.00へ戻さず維持する。再起動後の復元とショートカットはP3-Bで追加する。
+  1.00へ戻さず維持する。再起動後も`SettingsSession`が速度とピッチ補正を復元する。
+
+### 3.3 ショートカット（P3-B）
+
+- `ShortcutManager`は`PlaybackController`と`PlaylistPlaybackController`だけを受け取り、
+  `QShortcut`をWindowShortcutとして生成する。`MainWindow`はmanagerを保持するだけで、
+  個々の操作ロジックを持たない。
+- 再生、停止、相対シーク、前後曲、音量、mute、速度、pitch、repeat、shuffleを
+  `README.md`の固定表へ割り当てる。連続入力が必要なシーク・音量・速度だけauto repeatを許可する。
+- 文字／数値入力、編集可能なComboBox、ボタン上のSpace、モーダル表示中は
+  `ShortcutOverride`で明示的に抑止し、通常のWidget操作を奪わない。
+- 相対値はControllerの公開propertyから計算する。シークは0とdurationへclampし、
+  音量は0.0～1.0、速度は製品UI範囲0.50～2.00を超える要求を送らない。
+
+定義は不変な`ShortcutSpec(action_id, sequence, description, auto_repeat)`として
+`ui/shortcuts.py`の一か所へ集約する。
+
+| キー | 操作 | auto repeat |
+|---|---|---|
+| `Space` | 再生／一時停止 | なし |
+| `S` | 停止 | なし |
+| `J` / `L` | 10秒戻る／進む | あり |
+| `Shift+J` / `Shift+L` | 60秒戻る／進む | あり |
+| `Alt+Left` / `Alt+Right` | 前の曲／次の曲 | なし |
+| `Ctrl+Up` / `Ctrl+Down` | 音量を0.05上げる／下げる | あり |
+| `M` | mute切替 | なし |
+| `X` / `C` | 速度を0.05下げる／上げる | あり |
+| `Z` | 速度を1.00倍へ戻す | なし |
+| `P` | ピッチ補正切替 | なし |
+| `R` | リピートモード切替 | なし |
+| `Ctrl+H` | シャッフル切替 | なし |
 
 #### QtMultimediaBackend（P1-B）
 
@@ -661,13 +692,18 @@ Mutagen による非同期メタデータ取得と表示（P2-D）。
 
 ## 9. 設定保存
 
-- 保存先は `%APPDATA%\sdp\settings.json`。dataclass（音量、ミュート、リピートモード、
-  シャッフル、速度、ピッチ補正、ウィンドウジオメトリ、可視化の表示状態、キャッシュ上限など）
-  と `schema_version` を持つ。
+- P3-Bの保存先は`%LOCALAPPDATA%\sdp\settings.json`。schema version 1では
+  `playback_rate`と`pitch_compensation`だけを保存する。音量、mute、repeat、shuffle、
+  現在曲、再生位置、ウィンドウ状態などはP3-Bの対象外で、暗黙に保存しない。
+- Qt非依存の`AppSettings`と純粋なload／saveを`services/settings.py`へ置く。
+  UI範囲外、NaN／inf、型不一致、非UTF-8、不正JSON、未知versionは復元エラーとする。
 - 読み込み時は未知のキーを無視し、欠落キーは既定値で補う。
   実際の旧バージョンが生まれるまで migration を作り込まない（[AGENTS.md](../AGENTS.md) の方針）。
-- 保存タイミングは終了時と、変更から数秒のデバウンス保存（異常終了対策）。
-  書き込みは一時ファイルへ書いてから `os.replace` でアトミックに置き換える。
+- `build_player()`はMainWindow構築前に設定をControllerへ適用し、構築だけでは監視を開始しない。
+  `run()`が全構築後に監視を開始し、変更から1.5秒のデバウンスと正常終了時のflushで保存する。
+- 書き込みは同一ディレクトリの一時ファイルへUTF-8で書き、flush／fsync後に`os.replace`で
+  アトミックに置き換える。復元失敗時は既定値で起動して通知し、その起動では設定保存を
+  無効化して破損ファイルを保護する。設定とプレイリストの障害・保存可否は互いに独立する。
 
 ---
 

@@ -8,9 +8,10 @@ import json
 import logging
 from collections.abc import Iterator
 from pathlib import Path
+from typing import cast
 
 import pytest
-from PySide6.QtWidgets import QCheckBox, QDoubleSpinBox, QPushButton
+from PySide6.QtWidgets import QApplication, QCheckBox, QDoubleSpinBox, QPushButton
 from pytestqt.qtbot import QtBot
 
 from sdp import app as app_module
@@ -25,6 +26,14 @@ from sdp.core.playlist.persistence import load_playlist, save_playlist
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.core.playlist.types import RepeatMode
 from sdp.services.playlist_session import RESTORE_FAILED_MESSAGE, PlaylistSession
+from sdp.services.settings import (
+    RESTORE_FAILED_MESSAGE as SETTINGS_RESTORE_FAILED_MESSAGE,
+)
+from sdp.services.settings import (
+    AppSettings,
+    SettingsSession,
+    save_settings,
+)
 from sdp.ui.main_window import MainWindow
 from sdp.ui.player_controls import PlayerControls
 from sdp.ui.playlist_view import PlaylistView
@@ -37,8 +46,21 @@ def playlist_file(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def composition(playlist_file: Path, qtbot: QtBot) -> Iterator[app_module.PlayerComposition]:
-    built = app_module.build_player(playlist_file)
+def settings_file(tmp_path: Path) -> Path:
+    return tmp_path / "settings.json"
+
+
+@pytest.fixture(autouse=True)
+def isolate_default_settings_path(settings_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """各テストが実ユーザーの設定を読み書きしないよう保存先を隔離する。"""
+    monkeypatch.setattr(app_module, "default_settings_path", lambda: settings_file)
+
+
+@pytest.fixture
+def composition(
+    playlist_file: Path, settings_file: Path, qtbot: QtBot
+) -> Iterator[app_module.PlayerComposition]:
+    built = app_module.build_player(playlist_file, settings_file)
     qtbot.addWidget(built.window)
     yield built
 
@@ -57,7 +79,7 @@ def audio_files(tmp_path: Path) -> list[Path]:
 
 
 def test_build_player_creates_every_layer(
-    composition: app_module.PlayerComposition, playlist_file: Path
+    composition: app_module.PlayerComposition, playlist_file: Path, settings_file: Path
 ) -> None:
     """Backend → Controller → PlaylistModel → 永続化サービス → MainWindow。"""
     assert isinstance(composition.backend, QtMultimediaBackend)
@@ -66,8 +88,10 @@ def test_build_player_creates_every_layer(
     assert isinstance(composition.playlist_model, PlaylistModel)
     assert isinstance(composition.playlist_playback, PlaylistPlaybackController)
     assert isinstance(composition.playlist_session, PlaylistSession)
+    assert isinstance(composition.settings_session, SettingsSession)
     assert isinstance(composition.window, MainWindow)
     assert composition.playlist_session.file_path == playlist_file
+    assert composition.settings_session.file_path == settings_file
 
 
 def test_window_uses_the_wired_objects(composition: app_module.PlayerComposition) -> None:
@@ -104,6 +128,54 @@ def test_build_player_reflects_controller_speed_and_pitch(
     assert composition.backend.pitch_compensation is False
 
 
+def test_build_player_restores_settings_before_building_speed_panel(
+    playlist_file: Path, settings_file: Path, qtbot: QtBot
+) -> None:
+    """保存値をControllerへ適用してから、その真値でSpeedPanelを構築する。"""
+    save_settings(settings_file, AppSettings(1.35, False))
+
+    composition = app_module.build_player(playlist_file, settings_file)
+    qtbot.addWidget(composition.window)
+    spin_box = composition.window.findChild(QDoubleSpinBox, "playbackRateSpinBox")
+    pitch = composition.window.findChild(QCheckBox, "pitchCompensationCheckBox")
+    assert spin_box is not None
+    assert pitch is not None
+
+    assert composition.controller.playback_rate == pytest.approx(1.35)
+    assert composition.controller.pitch_compensation is False
+    assert spin_box.value() == pytest.approx(1.35)
+    assert pitch.isChecked() is False
+    assert composition.settings_session.is_running is False
+
+
+def test_settings_round_trip_does_not_restore_unscoped_playback_state(
+    playlist_file: Path, settings_file: Path, qtbot: QtBot
+) -> None:
+    """速度・ピッチ以外の音量、mute、repeat、shuffle、現在曲は復元しない。"""
+    composition = app_module.build_player(playlist_file, settings_file)
+    qtbot.addWidget(composition.window)
+    composition.settings_session.start()
+    composition.controller.set_playback_rate(1.4)
+    composition.controller.set_pitch_compensation(False)
+    composition.controller.set_volume(0.2)
+    composition.controller.set_muted(True)
+    composition.playlist_playback.set_repeat_mode(RepeatMode.ALL)
+    composition.playlist_playback.set_shuffle_enabled(True)
+    assert composition.settings_session.flush() is True
+    composition.settings_session.stop()
+
+    restored = app_module.build_player(playlist_file, settings_file)
+    qtbot.addWidget(restored.window)
+
+    assert restored.controller.playback_rate == pytest.approx(1.4)
+    assert restored.controller.pitch_compensation is False
+    assert restored.controller.volume == pytest.approx(1.0)
+    assert restored.controller.muted is False
+    assert restored.playlist_playback.repeat_mode is RepeatMode.OFF
+    assert restored.playlist_playback.shuffle_enabled is False
+    assert restored.playlist_playback.current_entry_id is None
+
+
 def test_composition_does_not_let_the_window_own_the_backend(
     composition: app_module.PlayerComposition,
 ) -> None:
@@ -134,6 +206,56 @@ def test_entry_point_delegates_to_app_run(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert main_module.main() == 0
     assert calls == ["run"]
+
+
+def test_run_starts_flushes_and_stops_settings_session(
+    playlist_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot: QtBot,
+) -> None:
+    """イベントループ前に監視を開始し、正常終了時にflushしてから停止する。"""
+    del qtbot
+    events: list[str] = []
+    original_start = SettingsSession.start
+    original_flush = SettingsSession.flush
+    original_stop = SettingsSession.stop
+
+    def record_start(session: SettingsSession) -> None:
+        events.append("start")
+        original_start(session)
+
+    def record_flush(session: SettingsSession) -> bool:
+        events.append("flush")
+        return original_flush(session)
+
+    def record_stop(session: SettingsSession) -> None:
+        events.append("stop")
+        original_stop(session)
+
+    def ignore_logging_setup() -> None:
+        return None
+
+    def injected_playlist_path() -> Path:
+        return playlist_file
+
+    class ImmediateApplication:
+        def exec(self) -> int:
+            events.append("exec")
+            return 0
+
+    def create_immediate_application(argv: list[str]) -> QApplication:
+        del argv
+        return cast(QApplication, ImmediateApplication())
+
+    monkeypatch.setattr(SettingsSession, "start", record_start)
+    monkeypatch.setattr(SettingsSession, "flush", record_flush)
+    monkeypatch.setattr(SettingsSession, "stop", record_stop)
+    monkeypatch.setattr(app_module, "default_playlist_path", injected_playlist_path)
+    monkeypatch.setattr(app_module, "create_application", create_immediate_application)
+    monkeypatch.setattr(app_module.logging_setup, "configure_logging", ignore_logging_setup)
+    monkeypatch.setattr(app_module.logging_setup, "install_excepthook", ignore_logging_setup)
+    assert app_module.run([]) == 0
+    assert events == ["start", "exec", "flush", "stop"]
 
 
 # -- 起動時復元 -------------------------------------------------------------
@@ -221,6 +343,69 @@ def test_saves_empty_playlist_after_clear(
 
 
 # -- 破損ファイル -----------------------------------------------------------
+
+
+def test_corrupted_settings_uses_defaults_and_is_not_overwritten(
+    playlist_file: Path,
+    settings_file: Path,
+    qtbot: QtBot,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """破損設定では既定値で起動し、終了相当のflushでも元ファイルを保護する。"""
+    original = "{壊れた"
+    settings_file.write_text(original, encoding="utf-8")
+
+    with caplog.at_level(logging.ERROR):
+        composition = app_module.build_player(playlist_file, settings_file)
+    qtbot.addWidget(composition.window)
+
+    assert composition.controller.playback_rate == pytest.approx(1.0)
+    assert composition.controller.pitch_compensation is True
+    assert composition.window.statusBar().currentMessage() == SETTINGS_RESTORE_FAILED_MESSAGE
+    assert composition.settings_session.is_save_enabled is False
+    composition.settings_session.start()
+    composition.controller.set_playback_rate(1.25)
+    assert composition.settings_session.flush() is False
+    assert settings_file.read_text(encoding="utf-8") == original
+    assert "設定の復元に失敗" in caplog.text
+
+
+def test_corrupted_settings_does_not_disable_playlist_saving(
+    composition: app_module.PlayerComposition,
+    playlist_file: Path,
+    settings_file: Path,
+    audio_files: list[Path],
+) -> None:
+    """設定失敗とプレイリスト保存失敗は独立させる。"""
+    # fixture構築後なので、破損状態を独立したsessionへ読み込ませる。
+    settings_file.write_text("{壊れた", encoding="utf-8")
+    failed_session = SettingsSession(settings_file, composition.controller)
+    assert failed_session.load() == SETTINGS_RESTORE_FAILED_MESSAGE
+
+    composition.playlist_model.add_paths(audio_files)
+    assert composition.playlist_session.save_from(composition.playlist_model) is True
+    assert len(load_playlist(playlist_file)) == len(audio_files)
+
+
+def test_corrupted_playlist_does_not_disable_settings_saving(
+    playlist_file: Path, settings_file: Path, qtbot: QtBot
+) -> None:
+    """プレイリスト復元失敗後も速度・ピッチ設定は保存できる。"""
+    playlist_file.write_text("{壊れた", encoding="utf-8")
+    composition = app_module.build_player(playlist_file, settings_file)
+    qtbot.addWidget(composition.window)
+    composition.settings_session.start()
+
+    composition.controller.set_playback_rate(1.2)
+    composition.controller.set_pitch_compensation(False)
+
+    assert composition.playlist_session.is_save_enabled is False
+    assert composition.settings_session.flush() is True
+    assert json.loads(settings_file.read_text(encoding="utf-8")) == {
+        "schema_version": 1,
+        "playback_rate": 1.2,
+        "pitch_compensation": False,
+    }
 
 
 def test_corrupted_playlist_does_not_crash_startup(
