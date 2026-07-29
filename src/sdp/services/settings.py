@@ -18,6 +18,7 @@ _logger = logging.getLogger(__name__)
 
 SETTINGS_SCHEMA_VERSION = 1
 DEFAULT_DEBOUNCE_MS = 1_500
+DEFAULT_RETRY_MS = 5_000
 RESTORE_FAILED_MESSAGE = "設定の復元に失敗しました。既定値で起動します。"
 
 
@@ -117,6 +118,7 @@ class SettingsSession(QObject):
         controller: PlaybackController,
         *,
         debounce_ms: int = DEFAULT_DEBOUNCE_MS,
+        retry_ms: int = DEFAULT_RETRY_MS,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -124,10 +126,13 @@ class SettingsSession(QObject):
         self._controller = controller
         self._save_enabled = True
         self._started = False
+        self._debounce_ms = max(1, debounce_ms)
+        self._retry_ms = max(1, retry_ms)
+        self._retry_attempted = False
         self._last_saved = self._snapshot()
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
-        self._timer.setInterval(max(1, debounce_ms))
+        self._timer.setInterval(self._debounce_ms)
         self._timer.timeout.connect(self.flush)
 
     @property
@@ -167,6 +172,7 @@ class SettingsSession(QObject):
 
     def flush(self) -> bool:
         """未保存snapshotを即時保存する。失敗しても例外を外へ出さない。"""
+        timer_triggered = self.sender() is self._timer
         self._timer.stop()
         if not self._save_enabled:
             _logger.info("復元に失敗したため、設定を保存しません: %s", self._file_path)
@@ -178,7 +184,12 @@ class SettingsSession(QObject):
             save_settings(self._file_path, settings)
         except (OSError, ValueError):
             _logger.exception("設定の保存に失敗しました: %s", self._file_path)
+            if timer_triggered and self._started and not self._retry_attempted:
+                self._retry_attempted = True
+                self._timer.start(self._retry_ms)
+                _logger.info("設定保存を%dミリ秒後に1回再試行します", self._retry_ms)
             return False
+        self._retry_attempted = False
         self._last_saved = settings
         return True
 
@@ -194,7 +205,8 @@ class SettingsSession(QObject):
     def _schedule_save(self, value: object) -> None:
         del value
         if self._save_enabled:
-            self._timer.start()
+            self._retry_attempted = False
+            self._timer.start(self._debounce_ms)
 
     def _snapshot(self) -> AppSettings:
         return AppSettings(

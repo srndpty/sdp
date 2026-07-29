@@ -33,7 +33,12 @@ def controller(backend: FakePlaybackBackend) -> Iterator[PlaybackController]:
 
 
 def make_session(path: Path, controller: PlaybackController) -> SettingsSession:
-    return SettingsSession(path, controller, debounce_ms=DEBOUNCE_MS)
+    return SettingsSession(
+        path,
+        controller,
+        debounce_ms=DEBOUNCE_MS,
+        retry_ms=DEBOUNCE_MS,
+    )
 
 
 def recording_save(saved: list[AppSettings]) -> Callable[[Path, AppSettings], None]:
@@ -189,6 +194,39 @@ def test_save_failure_is_logged_and_can_be_retried(
 
     assert calls == [AppSettings(1.25, True), AppSettings(1.25, True)]
     assert "保存に失敗" in caplog.text
+
+
+def test_debounce_save_failure_retries_automatically_once(
+    tmp_path: Path,
+    controller: PlaybackController,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot: QtBot,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """一時的なデバウンス保存失敗は長めのタイマーで1回自動再試行する。"""
+    calls: list[AppSettings] = []
+    saved: list[AppSettings] = []
+
+    def flaky_save(path: Path, settings: AppSettings) -> None:
+        del path
+        calls.append(settings)
+        if len(calls) == 1:
+            raise OSError("一時的な共有違反")
+        saved.append(settings)
+
+    monkeypatch.setattr("sdp.services.settings.save_settings", flaky_save)
+    session = make_session(tmp_path / "settings.json", controller)
+    session.load()
+    session.start()
+
+    with caplog.at_level(logging.INFO):
+        controller.set_playback_rate(1.25)
+        qtbot.waitUntil(lambda: len(saved) == 1, timeout=2_000)
+
+    assert calls == [AppSettings(1.25, True), AppSettings(1.25, True)]
+    assert saved == [AppSettings(1.25, True)]
+    assert "再試行" in caplog.text
+    session.stop()
 
 
 def test_real_debounce_writes_round_trip(

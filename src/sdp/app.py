@@ -74,10 +74,11 @@ def build_player(
     # 生成だけで読み取りは始めない（start() は run() が呼ぶ）。
     metadata_reader = MetadataReader(playlist_model)
     window = MainWindow(controller, playlist_model, playlist_playback)
-    if restore_message is not None:
-        window.show_status_message(restore_message)
-    if settings_restore_message is not None:
-        window.show_status_message(settings_restore_message)
+    restore_messages = [
+        message for message in (restore_message, settings_restore_message) if message is not None
+    ]
+    if restore_messages:
+        window.show_status_message(" ".join(restore_messages))
     return PlayerComposition(
         backend=backend,
         controller=controller,

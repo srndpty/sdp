@@ -6,9 +6,17 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QShortcut
+from PySide6.QtGui import QAction, QShortcut
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QDialog, QDoubleSpinBox, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QDoubleSpinBox,
+    QLineEdit,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 from pytestqt.qtbot import QtBot
 from shiboken6 import isValid
 
@@ -292,6 +300,57 @@ def test_spinbox_focus_suppresses_character_shortcuts(harness: Harness, qtbot: Q
     QTest.keyClick(spin, Qt.Key.Key_X)
     QTest.keyClick(spin, Qt.Key.Key_Up, Qt.KeyboardModifier.ControlModifier)
 
+    assert harness.backend.call_names() == []
+
+
+@pytest.mark.parametrize(
+    ("key", "modifier"),
+    [
+        (Qt.Key.Key_O, Qt.KeyboardModifier.ControlModifier),
+        (
+            Qt.Key.Key_O,
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+        ),
+    ],
+)
+def test_spinbox_focus_keeps_unmanaged_window_shortcuts(
+    harness: Harness,
+    qtbot: QtBot,
+    key: Qt.Key,
+    modifier: Qt.KeyboardModifier,
+) -> None:
+    """SpinBox編集中も既存のCtrl+O系QActionを奪わない。"""
+    spin = QDoubleSpinBox(harness.window)
+    spin.show()
+    spin.setFocus()
+    qtbot.waitUntil(spin.hasFocus)
+    triggered: list[bool] = []
+    action = QAction(harness.window)
+    action.setShortcut("Ctrl+Shift+O" if modifier & Qt.KeyboardModifier.ShiftModifier else "Ctrl+O")
+    action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+    action.triggered.connect(lambda: triggered.append(True))
+    harness.window.addAction(action)
+
+    QTest.keyClick(spin, key, modifier)
+
+    assert triggered == [True]
+
+
+def test_line_edit_keeps_copy_and_paste_shortcuts(harness: Harness, qtbot: QtBot) -> None:
+    """Manager管理外のCtrl+C／Ctrl+VはLineEdit自身へ渡す。"""
+    edit = QLineEdit(harness.window)
+    edit.setText("copy text")
+    edit.show()
+    edit.setFocus()
+    edit.selectAll()
+    qtbot.waitUntil(edit.hasFocus)
+    QApplication.clipboard().clear()
+
+    QTest.keyClick(edit, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+    edit.clear()
+    QTest.keyClick(edit, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
+
+    assert edit.text() == "copy text"
     assert harness.backend.call_names() == []
 
 

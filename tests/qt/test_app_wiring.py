@@ -408,6 +408,29 @@ def test_corrupted_playlist_does_not_disable_settings_saving(
     }
 
 
+def test_both_corrupted_files_report_and_preserve_both_failures(
+    playlist_file: Path, settings_file: Path, qtbot: QtBot
+) -> None:
+    """同時破損では両方を通知し、終了相当の保存でも両ファイルを保護する。"""
+    playlist_original = "{壊れたプレイリスト"
+    settings_original = "{壊れた設定"
+    playlist_file.write_text(playlist_original, encoding="utf-8")
+    settings_file.write_text(settings_original, encoding="utf-8")
+
+    composition = app_module.build_player(playlist_file, settings_file)
+    qtbot.addWidget(composition.window)
+    message = composition.window.statusBar().currentMessage()
+
+    assert composition.playlist_session.is_save_enabled is False
+    assert composition.settings_session.is_save_enabled is False
+    assert "プレイリスト" in message
+    assert "設定" in message
+    assert composition.settings_session.flush() is False
+    assert composition.playlist_session.save_from(composition.playlist_model) is False
+    assert playlist_file.read_text(encoding="utf-8") == playlist_original
+    assert settings_file.read_text(encoding="utf-8") == settings_original
+
+
 def test_corrupted_playlist_does_not_crash_startup(
     playlist_file: Path, qtbot: QtBot, caplog: pytest.LogCaptureFixture
 ) -> None:

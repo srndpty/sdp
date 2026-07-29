@@ -107,6 +107,10 @@ class ShortcutManager(QObject):
         self._window = window
         self._playback = playback
         self._playlist_playback = playlist_playback
+        self._managed_sequences = frozenset(
+            QKeySequence(spec.sequence).toString(QKeySequence.SequenceFormat.PortableText)
+            for spec in SHORTCUT_SPECS
+        )
         app = QApplication.instance()
         if isinstance(app, QApplication):
             # QShortcutが入力を消費する前のShortcutOverrideで、編集Widgetと
@@ -137,6 +141,14 @@ class ShortcutManager(QObject):
         return super().eventFilter(watched, event)
 
     def _should_override_shortcut(self, event: QEvent) -> bool:
+        if not isinstance(event, QKeyEvent):
+            return False
+        # Ctrl+Oや編集Widget自身のCtrl+C等、Managerの管理外キーは奪わない。
+        sequence = QKeySequence(event.keyCombination()).toString(
+            QKeySequence.SequenceFormat.PortableText
+        )
+        if sequence not in self._managed_sequences:
+            return False
         focused = QApplication.focusWidget()
         if focused is None or not self._window.isAncestorOf(focused):
             return False
@@ -144,11 +156,7 @@ class ShortcutManager(QObject):
             return True
         if isinstance(focused, QComboBox) and focused.isEditable():
             return True
-        return (
-            isinstance(focused, QAbstractButton)
-            and isinstance(event, QKeyEvent)
-            and event.key() == Qt.Key.Key_Space
-        )
+        return isinstance(focused, QAbstractButton) and event.key() == Qt.Key.Key_Space
 
     def _editing_widget_has_focus(self, action: ShortcutAction) -> bool:
         focused = QApplication.focusWidget()
