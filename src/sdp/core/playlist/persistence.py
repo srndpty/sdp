@@ -72,6 +72,10 @@ def load_playlist(file_path: Path) -> list[PlaylistEntry]:
         text = file_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return []
+    except UnicodeDecodeError as error:
+        raise PlaylistFileError(
+            f"プレイリストファイルが UTF-8 として不正です: {file_path}"
+        ) from error
     try:
         parsed: object = json.loads(text)
     except json.JSONDecodeError as error:

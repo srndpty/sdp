@@ -121,7 +121,7 @@ class PlaylistView(QWidget):
         self._table.setAcceptDrops(True)
         self._table.setDropIndicatorShown(True)
         self._table.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
-        self._table.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self._table.setDefaultDropAction(Qt.DropAction.CopyAction)
         # 行の「上書き」ではなく行と行の「間」へ落とす並べ替えにする。
         self._table.setDragDropOverwriteMode(False)
         self._table.verticalHeader().setVisible(False)

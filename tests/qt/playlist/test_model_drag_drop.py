@@ -58,8 +58,16 @@ def names(model: PlaylistModel) -> list[str]:
 _ROOT = QModelIndex()
 
 
-def drop(model: PlaylistModel, mime: QMimeData, row: int, parent: QModelIndex = _ROOT) -> bool:
-    return model.dropMimeData(mime, Qt.DropAction.MoveAction, row, 0, parent)
+def drop(
+    model: PlaylistModel,
+    mime: QMimeData,
+    row: int,
+    parent: QModelIndex = _ROOT,
+    *,
+    action: Qt.DropAction = Qt.DropAction.CopyAction,
+    column: int = 0,
+) -> bool:
+    return model.dropMimeData(mime, action, row, column, parent)
 
 
 # -- flags と対応アクション --------------------------------------------------
@@ -83,10 +91,9 @@ def test_root_flags_allow_drop(model: PlaylistModel) -> None:
 
 
 def test_supported_actions(model: PlaylistModel) -> None:
-    """ドラッグは移動、ドロップは複製と移動を受け付ける。"""
-    assert model.supportedDragActions() == Qt.DropAction.MoveAction
-    assert model.supportedDropActions() & Qt.DropAction.MoveAction
-    assert model.supportedDropActions() & Qt.DropAction.CopyAction
+    """D&D転送は複製だけを使い、内部MIMEの意味だけを行移動とする。"""
+    assert model.supportedDragActions() == Qt.DropAction.CopyAction
+    assert model.supportedDropActions() == Qt.DropAction.CopyAction
 
 
 def test_mime_types(model: PlaylistModel) -> None:
@@ -135,10 +142,24 @@ def test_mime_data_does_not_leak_paths(model: PlaylistModel, audio_files: list[P
 
 
 def test_external_urls_are_appended(model: PlaylistModel, audio_files: list[Path]) -> None:
-    """末尾（row=-1）へのドロップで順序どおり追加する。"""
+    """Copyによる末尾ドロップで順序どおり追加し、元ファイルを残す。"""
     assert drop(model, url_mime(audio_files[:3]), -1) is True
 
     assert names(model) == [path.name for path in audio_files[:3]]
+    assert all(path.exists() for path in audio_files[:3])
+
+
+@pytest.mark.parametrize("action", [Qt.DropAction.MoveAction, Qt.DropAction.LinkAction])
+def test_external_urls_reject_non_copy_actions(
+    model: PlaylistModel, audio_files: list[Path], action: Qt.DropAction
+) -> None:
+    """Move・Linkとして届いた外部URLは追加せず、元ファイルも残す。"""
+    path = audio_files[0]
+
+    assert drop(model, url_mime([path]), -1, action=action) is False
+
+    assert model.rowCount() == 0
+    assert path.exists()
 
 
 def test_external_urls_are_inserted_at_row(model: PlaylistModel, audio_files: list[Path]) -> None:
@@ -257,6 +278,24 @@ def test_can_drop_accepts_local_urls(model: PlaylistModel, audio_files: list[Pat
         )
         is True
     )
+
+
+@pytest.mark.parametrize(
+    ("action", "column"),
+    [
+        (Qt.DropAction.MoveAction, 0),
+        (Qt.DropAction.LinkAction, 0),
+        (Qt.DropAction.CopyAction, 1),
+    ],
+)
+def test_can_drop_rejects_unsupported_action_or_column(
+    model: PlaylistModel,
+    audio_files: list[Path],
+    action: Qt.DropAction,
+    column: int,
+) -> None:
+    """実際のdropで拒否するaction・列にはドロップ可能表示を出さない。"""
+    assert model.canDropMimeData(url_mime(audio_files[:1]), action, -1, column, _ROOT) is False
 
 
 def test_can_drop_rejects_unrelated_mime(model: PlaylistModel) -> None:
@@ -398,21 +437,23 @@ def test_internal_drop_inside_moved_range_is_rejected(
     assert names(model) == before
 
 
-def test_non_contiguous_internal_drag_is_rejected(
-    model: PlaylistModel, audio_files: list[Path]
+def test_non_contiguous_internal_drag_is_rejected_without_probe_logs(
+    model: PlaylistModel,
+    audio_files: list[Path],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """非連続の複数行ドラッグは安全に拒否する（P2-B の対応範囲）。"""
+    """非連続選択の可否照会は静かに拒否し、確定drop時だけ警告する。"""
     model.add_paths(audio_files)
     moved_ids = [model.entry_at(row).entry_id for row in (0, 2)]
     before = names(model)
+    mime = internal_mime(moved_ids)
 
-    assert (
-        model.canDropMimeData(
-            internal_mime(moved_ids), Qt.DropAction.MoveAction, 4, 0, QModelIndex()
-        )
-        is False
-    )
-    assert drop(model, internal_mime(moved_ids), 4) is False
+    for _ in range(5):
+        assert model.canDropMimeData(mime, Qt.DropAction.CopyAction, 4, 0, _ROOT) is False
+    assert caplog.text == ""
+
+    assert drop(model, mime, 4) is False
+    assert caplog.text.count("非連続の複数行ドラッグ") == 1
     assert names(model) == before
 
 
@@ -438,7 +479,7 @@ def test_broken_internal_mime_is_rejected_without_exception(
     mime = QMimeData()
     mime.setData(INTERNAL_MIME_TYPE, QByteArray(payload))
 
-    assert model.canDropMimeData(mime, Qt.DropAction.MoveAction, 0, 0, QModelIndex()) is False
+    assert model.canDropMimeData(mime, Qt.DropAction.CopyAction, 0, 0, QModelIndex()) is False
     assert drop(model, mime, 0) is False
     assert model.rowCount() == len(audio_files)
 
@@ -460,6 +501,20 @@ def test_internal_drop_as_copy_action_still_moves(
 
     assert model.rowCount() == len(audio_files)
     assert model.row_of_entry_id(moved_id) == 2
+
+
+def test_can_drop_rejects_internal_no_op_destination(
+    model: PlaylistModel, audio_files: list[Path]
+) -> None:
+    """移動元の範囲内と直後にはドロップ可能表示を出さない。"""
+    model.add_paths(audio_files)
+    mime = internal_mime([model.entry_at(row).entry_id for row in (1, 2)])
+
+    for destination in (1, 2, 3):
+        assert (
+            model.canDropMimeData(mime, Qt.DropAction.CopyAction, destination, 0, QModelIndex())
+            is False
+        )
 
 
 # -- ドロップ位置 -----------------------------------------------------------

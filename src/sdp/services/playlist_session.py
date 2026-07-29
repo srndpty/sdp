@@ -58,9 +58,9 @@ class PlaylistSession:
             self._save_enabled = False
             return RESTORE_FAILED_MESSAGE
 
+        model.replace_entries(entries)
         if not entries:
             return None
-        model.replace_entries(entries)
         return f"プレイリストを復元しました（{len(entries)}件）。"
 
     def save_from(self, model: PlaylistModel) -> bool:

@@ -164,6 +164,7 @@ def test_table_drag_and_drop_settings(view: PlaylistView) -> None:
     assert table.showDropIndicator()
     assert table.dragDropMode() == QAbstractItemView.DragDropMode.DragDrop
     assert not table.dragDropOverwriteMode()
+    assert table.defaultDropAction() == Qt.DropAction.CopyAction
 
 
 def test_internal_drag_runs_as_copy_action(

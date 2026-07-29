@@ -69,6 +69,22 @@ def test_missing_file_starts_empty(tmp_path: Path, model: PlaylistModel) -> None
     assert session.is_save_enabled
 
 
+def test_empty_saved_playlist_replaces_existing_model(
+    tmp_path: Path, model: PlaylistModel, audio_files: list[Path]
+) -> None:
+    """正常な空プレイリストを復元すると、既存の行をすべて消去する。"""
+    file_path = tmp_path / "playlist.json"
+    save_playlist(file_path, [])
+    model.add_paths(audio_files)
+    session = PlaylistSession(file_path)
+
+    message = session.load_into(model)
+
+    assert message is None
+    assert model.rowCount() == 0
+    assert session.is_save_enabled
+
+
 def test_restore_preserves_order_ids_and_duplicates(
     tmp_path: Path, model: PlaylistModel, audio_files: list[Path]
 ) -> None:
@@ -135,6 +151,24 @@ def test_corrupted_file_is_not_overwritten_on_save(tmp_path: Path, model: Playli
 
     assert session.save_from(model) is False
     assert file_path.read_text(encoding="utf-8") == original
+
+
+def test_non_utf8_file_disables_saving_and_keeps_original_bytes(
+    tmp_path: Path, model: PlaylistModel
+) -> None:
+    """文字コードとして壊れたファイルも復元失敗として保護する。"""
+    file_path = tmp_path / "playlist.json"
+    original = b"\x80\x81\xff"
+    file_path.write_bytes(original)
+    session = PlaylistSession(file_path)
+
+    message = session.load_into(model)
+
+    assert message == RESTORE_FAILED_MESSAGE
+    assert model.rowCount() == 0
+    assert not session.is_save_enabled
+    assert session.save_from(model) is False
+    assert file_path.read_bytes() == original
 
 
 def test_read_error_is_logged_and_disables_saving(

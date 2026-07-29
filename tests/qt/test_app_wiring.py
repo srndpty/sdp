@@ -222,3 +222,20 @@ def test_corrupted_playlist_is_not_overwritten_on_shutdown(
     assert composition.playlist_session.is_save_enabled is False
     assert composition.playlist_session.save_from(composition.playlist_model) is False
     assert playlist_file.read_text(encoding="utf-8") == original
+
+
+def test_non_utf8_playlist_does_not_crash_or_get_overwritten(
+    playlist_file: Path, qtbot: QtBot
+) -> None:
+    """非UTF-8の保存ファイルでも空で起動し、元のバイト列を保護する。"""
+    original = b"\x80\x81\xff"
+    playlist_file.write_bytes(original)
+
+    composition = app_module.build_player(playlist_file)
+    qtbot.addWidget(composition.window)
+
+    assert composition.playlist_model.rowCount() == 0
+    assert composition.window.statusBar().currentMessage() == RESTORE_FAILED_MESSAGE
+    assert not composition.playlist_session.is_save_enabled
+    assert composition.playlist_session.save_from(composition.playlist_model) is False
+    assert playlist_file.read_bytes() == original

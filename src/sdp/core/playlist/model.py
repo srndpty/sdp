@@ -206,10 +206,12 @@ class PlaylistModel(QAbstractTableModel):
         )
 
     def supportedDragActions(self) -> Qt.DropAction:
-        return Qt.DropAction.MoveAction
+        return Qt.DropAction.CopyAction
 
     def supportedDropActions(self) -> Qt.DropAction:
-        return Qt.DropAction.CopyAction | Qt.DropAction.MoveAction
+        # 外部ドラッグ元へ Move 成功を返すと、元ファイルを削除される恐れがある。
+        # 内部並べ替えも転送上は Copy とし、意味上の移動は _drop_internal で行う。
+        return Qt.DropAction.CopyAction
 
     def mimeTypes(self) -> list[str]:
         return [INTERNAL_MIME_TYPE, URI_LIST_MIME_TYPE]
@@ -233,9 +235,15 @@ class PlaylistModel(QAbstractTableModel):
         column: int,
         parent: QModelIndex | QPersistentModelIndex,
     ) -> bool:
-        del action, row, column, parent
+        if action != Qt.DropAction.CopyAction or column not in (-1, 0):
+            return False
+        destination = self.drop_row(row, parent)
         if data.hasFormat(INTERNAL_MIME_TYPE):
-            return self._parse_internal_mime(data) is not None
+            rows = self._parse_internal_mime(data, log_failure=False)
+            if rows is None:
+                return False
+            # moveRows が拒否する no-op の位置ではドロップ表示も出さない。
+            return not rows[0] <= destination <= rows[0] + len(rows)
         # 外部 URL はここでは軽い判定に留める。ドラッグ中に何度も呼ばれるため、
         # ディレクトリ判定などのファイルシステムアクセスは dropMimeData 側で行う。
         return data.hasUrls() and any(url.isLocalFile() for url in data.urls())
@@ -249,13 +257,13 @@ class PlaylistModel(QAbstractTableModel):
         parent: QModelIndex | QPersistentModelIndex,
     ) -> bool:
         """ドロップを受け付ける。不正なデータでは例外を投げず ``False`` を返す。"""
-        del column
         if action == Qt.DropAction.IgnoreAction:
             return True
+        if action != Qt.DropAction.CopyAction or column not in (-1, 0):
+            return False
         destination = self.drop_row(row, parent)
         if data.hasFormat(INTERNAL_MIME_TYPE):
-            # 内部 D&D は Copy/Move のどちらで届いても「移動」として扱う
-            # （View 側が行を自動削除しないよう Copy として実行するため）。
+            # 転送は Copy だが、内部 MIME の意味はプレイリスト行の移動。
             return self._drop_internal(data, destination)
         if data.hasUrls():
             return self._drop_urls(data, destination)
@@ -274,7 +282,7 @@ class PlaylistModel(QAbstractTableModel):
             return len(self._entries)
         return min(row, len(self._entries))
 
-    def _parse_internal_mime(self, data: QMimeData) -> list[int] | None:
+    def _parse_internal_mime(self, data: QMimeData, *, log_failure: bool) -> list[int] | None:
         """内部 MIME を現在の行番号の昇順リストへ変換する。
 
         壊れたデータ・未知の entry_id・非連続の選択では ``None`` を返す。
@@ -285,31 +293,36 @@ class PlaylistModel(QAbstractTableModel):
         try:
             parsed: object = json.loads(payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
-            _logger.warning("内部 D&D の MIME データを解釈できません。")
+            if log_failure:
+                _logger.warning("内部 D&D の MIME データを解釈できません。")
             return None
         if not isinstance(parsed, list):
-            _logger.warning("内部 D&D の MIME データが配列ではありません。")
+            if log_failure:
+                _logger.warning("内部 D&D の MIME データが配列ではありません。")
             return None
         rows: list[int] = []
         for value in parsed:  # pyright: ignore[reportUnknownVariableType]
             if not isinstance(value, str):
-                _logger.warning("内部 D&D の entry_id が文字列ではありません。")
+                if log_failure:
+                    _logger.warning("内部 D&D の entry_id が文字列ではありません。")
                 return None
             row = self._row_by_entry_id.get(value)
             if row is None:
-                _logger.warning("内部 D&D に未知の entry_id が含まれています。")
+                if log_failure:
+                    _logger.warning("内部 D&D に未知の entry_id が含まれています。")
                 return None
             rows.append(row)
         if not rows:
             return None
         rows.sort()
         if rows[-1] - rows[0] + 1 != len(rows):
-            _logger.warning("非連続の複数行ドラッグには対応していません。")
+            if log_failure:
+                _logger.warning("非連続の複数行ドラッグには対応していません。")
             return None
         return rows
 
     def _drop_internal(self, data: QMimeData, destination: int) -> bool:
-        rows = self._parse_internal_mime(data)
+        rows = self._parse_internal_mime(data, log_failure=True)
         if rows is None:
             return False
         return self.moveRows(_ROOT, rows[0], len(rows), _ROOT, destination)
