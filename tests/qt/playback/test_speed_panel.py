@@ -176,6 +176,40 @@ def test_float32_readback_does_not_move_requested_display(
     assert backend.call_args("set_playback_rate") == [(1.35,)]
 
 
+def test_rate_setter_failure_restores_controller_value(
+    panel: SpeedPanel, controller: PlaybackController, backend: FakePlaybackBackend, qtbot: QtBot
+) -> None:
+    """Backendの速度設定失敗後はControllerのロールバック値を表示する。"""
+    backend.setter_errors["set_playback_rate"] = RuntimeError("速度設定失敗")
+
+    with qtbot.captureExceptions() as exceptions:
+        slider(panel).setValue(150)
+
+    assert len(exceptions) == 1
+    assert isinstance(exceptions[0][1], RuntimeError)
+    assert controller.playback_rate == 1.25
+    assert slider(panel).value() == 125
+    assert spin_box(panel).value() == 1.25
+
+
+def test_pitch_setter_failure_restores_controller_value(
+    panel: SpeedPanel, controller: PlaybackController, backend: FakePlaybackBackend, qtbot: QtBot
+) -> None:
+    """Backendのpitch設定失敗後はControllerのロールバック値を表示する。"""
+    backend.setter_errors["set_pitch_compensation"] = RuntimeError("pitch設定失敗")
+
+    with qtbot.captureExceptions() as exceptions:
+        pitch_check_box(panel).click()
+
+    assert len(exceptions) == 1
+    assert isinstance(exceptions[0][1], RuntimeError)
+    assert controller.pitch_compensation is False
+    assert pitch_check_box(panel).isChecked() is False
+    mode = panel.findChild(QLabel, "pitchModeLabel")
+    assert mode is not None
+    assert "varispeed" in mode.text()
+
+
 def test_widget_ranges_clamp_user_values(panel: SpeedPanel) -> None:
     """WidgetからUI契約の0.50～2.00を超えない。"""
     slider(panel).setValue(0)

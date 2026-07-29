@@ -146,14 +146,28 @@ class SpeedPanel(QWidget):
         self._request_rate(DEFAULT_PLAYBACK_RATE)
 
     def _on_pitch_toggled(self, enabled: bool) -> None:
-        self._apply_pitch_to_widgets(enabled)
-        if enabled != self._controller.pitch_compensation:
+        if enabled == self._controller.pitch_compensation:
+            self._apply_controller_pitch(self._controller.pitch_compensation)
+            return
+        try:
             self._controller.set_pitch_compensation(enabled)
+        except Exception:
+            # Controllerはsetter失敗時に真値を戻すがSignalは発火しないため、
+            # UIも公開propertyから明示的にロールバックする。
+            self._apply_controller_pitch(self._controller.pitch_compensation)
+            raise
 
     def _request_rate(self, rate: float) -> None:
-        self._apply_rate_to_widgets(rate)
-        if rate != self._controller.playback_rate:
+        if rate == self._controller.playback_rate:
+            self._apply_controller_rate(self._controller.playback_rate)
+            return
+        try:
             self._controller.set_playback_rate(rate)
+        except Exception:
+            # Controllerはsetter失敗時に真値を戻すがSignalは発火しないため、
+            # UIも公開propertyから明示的にロールバックする。
+            self._apply_controller_rate(self._controller.playback_rate)
+            raise
 
     def _apply_controller_rate(self, rate: float) -> None:
         if not math.isfinite(rate) or not (MIN_PLAYBACK_RATE <= rate <= MAX_PLAYBACK_RATE):
