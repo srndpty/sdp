@@ -427,7 +427,7 @@ def test_duplicate_end_of_media_does_not_advance_twice(
     assert controller.current_entry_id == entry_ids[1]
 
 
-def test_stale_end_of_media_after_manual_switch_is_ignored(
+def test_scheduled_end_of_media_after_manual_switch_is_ignored(
     controller: PlaylistPlaybackController,
     playlist: PlaylistModel,
     backend: FakePlaybackBackend,
@@ -447,21 +447,66 @@ def test_stale_end_of_media_after_manual_switch_is_ignored(
     assert controller.current_entry_id == entry_ids[3]
 
 
-def test_end_of_media_far_from_the_end_is_ignored(
+def test_end_of_media_is_not_rejected_by_position_heuristics(
     controller: PlaylistPlaybackController,
     playlist: PlaylistModel,
     backend: FakePlaybackBackend,
     audio_files: list[Path],
     qtbot: QtBot,
 ) -> None:
-    """明らかに曲末ではない位置での終了通知は適用しない。"""
+    """Backendの終了通知をposition比率だけで誤って捨てない。"""
     entry_ids = playlist.add_paths(audio_files)
     controller.play_entry(entry_ids[0])
 
     backend.emit_position(10)
     finish_current_track(backend, qtbot, at_end=False)
 
-    assert controller.current_entry_id == entry_ids[0]
+    assert controller.current_entry_id == entry_ids[1]
+
+
+def test_late_duplicate_end_is_ignored_until_the_new_source_starts(
+    controller: PlaylistPlaybackController,
+    playlist: PlaylistModel,
+    backend: FakePlaybackBackend,
+    audio_files: list[Path],
+    qtbot: QtBot,
+) -> None:
+    """A終了後の遅延重複ENDはBを飛ばさず、B自身の終了ならCへ進む。"""
+    entry_ids = playlist.add_paths(audio_files[:3])
+    controller.play_entry(entry_ids[0])
+
+    finish_current_track(backend, qtbot)
+    assert controller.current_entry_id == entry_ids[1]
+
+    # Bのpositionが未確定の間に届くA由来の重複通知。
+    backend.emit_position(0)
+    backend.emit_media_status(MediaStatus.END_OF_MEDIA)
+    process_deferred_events(qtbot)
+    assert controller.current_entry_id == entry_ids[1]
+
+    # Bが進み始めた後の正規の終了通知は、Bの世代として1回だけ消費する。
+    backend.emit_position(1)
+    backend.emit_media_status(MediaStatus.END_OF_MEDIA)
+    process_deferred_events(qtbot)
+    assert controller.current_entry_id == entry_ids[2]
+
+
+def test_late_duplicate_end_after_auto_advance_does_not_skip_another_entry(
+    controller: PlaylistPlaybackController,
+    playlist: PlaylistModel,
+    backend: FakePlaybackBackend,
+    audio_files: list[Path],
+    qtbot: QtBot,
+) -> None:
+    """イベントループをまたいだ前sourceの重複ENDでも1曲だけ進む。"""
+    entry_ids = playlist.add_paths(audio_files[:3])
+    controller.play_entry(entry_ids[0])
+
+    finish_current_track(backend, qtbot)
+    backend.emit_media_status(MediaStatus.END_OF_MEDIA)
+    process_deferred_events(qtbot)
+
+    assert controller.current_entry_id == entry_ids[1]
 
 
 def test_consecutive_duplicate_paths_advance_one_by_one(
@@ -499,6 +544,26 @@ def test_end_of_media_on_the_last_entry_keeps_the_current_entry(
 
     assert controller.current_entry_id == entry_ids[-1]
     assert backend.call_names() == []
+    assert spy.count() == 1
+    assert spy.at(0)[0] == END_OF_PLAYLIST_MESSAGE
+
+
+def test_duplicate_end_on_last_entry_reports_the_end_once(
+    controller: PlaylistPlaybackController,
+    playlist: PlaylistModel,
+    backend: FakePlaybackBackend,
+    audio_files: list[Path],
+    qtbot: QtBot,
+) -> None:
+    """末尾のENDをイベントループ後に再通知されてもメッセージは1回。"""
+    entry_ids = playlist.add_paths(audio_files[:1])
+    controller.play_entry(entry_ids[0])
+    spy = QSignalSpy(controller.message_requested)
+
+    finish_current_track(backend, qtbot)
+    backend.emit_media_status(MediaStatus.END_OF_MEDIA)
+    process_deferred_events(qtbot)
+
     assert spy.count() == 1
     assert spy.at(0)[0] == END_OF_PLAYLIST_MESSAGE
 
@@ -681,3 +746,65 @@ def test_file_vanishing_between_check_and_load_does_not_play(
 
     assert "play" not in backend.call_names()
     assert controller.current_entry_id is None
+
+
+@pytest.mark.parametrize("forward", [True, False])
+def test_navigation_continues_after_candidate_vanishes_before_load(
+    controller: PlaylistPlaybackController,
+    playlist: PlaylistModel,
+    audio_files: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+    forward: bool,
+) -> None:
+    """候補が確認直後に消えても、同じ方向の次候補まで探索する。"""
+    entry_ids = playlist.add_paths(audio_files[:3])
+    current_index, vanishing_index, expected_index = (0, 1, 2) if forward else (2, 1, 0)
+    controller.play_entry(entry_ids[current_index])
+    original_refresh = PlaylistModel.refresh_entry_status
+    deleted = False
+
+    def refresh_then_delete(model: PlaylistModel, entry_id: str) -> bool:
+        nonlocal deleted
+        result = original_refresh(model, entry_id)
+        if entry_id == entry_ids[vanishing_index] and not deleted:
+            audio_files[vanishing_index].unlink()
+            deleted = True
+        return result
+
+    monkeypatch.setattr(PlaylistModel, "refresh_entry_status", refresh_then_delete)
+
+    result = controller.play_next() if forward else controller.play_previous()
+
+    assert result is True
+    assert controller.current_entry_id == entry_ids[expected_index]
+    assert playlist.entry_at(vanishing_index).is_missing
+
+
+def test_auto_advance_continues_after_candidate_vanishes_before_load(
+    controller: PlaylistPlaybackController,
+    playlist: PlaylistModel,
+    backend: FakePlaybackBackend,
+    audio_files: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot: QtBot,
+) -> None:
+    """自動次曲でもTOCTOU欠損を飛ばして後続曲へ進む。"""
+    entry_ids = playlist.add_paths(audio_files[:3])
+    controller.play_entry(entry_ids[0])
+    original_refresh = PlaylistModel.refresh_entry_status
+    deleted = False
+
+    def refresh_then_delete(model: PlaylistModel, entry_id: str) -> bool:
+        nonlocal deleted
+        result = original_refresh(model, entry_id)
+        if entry_id == entry_ids[1] and not deleted:
+            audio_files[1].unlink()
+            deleted = True
+        return result
+
+    monkeypatch.setattr(PlaylistModel, "refresh_entry_status", refresh_then_delete)
+
+    finish_current_track(backend, qtbot)
+
+    assert controller.current_entry_id == entry_ids[2]
+    assert playlist.entry_at(1).is_missing

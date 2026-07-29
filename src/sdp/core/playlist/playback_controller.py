@@ -9,7 +9,7 @@ PlaybackController は「1 つの source の再生」だけを担当し、曲順
 リピートとシャッフルは P2-C2 で追加する。
 """
 
-import logging
+from enum import Enum, auto
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -18,18 +18,17 @@ from sdp.core.playback.controller import PlaybackController
 from sdp.core.playback.types import MediaStatus
 from sdp.core.playlist.model import PlaylistModel
 
-_logger = logging.getLogger(__name__)
-
 MISSING_FILE_MESSAGE = "ファイルが見つからないため再生できません。"
 END_OF_PLAYLIST_MESSAGE = "プレイリストの最後まで再生しました。"
 
-_STALE_END_OF_MEDIA_RATIO = 0.5
-"""古い ``END_OF_MEDIA`` 通知とみなす位置の割合。
 
-新しい曲を読み込んだ直後に前の曲の終了通知が届くことがあるため、
-「再生位置が判明していて、かつ曲の前半にいる」場合は曲末の通知ではないとみなす。
-位置が 0（読み込み直後の未確定）や duration 未確定のときは判定に使わない。
-"""
+class _PlayAttempt(Enum):
+    """曲送り候補への再生要求結果。"""
+
+    STARTED = auto()
+    MISSING = auto()
+    NOT_FOUND = auto()
+    REJECTED = auto()
 
 
 class PlaylistPlaybackController(QObject):
@@ -60,12 +59,16 @@ class PlaylistPlaybackController(QObject):
         # play_entry() から load している最中だけ設定する。source_changed を
         # 受けたときに「自分が読み込んだのか、外から開かれたのか」を区別する。
         self._loading_entry_id: str | None = None
-        # 自動次曲を 1 回の終了通知につき 1 度だけにするためのフラグ。
-        self._auto_advance_scheduled = False
+        # END_OF_MEDIA は source 世代ごとに 1 回だけ消費する。タイマー処理後も
+        # source が変わるまでは解除せず、遅れて届く重複通知を抑止する。
+        self._source_generation = 0
+        self._end_consumed_generation: int | None = None
+        self._current_generation_started = False
         self._can_play_previous = False
         self._can_play_next = False
 
         playback.source_changed.connect(self._on_source_changed)
+        playback.position_changed.connect(self._on_position_changed)
         playback.media_status_changed.connect(self._on_media_status_changed)
         playlist.rowsInserted.connect(self._on_playlist_rows_changed)
         playlist.rowsRemoved.connect(self._on_playlist_rows_changed)
@@ -97,44 +100,67 @@ class PlaylistPlaybackController(QObject):
     # -- 操作 ---------------------------------------------------------------
 
     def play_entry(self, entry_id: str) -> bool:
-        """指定した entry を再生する。再生を開始できたら ``True``。
+        """指定entryの読み込み・再生要求を発行できたら ``True``。
 
         ユーザーが明示的に選んだ操作のため、**欠損していても別の曲へは移動しない**。
-        デコードできないファイルの扱いは PlaybackController の既存エラー処理へ委ねる。
+        実際にデコード・再生開始できたかは、PlaybackController の状態・エラーシグナルで
+        後から通知される。再生エラーでも現在entryは維持し、自動スキップしない。
         """
-        row = self._playlist.row_of_entry_id(entry_id)
-        if row is None:
-            return False
-
-        self._playlist.refresh_entry_status(entry_id)
-        entry = self._playlist.entry_at(row)
-        if entry.is_missing:
-            self.message_requested.emit(MISSING_FILE_MESSAGE)
-            self._update_navigation_availability()
-            return False
-
-        if not self._load_entry(entry_id, entry.path):
-            return False
-        self._playback.play()
-        return True
+        return self._attempt_play_entry(entry_id, report_missing=True) is _PlayAttempt.STARTED
 
     def play_next(self) -> bool:
         """次の再生可能な entry へ進む。末尾で折り返さない（P2-C2 の Repeat ALL の責務）。"""
-        return self._play_row(self._find_playable_row(forward=True))
+        return self._play_candidates(forward=True) is _PlayAttempt.STARTED
 
     def play_previous(self) -> bool:
         """前の再生可能な entry へ戻る。先頭で折り返さない。
 
         「数秒以上再生していたら曲頭へ戻す」という挙動は P2-C1 では入れない。
         """
-        return self._play_row(self._find_playable_row(forward=False))
+        return self._play_candidates(forward=False) is _PlayAttempt.STARTED
 
     # -- 内部: 再生 ---------------------------------------------------------
 
-    def _play_row(self, row: int | None) -> bool:
+    def _attempt_play_entry(self, entry_id: str, *, report_missing: bool) -> _PlayAttempt:
+        """1件へ再生要求し、同期的に判定できる失敗理由を返す。"""
+        row = self._playlist.row_of_entry_id(entry_id)
         if row is None:
-            return False
-        return self.play_entry(self._playlist.entry_at(row).entry_id)
+            return _PlayAttempt.NOT_FOUND
+
+        self._playlist.refresh_entry_status(entry_id)
+        row = self._playlist.row_of_entry_id(entry_id)
+        if row is None:
+            return _PlayAttempt.NOT_FOUND
+        entry = self._playlist.entry_at(row)
+        if entry.is_missing:
+            if report_missing:
+                self.message_requested.emit(MISSING_FILE_MESSAGE)
+                self._update_navigation_availability()
+            return _PlayAttempt.MISSING
+
+        if self._load_entry(entry_id, entry.path):
+            self._playback.play()
+            return _PlayAttempt.STARTED
+
+        # 存在確認と load の間に消えた場合は欠損として Model へ反映する。
+        self._playlist.refresh_entry_status(entry_id)
+        row = self._playlist.row_of_entry_id(entry_id)
+        if row is None:
+            return _PlayAttempt.NOT_FOUND
+        if self._playlist.entry_at(row).is_missing:
+            return _PlayAttempt.MISSING
+        return _PlayAttempt.REJECTED
+
+    def _play_candidates(self, *, forward: bool) -> _PlayAttempt:
+        """曲順に候補を試し、欠損・削除済みのentryだけをスキップする。"""
+        for entry_id in self._candidate_entry_ids(forward=forward):
+            attempt = self._attempt_play_entry(entry_id, report_missing=False)
+            if attempt is _PlayAttempt.STARTED:
+                return attempt
+            if attempt is _PlayAttempt.REJECTED:
+                # デコード失敗など同期的に欠損と断定できない失敗は隠さない。
+                return attempt
+        return _PlayAttempt.NOT_FOUND
 
     def _load_entry(self, entry_id: str, path: Path) -> bool:
         """entry を読み込み、現在 entry として関連付けられたかを返す。
@@ -151,15 +177,15 @@ class PlaylistPlaybackController(QObject):
         # 一致しない場合は load が成立しなかった（欠損などで Controller がエラーにした）。
         return self._current_entry_id == entry_id
 
-    def _find_playable_row(self, *, forward: bool) -> int | None:
-        """再生可能な行を探す。欠損はスキップする。
+    def _candidate_entry_ids(self, *, forward: bool) -> tuple[str, ...]:
+        """現在位置から指定方向にあるentry_idを曲順で返す。
 
-        探索は最大でも行数で終わる。候補が無ければ ``None``。
         現在 entry が無い場合は、前方探索なら先頭から、後方探索なら末尾から探す。
+        entry_idのスナップショットにすることで、状態更新中の行変化に影響されない。
         """
         total = self._playlist.rowCount()
         if total == 0:
-            return None
+            return ()
         current_row = (
             None
             if self._current_entry_id is None
@@ -172,13 +198,7 @@ class PlaylistPlaybackController(QObject):
             start = total - 1 if current_row is None else current_row - 1
             candidates = range(start, -1, -1)
 
-        for row in candidates:
-            entry = self._playlist.entry_at(row)
-            # 探索の途中で見つけた欠損は Model へ反映し、グレー表示を更新する。
-            self._playlist.refresh_entry_status(entry.entry_id)
-            if not self._playlist.entry_at(row).is_missing:
-                return row
-        return None
+        return tuple(self._playlist.entry_at(row).entry_id for row in candidates)
 
     # -- 内部: 通知の受信 ---------------------------------------------------
 
@@ -190,7 +210,15 @@ class PlaylistPlaybackController(QObject):
         重複パスがあるため、パスの一致では判断しない。
         """
         del source
+        self._source_generation += 1
+        self._end_consumed_generation = None
+        self._current_generation_started = False
         self._set_current_entry_id(self._loading_entry_id)
+
+    def _on_position_changed(self, position_ms: int) -> None:
+        """現在sourceが実際に進み始めたことを記録する。"""
+        if position_ms > 0:
+            self._current_generation_started = True
 
     def _on_media_status_changed(self, status: MediaStatus) -> None:
         if status is not MediaStatus.END_OF_MEDIA:
@@ -198,50 +226,36 @@ class PlaylistPlaybackController(QObject):
         if self._current_entry_id is None:
             # 「開く...」で直接開いた単曲。プレイリストへ勝手に移らない。
             return
-        if self._auto_advance_scheduled:
-            # 同じ終了で 2 曲以上進めない。
+        if not self._current_generation_started:
+            # source切替直後の未開始状態へ届いた、前source由来の通知を無視する。
             return
-        if self._is_stale_end_of_media():
+        generation = self._source_generation
+        if self._end_consumed_generation == generation:
             return
 
         entry_id = self._current_entry_id
         source = self._playback.source
-        self._auto_advance_scheduled = True
+        self._end_consumed_generation = generation
         # イベントループの次のターンまで遅らせ、その間に current や source が
         # 変わっていないことを再確認してから進める。
-        QTimer.singleShot(0, lambda: self._advance_after_end_of_media(entry_id, source))
-
-    def _is_stale_end_of_media(self) -> bool:
-        """明らかに曲末ではない終了通知かどうか。
-
-        新しい曲を読み込んだ直後に前の曲の通知が届く場合の防御。
-        位置や duration が未確定のときは判定に使わない（正当な通知を捨てないため）。
-        """
-        duration_ms = self._playback.duration_ms
-        position_ms = self._playback.position_ms
-        if duration_ms <= 0 or position_ms <= 0:
-            return False
-        if position_ms >= duration_ms * _STALE_END_OF_MEDIA_RATIO:
-            return False
-        _logger.debug(
-            "曲末ではない END_OF_MEDIA を無視: position=%dms duration=%dms",
-            position_ms,
-            duration_ms,
+        QTimer.singleShot(
+            0,
+            lambda: self._advance_after_end_of_media(generation, entry_id, source),
         )
-        return True
 
-    def _advance_after_end_of_media(self, entry_id: str, source: Path | None) -> None:
-        self._auto_advance_scheduled = False
+    def _advance_after_end_of_media(
+        self, generation: int, entry_id: str, source: Path | None
+    ) -> None:
+        if generation != self._source_generation:
+            return
         if self._current_entry_id != entry_id or self._playback.source != source:
             # 遅延している間に手動で切り替わった。古い通知は適用しない。
             return
-        row = self._find_playable_row(forward=True)
-        if row is None:
+        attempt = self._play_candidates(forward=True)
+        if attempt is _PlayAttempt.NOT_FOUND:
             # 末尾。current_entry_id は最後の entry のまま保つ。
             self.message_requested.emit(END_OF_PLAYLIST_MESSAGE)
             self._update_navigation_availability()
-            return
-        self._play_row(row)
 
     def _on_playlist_rows_changed(self, parent: object, first: int, last: int) -> None:
         del parent, first, last

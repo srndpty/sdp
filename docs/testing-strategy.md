@@ -32,7 +32,7 @@
 | `analysis/waveform.py` の縮約 | 合成 PCM から生成した envelope の min/max の正当性 |
 | `analysis/waveform_cache.py` | キー照合（更新日時・サイズ・解析バージョンの差異で無効化）、破損 npz、LRU 削除 |
 | `playlist/entry.py` | entry_id の一意性と復元時の保持、パスの絶対化（相対・`~`・日本語・空白）、直接構築を含む欠損の検出と再確認、不変性 |
-| `PlaylistPlaybackController` | FakeBackend + 実 PlaybackController + 実 PlaylistModel で、現在 entry の管理（重複パスを entry_id で区別、直接 load による解除）、次 / 前の探索と欠損スキップ、末尾で折り返さないこと、`END_OF_MEDIA` の重複通知・遅延中の手動切替・曲末でない古い通知への防御、Model の並べ替え / 削除 / 全消去中の current 追跡（削除で stop しないこと）、再生エラーで自動スキップしないこと |
+| `PlaylistPlaybackController` | FakeBackend + 実 PlaybackController + 実 PlaylistModel で、現在 entry の管理（重複パスを entry_id で区別、直接 load による解除）、次 / 前 / 自動次曲の欠損スキップ（存在確認直後に消えるTOCTOUを含む）、末尾で折り返さないこと、source世代ごとの`END_OF_MEDIA`一度だけ消費・遅延重複・手動切替への防御、Model の並べ替え / 削除 / 全消去中の current 追跡（削除で stop しないこと）、再生エラーで自動スキップしないこと |
 | `playlist` のロジック | 次曲決定（順次 / 1 曲リピート / 全曲リピート / シャッフルの網羅）、欠損スキップ、重複 entry_id |
 | `services/logging_setup.py` | ログファイルの UTF-8 出力、多重初期化でハンドラーが増えないこと、出力先変更時のハンドラー置換、ローテーション設定、出力先の決定、未捕捉例外フックの記録と多重インストールの抑止 |
 | `ui/player_controls.py` の時間整形 | `m:ss` / `h:mm:ss` の境界値と負値の扱い |
@@ -49,7 +49,7 @@
 | `SingleInstanceService` | 同一プロセス内でサーバーとクライアントを往復させる |
 | `PlayerControls` | **FakeBackend + 実 PlaybackController** で、状態ごとのボタン活性、シーク（ドラッグ中の非同期更新の抑止、有効なpress/releaseでの1回だけのseek、source・duration変更による古い操作の取消）、音量・ミュートの往復とフィードバックループの不在を検証する。子ウィジェットは `objectName` で取得する |
 | `MainWindow` | `QFileDialog.getOpenFileName` を差し替え、キャンセル / 選択、ファイル名とタイトルの更新、`MediaStatus` とエラー表示（具体的エラーの優先、`detail` を出さないこと）、source解除、終了アクションを検証する |
-| `app.py` の配線 | Backend → Controller → PlaylistModel → 永続化サービス → MainWindow を組み立てられること。イベントループは起動しない |
+| `app.py` の配線 | Backend → Controller → PlaylistModel → 永続化サービス → MainWindow を組み立て、復元済みModelの前後曲可否をWindow構築時に反映できること。イベントループは起動しない |
 | プレイリストの永続化ライフサイクル | 保存先の決定、ファイル未作成での空起動、順序・entry_id・重複行・日本語パス・欠損行の復元、並べ替え / 削除 / 全消去後の保存、読み書き I/O エラーのログ記録。**破損ファイルではクラッシュせず空で起動し、その起動の保存を無効化して既存ファイルを上書きしないこと** |
 | UI 層の依存 | `src/sdp/ui/` 配下を再帰走査し、`qt_backend` / `QMediaPlayer` / `QAudioOutput` 自身またはその配下をimportしていないことを標準ライブラリの `ast` で検査する（親モジュール経由も完全修飾して判定し、新しい依存は追加しない） |
 | `MetadataReader` | 実ファイルに対する非同期完了シグナル |
@@ -128,6 +128,7 @@ D&D は実際のマウス操作でしか確認できないため自動化しな�
 
 ## 6.3 P2-C1 手動スモーク（プレイリストからの再生）
 
+- [ ] 保存済みプレイリストからの起動直後に「前の曲」「次の曲」が使える
 - [ ] 行のダブルクリックで再生が始まる
 - [ ] Enter でも再生が始まる
 - [ ] 再生中の行が強調表示される
@@ -136,6 +137,7 @@ D&D は実際のマウス操作でしか確認できないため自動化しな�
 - [ ] 欠損行を直接ダブルクリックするとエラー表示だけで、別の曲へ移らない
 - [ ] 「次の曲」で欠損行を飛ばす
 - [ ] 曲の終わりで自動的に次の曲へ進む
+- [ ] 次曲開始直後に不自然にもう1曲飛ばない
 - [ ] 最後の曲が終わっても先頭へ戻らない
 - [ ] 再生中の行を D&D で動かしても強調が追従する
 - [ ] 再生中でない行を削除しても再生が続く

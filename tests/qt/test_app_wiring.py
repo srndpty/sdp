@@ -10,6 +10,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from PySide6.QtWidgets import QPushButton
 from pytestqt.qtbot import QtBot
 
 from sdp import app as app_module
@@ -285,3 +286,25 @@ def test_restored_playlist_has_no_current_entry(
 
     assert composition.playlist_model.rowCount() == len(audio_files)
     assert composition.playlist_playback.current_entry_id is None
+
+
+def test_restored_playlist_initializes_navigation_buttons(
+    playlist_file: Path, audio_files: list[Path], qtbot: QtBot
+) -> None:
+    """復元通知がWindow構築前でも前後ボタンへ現在値を反映する。"""
+    saved = [create_entry(path) for path in audio_files]
+    save_playlist(playlist_file, saved)
+
+    composition = app_module.build_player(playlist_file)
+    qtbot.addWidget(composition.window)
+    previous = composition.window.findChild(QPushButton, "previousTrackButton")
+    next_ = composition.window.findChild(QPushButton, "nextTrackButton")
+    assert previous is not None
+    assert next_ is not None
+
+    assert composition.playlist_playback.current_entry_id is None
+    assert previous.isEnabled()
+    assert next_.isEnabled()
+
+    next_.click()
+    assert composition.playlist_playback.current_entry_id == saved[0].entry_id

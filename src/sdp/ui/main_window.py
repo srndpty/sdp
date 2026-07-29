@@ -111,6 +111,13 @@ class MainWindow(QMainWindow):
         )
         playlist_playback.message_requested.connect(self.show_status_message)
 
+        # Controller が Model 復元後に作られた場合も、接続前に確定していた状態を反映する。
+        self._on_current_entry_changed(playlist_playback.current_entry_id)
+        self._controls.set_playlist_navigation_available(
+            playlist_playback.can_play_previous,
+            playlist_playback.can_play_next,
+        )
+
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("ファイル(&F)")
 

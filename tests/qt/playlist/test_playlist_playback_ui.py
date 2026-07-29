@@ -417,6 +417,29 @@ def test_navigation_buttons_reach_the_controller(
     assert delegate_of(view).current_entry_id == entry_ids[0]
 
 
+def test_window_applies_navigation_snapshot_from_prepopulated_model(
+    qtbot: QtBot, audio_files: list[Path]
+) -> None:
+    """接続前に確定した前後曲可否もMainWindow構築時に反映する。"""
+    backend = FakePlaybackBackend()
+    playback = PlaybackController(backend)
+    model = PlaylistModel()
+    entry_ids = model.add_paths(audio_files)
+    playlist_playback = PlaylistPlaybackController(playback, model)
+
+    window = MainWindow(playback, model, playlist_playback)
+    qtbot.addWidget(window)
+    controls = window.findChild(PlayerControls)
+    assert controls is not None
+
+    assert playlist_playback.current_entry_id is None
+    assert control_button(controls, "previousTrackButton").isEnabled()
+    assert control_button(controls, "nextTrackButton").isEnabled()
+
+    control_button(controls, "nextTrackButton").click()
+    assert playlist_playback.current_entry_id == entry_ids[0]
+
+
 def test_playlist_playback_messages_reach_the_status_bar(
     wired_window: tuple[MainWindow, PlaylistModel], tmp_path: Path
 ) -> None:
