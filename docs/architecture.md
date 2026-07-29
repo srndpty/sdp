@@ -153,7 +153,9 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 - **速度範囲**: 製品UIは0.50～2.00倍、標準1.00倍。Controllerの一般契約は
   「正の有限値」のまま狭めない。Sliderは整数50～200を保持し、`rate = value / 100`、
   `value = round(rate * 100)`の一か所で変換する。SpinBoxは小数2桁・0.05刻みで、
-  編集途中の不完全な文字列を送らないようkeyboard trackingを無効にする。
+  編集途中の不完全な文字列を送らないようkeyboard trackingを無効にする。Controllerが
+  UI範囲外の速度を持つ場合はSlider／SpinBoxを無効化して実値を「操作範囲外」と明示し、
+  有効なままの1.0倍resetから通常範囲へ復帰できるようにする。暗黙のclampは行わない。
 - **双方向同期**: Slider／SpinBoxのユーザー変更を互いへ反映してControllerへ1回だけ送り、
   Controller通知は両Widgetへ反映するだけでsetterへ返送しない。Widget更新は
   `QSignalBlocker`で囲み、同期Signalによる再帰・二重Backend呼出を防ぐ。

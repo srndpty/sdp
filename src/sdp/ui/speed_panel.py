@@ -83,6 +83,10 @@ class SpeedPanel(QWidget):
         self._reset_button = QPushButton("1.0倍に戻す")
         self._reset_button.setObjectName("resetPlaybackRateButton")
 
+        self._out_of_range_label = QLabel()
+        self._out_of_range_label.setObjectName("outOfRangePlaybackRateLabel")
+        self._out_of_range_label.setVisible(False)
+
         self._pitch_check_box = QCheckBox("速度変更時にピッチを維持")
         self._pitch_check_box.setObjectName("pitchCompensationCheckBox")
         self._pitch_check_box.setToolTip(_PITCH_TOOLTIP)
@@ -108,6 +112,7 @@ class SpeedPanel(QWidget):
         rate_row.addWidget(self._rate_slider, stretch=1)
         rate_row.addWidget(self._rate_spin_box)
         rate_row.addWidget(self._reset_button)
+        rate_row.addWidget(self._out_of_range_label)
 
         preset_row = QHBoxLayout()
         preset_row.addWidget(QLabel("プリセット"))
@@ -153,7 +158,18 @@ class SpeedPanel(QWidget):
     def _apply_controller_rate(self, rate: float) -> None:
         if not math.isfinite(rate) or not (MIN_PLAYBACK_RATE <= rate <= MAX_PLAYBACK_RATE):
             _logger.error("ControllerからUI範囲外の再生速度が通知されました: %r", rate)
+            self._rate_slider.setEnabled(False)
+            self._rate_spin_box.setEnabled(False)
+            self._out_of_range_label.setText(
+                f"現在の速度: {rate:.2f}×（操作範囲外）"
+                if math.isfinite(rate)
+                else f"現在の速度: {rate!r}（操作範囲外）"
+            )
+            self._out_of_range_label.setVisible(True)
             return
+        self._rate_slider.setEnabled(True)
+        self._rate_spin_box.setEnabled(True)
+        self._out_of_range_label.setVisible(False)
         self._apply_rate_to_widgets(rate)
 
     def _apply_rate_to_widgets(self, rate: float) -> None:

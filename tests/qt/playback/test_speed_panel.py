@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QCheckBox, QDoubleSpinBox, QLabel, QPushButton, QSlider
 from pytestqt.qtbot import QtBot
+from shiboken6 import isValid
 
 from fakes.fake_playback_backend import FakePlaybackBackend
 from sdp.core.playback.controller import PlaybackController
@@ -280,17 +281,36 @@ def test_operations_without_source_do_not_use_transport(
     assert backend.call_names() == ["set_playback_rate", "set_pitch_compensation"]
 
 
-def test_out_of_ui_range_controller_rate_is_logged_and_not_silently_clamped(
-    panel: SpeedPanel, backend: FakePlaybackBackend, caplog: pytest.LogCaptureFixture
+def test_out_of_ui_range_controller_rate_is_shown_and_resettable(
+    panel: SpeedPanel,
+    controller: PlaybackController,
+    backend: FakePlaybackBackend,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Controllerの範囲外通知を例外にせず、ログで観測可能にする。"""
-    original = spin_box(panel).value()
+    """範囲外の真値を明示し、通常入力を止めてresetから復帰できる。"""
+    label = panel.findChild(QLabel, "outOfRangePlaybackRateLabel")
+    reset = panel.findChild(QPushButton, "resetPlaybackRateButton")
+    assert label is not None
+    assert reset is not None
 
     with caplog.at_level("ERROR"):
         backend.playback_rate_changed.emit(3.0)
 
-    assert spin_box(panel).value() == original
+    assert controller.playback_rate == 3.0
+    assert not slider(panel).isEnabled()
+    assert not spin_box(panel).isEnabled()
+    assert not label.isHidden()
+    assert label.text() == "現在の速度: 3.00×（操作範囲外）"
+    assert reset.isEnabled()
     assert "UI範囲外" in caplog.text
+
+    reset.click()
+
+    assert controller.playback_rate == DEFAULT_PLAYBACK_RATE
+    assert slider(panel).isEnabled()
+    assert spin_box(panel).isEnabled()
+    assert label.isHidden()
+    assert spin_box(panel).value() == DEFAULT_PLAYBACK_RATE
 
 
 def test_destroyed_panel_is_disconnected_from_controller(
@@ -298,8 +318,10 @@ def test_destroyed_panel_is_disconnected_from_controller(
 ) -> None:
     """Widget破棄後のController通知が破棄済みスロットへ届かない。"""
     panel = SpeedPanel(controller)
-    panel.destroy()
+    assert isValid(panel)
+    panel.deleteLater()
+    qtbot.waitUntil(lambda: not isValid(panel))
+    assert not isValid(panel)
 
     controller.playback_rate_changed.emit(1.5)
     controller.pitch_compensation_changed.emit(False)
-    qtbot.wait(0)
