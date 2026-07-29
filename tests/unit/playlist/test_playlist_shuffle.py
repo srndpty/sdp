@@ -17,7 +17,7 @@ from pytestqt.qtbot import QtBot
 
 from fakes.fake_playback_backend import FakePlaybackBackend
 from sdp.core.playback.controller import PlaybackController
-from sdp.core.playback.types import MediaStatus
+from sdp.core.playback.types import MediaStatus, PlaybackError, PlaybackErrorCode
 from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.core.playlist.types import RepeatMode
@@ -89,6 +89,17 @@ def test_setting_the_same_value_is_a_no_op(controller: PlaylistPlaybackControlle
     controller.set_shuffle_enabled(False)
 
     assert spy.count() == 0
+
+
+@pytest.mark.parametrize("value", ["False", 1, None])
+def test_invalid_shuffle_value_is_rejected(
+    controller: PlaylistPlaybackController, value: object
+) -> None:
+    """bool以外を暗黙変換せずTypeErrorにする。"""
+    with pytest.raises(TypeError, match="bool"):
+        controller.set_shuffle_enabled(value)  # pyright: ignore[reportArgumentType]
+
+    assert controller.shuffle_enabled is False
 
 
 def test_toggling_shuffle_emits_once_and_does_not_play(
@@ -469,6 +480,27 @@ def test_replaying_the_current_entry_does_not_duplicate_history(
     assert controller.current_entry_id == first
 
 
+def test_replaying_current_entry_keeps_future_history(
+    controller: PlaylistPlaybackController,
+    playlist: PlaylistModel,
+    audio_files: list[Path],
+) -> None:
+    """previous後に現在entryを再実行してもnextで元の未来へ戻る。"""
+    playlist.add_paths(audio_files)
+    controller.set_shuffle_enabled(True)
+    visited = [controller.current_entry_id for _ in range(3) if controller.play_next()]
+    assert len(visited) == 3
+    assert controller.play_previous() is True
+    current = visited[1]
+    assert controller.current_entry_id == current
+
+    assert isinstance(current, str)
+    assert controller.play_entry(current) is True
+    assert controller.play_next() is True
+
+    assert controller.current_entry_id == visited[2]
+
+
 def test_failed_direct_play_does_not_change_the_history(
     controller: PlaylistPlaybackController,
     playlist: PlaylistModel,
@@ -549,6 +581,96 @@ def test_removing_another_entry_keeps_the_cursor_on_the_current_entry(
     assert controller.current_entry_id == current
     assert controller.play_previous() is True
     assert controller.current_entry_id == visited[1]
+
+
+def test_pruning_repeated_history_keeps_the_actual_cursor(
+    controller: PlaylistPlaybackController,
+    playlist: PlaylistModel,
+    audio_files: list[Path],
+) -> None:
+    """Repeat ALLの複数サイクル履歴でも削除後のcursorが過去へ飛ばない。"""
+    entry_ids = playlist.add_paths(audio_files[:4])
+    controller.set_shuffle_enabled(True)
+    controller.set_repeat_mode(RepeatMode.ALL)
+    played: list[str] = []
+    for _ in range(6):
+        assert controller.play_next() is True
+        assert controller.current_entry_id is not None
+        played.append(controller.current_entry_id)
+
+    assert played[-1] in played[:-1]
+    expected_previous = played[-2]
+    removable = next(
+        entry_id for entry_id in entry_ids if entry_id not in {played[-1], expected_previous}
+    )
+    row = playlist.row_of_entry_id(removable)
+    assert row is not None
+
+    playlist.removeRows(row, 1)
+
+    assert controller.play_previous() is True
+    assert controller.current_entry_id == expected_previous
+
+
+def test_pruning_keeps_visited_entries_outside_truncated_history(
+    controller: PlaylistPlaybackController,
+    playlist: PlaylistModel,
+    audio_files: list[Path],
+) -> None:
+    """未来履歴を切り捨てても訪問済みentryを同じサイクルで再抽選しない。"""
+    entry_ids = playlist.add_paths(audio_files)
+    controller.set_shuffle_enabled(True)
+    visited = [controller.current_entry_id for _ in range(3) if controller.play_next()]
+    assert len(visited) == 3
+    assert controller.play_previous() is True
+    assert controller.play_previous() is True
+
+    unvisited = [entry_id for entry_id in entry_ids if entry_id not in visited]
+    assert len(unvisited) == 2
+    direct, remove_unvisited = unvisited
+    assert controller.play_entry(direct) is True
+
+    for entry_id in (remove_unvisited, visited[0]):
+        assert isinstance(entry_id, str)
+        row = playlist.row_of_entry_id(entry_id)
+        assert row is not None
+        playlist.removeRows(row, 1)
+
+    assert controller.play_next() is False
+
+
+def test_auto_advance_rejection_does_not_report_end_of_playlist(
+    controller: PlaylistPlaybackController,
+    playback: PlaybackController,
+    playlist: PlaylistModel,
+    backend: FakePlaybackBackend,
+    audio_files: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot: QtBot,
+) -> None:
+    """シャッフル次候補の同期拒否を末尾到達として表示しない。"""
+    entry_ids = playlist.add_paths(audio_files[:2])
+    controller.set_shuffle_enabled(True)
+    assert controller.play_entry(entry_ids[0]) is True
+    messages = QSignalSpy(controller.message_requested)
+    errors = QSignalSpy(playback.error_occurred)
+    error = PlaybackError(
+        code=PlaybackErrorCode.FORMAT_ERROR,
+        message="この音声形式は再生できません。",
+        detail="test",
+    )
+
+    def reject_load(path: Path) -> None:
+        del path
+        playback.error_occurred.emit(error)
+
+    monkeypatch.setattr(playback, "load", reject_load)
+
+    finish_track(backend, qtbot)
+
+    assert controller.current_entry_id == entry_ids[0]
+    assert errors.count() == 1
+    assert messages.count() == 0
 
 
 def test_moving_rows_does_not_change_the_history_order(

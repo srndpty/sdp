@@ -148,7 +148,8 @@ class PlaylistPlaybackController(QObject):
         OFF にすると履歴とサイクルを破棄し、次の曲送りから Model の行順を使う。
         再度 ON にしても古い履歴は復元せず、新しいセッションとして始める。
         """
-        enabled = bool(enabled)
+        if type(enabled) is not bool:
+            raise TypeError(f"bool を指定してください: {enabled!r}")
         if enabled == self._shuffle_enabled:
             return
         self._shuffle_enabled = enabled
@@ -179,7 +180,7 @@ class PlaylistPlaybackController(QObject):
         Repeat ONE は自動の曲終わりだけへ効き、手動の「次の曲」は妨げない。
         """
         if self._shuffle_enabled:
-            return self._play_shuffled_next()
+            return self._play_shuffled_next() is _PlayAttempt.STARTED
         return self._play_candidates(forward=True) is _PlayAttempt.STARTED
 
     def play_previous(self) -> bool:
@@ -283,15 +284,17 @@ class PlaylistPlaybackController(QObject):
 
     # -- 内部: シャッフル ---------------------------------------------------
 
-    def _play_shuffled_next(self) -> bool:
+    def _play_shuffled_next(self) -> _PlayAttempt:
         """未来履歴 → 未訪問候補 → 新サイクルの順に試す。"""
-        if self._play_history_forward():
-            return True
-        if self._play_random_candidates(self._unvisited_entry_ids()):
-            return True
+        history_attempt = self._play_history_forward()
+        if history_attempt is not _PlayAttempt.NOT_FOUND:
+            return history_attempt
+        candidate_attempt = self._play_random_candidates(self._unvisited_entry_ids())
+        if candidate_attempt is not _PlayAttempt.NOT_FOUND:
+            return candidate_attempt
         if self._repeat_mode is not RepeatMode.ALL:
             # Repeat ONE でも手動の「次の曲」は OFF と同じ扱い（現在曲を繰り返さない）。
-            return False
+            return _PlayAttempt.NOT_FOUND
         return self._start_new_shuffle_cycle()
 
     def _play_shuffled_previous(self) -> bool:
@@ -314,7 +317,7 @@ class PlaylistPlaybackController(QObject):
             index -= 1
         return False
 
-    def _play_history_forward(self) -> bool:
+    def _play_history_forward(self) -> _PlayAttempt:
         """previous で戻ったあとの「次の曲」で、まず履歴の未来側へ進む。"""
         index = self._history_cursor + 1
         while index < len(self._history):
@@ -324,13 +327,13 @@ class PlaylistPlaybackController(QObject):
                 self._history_cursor = index
                 self._visited.add(entry_id)
                 self._update_navigation_availability()
-                return True
+                return attempt
             if attempt is _PlayAttempt.REJECTED:
-                return False
+                return attempt
             del self._history[index]
-        return False
+        return _PlayAttempt.NOT_FOUND
 
-    def _play_random_candidates(self, entry_ids: list[str]) -> bool:
+    def _play_random_candidates(self, entry_ids: list[str]) -> _PlayAttempt:
         """候補をランダム順に試し、最初に再生できたものを履歴へ積む。
 
         欠損や削除済みは飛ばす（候補は有限なので探索も有限で終わる）。
@@ -341,16 +344,16 @@ class PlaylistPlaybackController(QObject):
             attempt = self._attempt_play_entry(entry_id, report_missing=False)
             if attempt is _PlayAttempt.STARTED:
                 self._append_history(entry_id)
-                return True
+                return attempt
             if attempt is _PlayAttempt.REJECTED:
-                return False
-        return False
+                return attempt
+        return _PlayAttempt.NOT_FOUND
 
-    def _start_new_shuffle_cycle(self) -> bool:
+    def _start_new_shuffle_cycle(self) -> _PlayAttempt:
         """Repeat ALL で全候補を消化したあと、新しいサイクルを始める。"""
         candidates = self._available_entry_ids()
         if not candidates:
-            return False
+            return _PlayAttempt.NOT_FOUND
         self._visited.clear()
         if len(candidates) > 1 and self._current_entry_id in candidates:
             # 候補が 2 件以上あるなら、サイクル境界で直前の曲を即座に選び直さない。
@@ -374,7 +377,6 @@ class PlaylistPlaybackController(QObject):
         self._visited.add(entry_id)
         if 0 <= self._history_cursor < len(self._history):
             if self._history[self._history_cursor] == entry_id:
-                del self._history[self._history_cursor + 1 :]
                 self._update_navigation_availability()
                 return
             del self._history[self._history_cursor + 1 :]
@@ -395,22 +397,23 @@ class PlaylistPlaybackController(QObject):
 
     def _prune_history(self) -> None:
         """プレイリストから消えた entry を履歴から取り除き、cursor を保つ。"""
-        if not self._history:
-            return
-        kept = [
-            entry_id
-            for entry_id in self._history
-            if self._playlist.row_of_entry_id(entry_id) is not None
-        ]
-        if len(kept) == len(self._history):
-            return
-        self._history = kept
-        self._visited.intersection_update(kept)
-        current = self._current_entry_id
-        if current is not None and current in kept:
-            self._history_cursor = kept.index(current)
-        else:
-            self._history_cursor = len(kept) - 1
+        existing_ids = {entry.entry_id for entry in self._playlist.entries()}
+        old_history = self._history
+        old_cursor = self._history_cursor
+        new_history: list[str] = []
+        new_cursor = -1
+
+        for old_index, entry_id in enumerate(old_history):
+            if entry_id not in existing_ids:
+                continue
+            new_history.append(entry_id)
+            if old_index <= old_cursor:
+                new_cursor = len(new_history) - 1
+
+        self._history = new_history
+        self._history_cursor = new_cursor
+        # 未来履歴から外れていても、Modelに残る訪問済みentryは維持する。
+        self._visited.intersection_update(existing_ids)
 
     # -- 内部: 通知の受信 ---------------------------------------------------
 
@@ -471,7 +474,8 @@ class PlaylistPlaybackController(QObject):
             return
 
         if self._shuffle_enabled:
-            if not self._play_shuffled_next():
+            attempt = self._play_shuffled_next()
+            if attempt is _PlayAttempt.NOT_FOUND:
                 self.message_requested.emit(END_OF_PLAYLIST_MESSAGE)
                 self._update_navigation_availability()
             return
