@@ -4,6 +4,7 @@
 qtbot.waitUntil / waitSignal で行い、固定 sleep は使わない。
 """
 
+import logging
 import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -190,6 +191,28 @@ def test_failed_read_becomes_failed_and_is_logged(
 
     assert playlist.entry_at(0).metadata is None
     assert "メタデータを読み取れませんでした" in caplog.text
+    reader.shutdown(timeout_ms=2_000)
+
+
+def test_unexpected_read_error_is_logged_with_traceback(
+    playlist: PlaylistModel,
+    audio_files: list[Path],
+    qtbot: QtBot,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """予期しない例外は FAILED にし、traceback 付きで記録する。"""
+    read_function = RecordingReader()
+    read_function.error = AttributeError("壊れた抽出処理")
+    reader = MetadataReader(playlist, read_function=read_function, max_threads=1)
+    playlist.add_paths(audio_files[:1])
+
+    with caplog.at_level(logging.ERROR):
+        reader.start()
+        wait_for_status(qtbot, playlist, 0, MetadataStatus.FAILED)
+
+    assert "メタデータ読み取りで予期しない例外" in caplog.text
+    assert "Traceback" in caplog.text
+    assert "AttributeError: 壊れた抽出処理" in caplog.text
     reader.shutdown(timeout_ms=2_000)
 
 

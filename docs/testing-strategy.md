@@ -31,7 +31,7 @@
 | `analysis/ring_buffer.py` | 折り返し、スナップショット、満杯時の上書き |
 | `analysis/waveform.py` の縮約 | 合成 PCM から生成した envelope の min/max の正当性 |
 | `analysis/waveform_cache.py` | キー照合（更新日時・サイズ・解析バージョンの差異で無効化）、破損 npz、LRU 削除 |
-| `metadata/reader.py` の純粋読取 | タグあり（MP3 / FLAC）・タグなし・壊れたファイル・未対応形式・欠損・ディレクトリ。日本語と空白、複数アーティストの結合、空文字の `None` 化、長さの丸めと NaN / inf / 負値の防御、長さ不明でもタグを捨てないこと、属性・タグ抽出中の例外も`MetadataReadError`へ正規化すること、読み取りで元ファイルを書き換えないこと。タグ付きファイルはテスト音源を tmp_path へ複製して Mutagen 自身で書き込む（外部プロセスを起動しない） |
+| `metadata/reader.py` の純粋読取 | タグあり（MP3 / FLAC）・タグなし・壊れたファイル・未対応形式・欠損・ディレクトリ。日本語と空白、複数アーティストの結合、空文字の `None` 化、長さの丸めと NaN / inf / 負値の防御、長さ不明でもタグを捨てないこと、既知の解析・I/O失敗だけを`MetadataReadError`へ正規化し、属性取得などの予期しない例外は変換せず伝播すること、読み取りで元ファイルを書き換えないこと。タグ付きファイルはテスト音源を tmp_path へ複製して Mutagen 自身で書き込む（外部プロセスを起動しない） |
 | `metadata/types.py` | `MetadataStatus` の値、`TrackMetadata` の不変性、長さの表示整形 |
 | `playlist/entry.py` | entry_id の一意性と復元時の保持、パスの絶対化（相対・`~`・日本語・空白）、直接構築を含む欠損の検出と再確認、不変性 |
 | `PlaylistPlaybackController` | FakeBackend + 実 PlaybackController + 実 PlaylistModel で、現在 entry の管理（重複パスを entry_id で区別、直接 load による解除）、次 / 前 / 自動次曲の欠損スキップ（存在確認直後に消えるTOCTOUを含む）、末尾で折り返さないこと、source世代ごとの`END_OF_MEDIA`一度だけ消費・遅延重複・手動切替への防御、Model の並べ替え / 削除 / 全消去中の current 追跡（削除で stop しないこと）、再生エラーで自動スキップしないこと |

@@ -53,17 +53,17 @@ def read_track_metadata(path: Path) -> TrackMetadata:
     if audio is None:
         raise MetadataReadError(f"未対応の形式です: {path}")
 
-    try:
-        tags: object = getattr(audio, "tags", None)
-        info: object = getattr(audio, "info", None)
-        return TrackMetadata(
-            title=_first_text(tags, "title"),
-            artist=_joined_text(tags, "artist"),
-            album=_first_text(tags, "album"),
-            duration_ms=_duration_ms(info),
-        )
-    except Exception as error:
-        raise MetadataReadError(f"メタデータ抽出に失敗しました: {path}") from error
+    # 属性取得や抽出ロジックの予期しない例外は、プログラミングエラーとして
+    # ワーカー側の logger.exception へ到達させる。ここで通常の読取失敗へ
+    # 変換すると traceback が失われ、不具合を診断できなくなる。
+    tags: object = getattr(audio, "tags", None)
+    info: object = getattr(audio, "info", None)
+    return TrackMetadata(
+        title=_first_text(tags, "title"),
+        artist=_joined_text(tags, "artist"),
+        album=_first_text(tags, "album"),
+        duration_ms=_duration_ms(info),
+    )
 
 
 def _open_audio(path: Path) -> object:

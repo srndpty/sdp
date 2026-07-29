@@ -274,10 +274,10 @@ def test_directory_raises(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("attribute", ["tags", "info"])
-def test_extraction_exceptions_are_normalized(
+def test_unexpected_extraction_exceptions_propagate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, attribute: str
 ) -> None:
-    """Mutagen objectの属性取得失敗も専用例外へcause付きで正規化する。"""
+    """属性取得のプログラミングエラーは通常の読取失敗へ変換しない。"""
     path = tmp_path / "壊れたプロパティ.wav"
 
     class BrokenAudio:
@@ -292,10 +292,8 @@ def test_extraction_exceptions_are_normalized(
 
     monkeypatch.setattr("sdp.core.metadata.reader._open_audio", open_broken_audio)
 
-    with pytest.raises(MetadataReadError) as error:
+    with pytest.raises(RuntimeError, match=f"{attribute}取得失敗"):
         read_track_metadata(path)
-
-    assert isinstance(error.value.__cause__, RuntimeError)
 
 
 def test_reading_does_not_modify_the_file(test_audio_dir: Path, tmp_path: Path) -> None:
