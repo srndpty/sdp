@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from sdp.core.playlist.entry import FileStatus
-from sdp.core.playlist.model import FILE_STATUS_ROLE, Column, PlaylistModel
+from sdp.core.playlist.model import ENTRY_ID_ROLE, FILE_STATUS_ROLE, Column, PlaylistModel
 
 # ファイルダイアログのフィルターはユーザー補助にすぎない。拡張子で再生可否を
 # 断定しないため（ADR-0001 の制約 3）、「すべてのファイル」も必ず選べるようにする。
@@ -38,24 +38,47 @@ FILE_DIALOG_FILTER = ";;".join(
 CLEAR_CONFIRM_TEXT = "プレイリストの全項目を削除しますか？"
 
 
-class MissingEntryDelegate(QStyledItemDelegate):
-    """欠損エントリの行をグレーで描く。
+class PlaylistEntryDelegate(QStyledItemDelegate):
+    """欠損行のグレー表示と、再生中の行の強調を行う。
 
-    色は現在の QPalette の Disabled/Text を使い、固定 RGB を埋め込まない
+    色は現在の QPalette、字体は QFont を使い、固定 RGB を埋め込まない
     （ライト / ダークどちらのテーマでも読めるようにするため）。
     グレー表示は「見た目」だけで、選択・削除・並べ替えは通常どおり行える。
     再生可否とは別の話であり、欠損行を disabled item にはしない。
+
+    現在再生中の entry_id は **View 側が保持する**。Model は再生状態を持たない
+    （並べ替えても entry_id で追跡できるようにするため）。
     """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._current_entry_id: str | None = None
+
+    @property
+    def current_entry_id(self) -> str | None:
+        return self._current_entry_id
+
+    def set_current_entry_id(self, entry_id: str | None) -> None:
+        self._current_entry_id = entry_id
 
     def initStyleOption(
         self, option: QStyleOptionViewItem, index: QModelIndex | QPersistentModelIndex
     ) -> None:
         super().initStyleOption(option, index)
-        if index.data(FILE_STATUS_ROLE) is not FileStatus.MISSING:
-            return
-        disabled_text = option.palette.color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text)
-        option.palette.setColor(QPalette.ColorRole.Text, disabled_text)
-        option.palette.setColor(QPalette.ColorRole.HighlightedText, disabled_text)
+        if index.data(FILE_STATUS_ROLE) is FileStatus.MISSING:
+            # 選択中でも読めるよう、通常時と選択時の両方の文字色を落とす。
+            disabled_text = option.palette.color(
+                QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text
+            )
+            option.palette.setColor(QPalette.ColorRole.Text, disabled_text)
+            option.palette.setColor(QPalette.ColorRole.HighlightedText, disabled_text)
+        if self._current_entry_id is not None and index.data(ENTRY_ID_ROLE) == (
+            self._current_entry_id
+        ):
+            # 欠損かつ再生中でも壊れないよう、色ではなく字体で強調する。
+            font = option.font
+            font.setBold(True)
+            option.font = font
 
 
 class PlaylistTableView(QTableView):
@@ -79,6 +102,9 @@ class PlaylistView(QWidget):
     message_requested = Signal(str)
     """ステータス表示してほしい短いメッセージ。表示先は MainWindow が決める。"""
 
+    entry_activated = Signal(str)
+    """ユーザーが行を実行した（ダブルクリック / Enter）。再生可否の判断はしない。"""
+
     def __init__(self, model: PlaylistModel, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._model = model
@@ -86,7 +112,8 @@ class PlaylistView(QWidget):
         self._table = PlaylistTableView()
         self._table.setObjectName("playlistTable")
         self._table.setModel(model)
-        self._table.setItemDelegate(MissingEntryDelegate(self._table))
+        self._delegate = PlaylistEntryDelegate(self._table)
+        self._table.setItemDelegate(self._delegate)
         self._configure_table()
 
         self._add_button = QPushButton("ファイルを追加...")
@@ -108,8 +135,23 @@ class PlaylistView(QWidget):
         model.rowsRemoved.connect(self._update_state)
         model.modelReset.connect(self._update_state)
         self._table.selectionModel().selectionChanged.connect(self._update_state)
+        # activated はダブルクリックと Enter の両方で出る（Windows の既定）。
+        # doubleClicked も繋ぐと 1 回の操作で 2 度通知されるため、こちらだけ使う。
+        self._table.activated.connect(self._on_entry_activated)
 
         self._update_state()
+
+    # -- 現在再生中の行 -----------------------------------------------------
+
+    def set_current_entry_id(self, entry_id: str | None) -> None:
+        """再生中の entry を表示へ反映する。
+
+        Model のリセットは行わず、再描画だけで済ませる（選択やスクロールを壊さない）。
+        """
+        if entry_id == self._delegate.current_entry_id:
+            return
+        self._delegate.set_current_entry_id(entry_id)
+        self._table.viewport().update()
 
     # -- 構築 ---------------------------------------------------------------
 
@@ -158,6 +200,15 @@ class PlaylistView(QWidget):
         paths = [Path(name) for name in selected]
         self._model.add_paths(paths)
         self.message_requested.emit(f"{len(paths)}曲を追加しました。")
+
+    def _on_entry_activated(self, index: QModelIndex | QPersistentModelIndex) -> None:
+        """行の実行を entry_id として外へ知らせる。再生可否はここで判断しない。"""
+        if not index.isValid():
+            return
+        entry_id = index.data(ENTRY_ID_ROLE)
+        if not isinstance(entry_id, str) or not entry_id:
+            return
+        self.entry_activated.emit(entry_id)
 
     def remove_selected(self) -> None:
         """選択行を削除する。非連続の選択にも対応する。"""

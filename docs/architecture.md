@@ -87,7 +87,8 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 |---|---|---|
 | `PlaybackBackend` | `load` / `play` / `pause` / `stop` / `seek` / `set_volume` / `set_muted` / `set_playback_rate` / `set_pitch_compensation` と、位置・長さ・状態・メディア状況・エラーのシグナル。**mpv 差し替えに必要な最小限のみ** | プレイリストの知識、UI の知識 |
 | `QtMultimediaBackend` | QMediaPlayer / QAudioOutput の所有（QAudioBufferOutput は P5 で追加）と、上記インターフェースへの変換。Qt の enum・QUrl・エラーをアプリ内の型へ写す | 曲順ロジック、値の検証 |
-| `PlaybackController` | 「今どのエントリを再生中か」の唯一の管理者。順次 / リピート / シャッフル、曲終了時の次曲決定、欠損スキップ、再生失敗時の方針 | デコード、描画 |
+| `PlaybackController` | 1 つの source の再生（読み込み・状態・位置・音量・速度）と Backend との境界 | 曲順、プレイリストの知識 |
+| `PlaylistPlaybackController` | 「今どの entry を再生中か」の唯一の管理者。順次再生、前後曲、曲終了時の次曲決定、欠損スキップ | デコード、描画、行データの所有 |
 | `PlaylistModel` | 行データ、並べ替え、D&D、欠損フラグ、重複許可（entry_id 採番） | 再生状態の所有（現在行は Controller が entry_id で参照する） |
 | `MetadataReader` | ワーカーで Mutagen による読み取りを行い、シグナルで Model へ反映する | GUI スレッドでのブロッキング I/O |
 | `WaveformAnalyzer` | 専用 QThread で QAudioDecoder を駆動し、envelope を生成する。進捗 / 完了 / 失敗をシグナルで通知 | 描画 |
@@ -341,12 +342,12 @@ UI が Backend を直接触ることは禁止し、import 構成のレビュー�
 - 永続化は `playlist.json`。
   M3U8 入出力は将来 `persistence.py` に追加する（`#EXTM3U` / `#EXTINF`、UTF-8）。
 
-### 8.1 P2-A・P2-B で確定した契約
+### 8.1 P2-A〜P2-C1 で確定した契約
 
-実装済みなのは `entry.py` / `model.py` / `persistence.py`（P2-A）と、
-`ui/playlist_view.py` / `services/playlist_session.py` / Model の D&D（P2-B）。
-現在曲・前後曲・自動次曲・リピート・シャッフルは P2-C、
-タイトル等のメタデータ列は P2-D で追加する。
+実装済みなのは `entry.py` / `model.py` / `persistence.py`（P2-A）、
+`ui/playlist_view.py` / `services/playlist_session.py` / Model の D&D（P2-B）、
+`playback_controller.py` と前後曲 UI（P2-C1）。
+リピート・シャッフル・履歴は P2-C2、タイトル等のメタデータ列は P2-D で追加する。
 
 - **`PlaylistEntry`**: 不変 dataclass。`entry_id`（`str`）/ `path`（絶対 `Path`）/
   `file_status`（`AVAILABLE` / `MISSING`）だけを持つ。
@@ -436,6 +437,61 @@ UI が Backend を直接触ることは禁止し、import 構成のレビュー�
   **その起動中の保存を無効化する**（`is_save_enabled` が False）。
   空のプレイリストを保存して既存ファイルを壊さないための、
   「復元失敗」と「正常な空プレイリスト」の区別。
+#### プレイリストからの逐次再生（P2-C1）
+
+- **責務の分離**: `PlaybackController` は 1 つの source だけを扱い、プレイリストを
+  保持しない。曲順と現在 entry は `PlaylistPlaybackController` が持つ。
+  `PlaylistModel` も現在再生状態を持たない。
+  依存の向きは PlaylistPlaybackController → PlaybackController → PlaybackBackend、
+  および PlaylistPlaybackController → PlaylistModel。
+- **`current_entry_id`**: 「現在の source がどの entry から読み込まれたか」であり、
+  選択行ではない。プレイリスト未再生・「開く...」での直接読み込み・現在 entry の削除・
+  全消去・source 解除では `None`。行番号や `QModelIndex` は公開の識別子にしない。
+- **パスからの逆引きをしない**: 同じパスの行が複数あるため、`source == entry.path` では
+  現在 entry を決められない。`play_entry` が load する直前に entry_id を控え、
+  `source_changed` を受けた時点でその id を関連付ける。
+  控えが無い（＝自分が読み込んでいない）source 変更では関連付けを解除する。
+  これにより「開く...」で同じパスを直接開いた場合も確実に解除される。
+- **`play_entry`**: 行の検索 → その entry だけファイル状態を再確認
+  （`PlaylistModel.refresh_entry_status`。1000 件を毎回走査しない）→ 欠損なら
+  再生せずメッセージだけ出す → `load` → `play` → 現在 entry を関連付け → 前後曲の可否を更新。
+  **ユーザーが明示的に選んだ欠損行では、勝手に別の曲へ移動しない。**
+  デコード失敗は PlaybackController の既存エラー処理に任せ、
+  **再生エラーを理由に自動で次曲へ飛ばさない**（無限スキップとエラーの隠蔽を避ける）。
+- **探索規則**: 表示中の行順をそのまま再生順とする（ソート用 Proxy は使わない）。
+  次は現在行の後ろ、前は現在行の前を順に見て、最初の再生可能な entry を選ぶ。
+  現在 entry が無ければ、次は先頭から・前は末尾から探す。
+  探索は最大でも行数で終わり、候補が無ければ `False`。
+  **P2-C1 では折り返さない**（Repeat ALL は P2-C2）。
+- **欠損スキップ**: 次の曲・前の曲・自動次曲では欠損を飛ばし、見つけた欠損は
+  Model へ反映してグレー表示を更新する。**直接指定した行ではスキップしない。**
+  前後曲の可否判定は保持済みの状態だけで行い、モデル変更のたびに全行を stat しない
+  （実際の可否は探索時に確定し、その結果で可否が更新される）。
+- **`END_OF_MEDIA` の防御**: 現在 entry があるときだけ自動次曲する
+  （「開く...」の単曲が終わってもプレイリストへ移らない）。
+  受信時の entry_id と source を控え、イベントループの次のターンで
+  「まだ同じ entry / source か」を再確認してから進める。
+  進行中フラグで同じ終了通知から 2 曲以上進めない。
+  さらに、位置と duration が判明していて曲の前半にいる場合は、
+  新しい曲へ移った直後に届いた古い通知とみなして無視する。
+- **末尾到達**: 次の候補が無ければ新しい load を行わず、`current_entry_id` は
+  最後の entry のまま保つ（`None` にしない）。ステータスへ通知だけ出す。
+- **Model 変更時**: 並べ替えでは entry_id で追跡するため現在 entry を維持し、
+  前後曲の可否だけ再計算する。現在 entry 以外の削除でも維持する。
+  **現在 entry の削除・全消去では関連付けだけ解除し、再生中の音声は止めない**
+  （`stop()` を呼ばない）。以後 `END_OF_MEDIA` が来ても自動次曲しない。
+- **UI**: `PlaylistView` は `PlaylistModel` だけを受け取り、行の実行を
+  `entry_activated(entry_id)` で外へ出す（`activated` のみを使う。`doubleClicked` も
+  繋ぐと 1 操作で 2 回通知されるため）。欠損行でも通知はし、可否の判断はしない。
+  現在 entry は `set_current_entry_id` で受け取り、**Model ではなく View の delegate が保持**して
+  太字で描く（Model は再生状態を持たない。並べ替えても entry_id で追う）。
+  Model のリセットではなく再描画だけで反映する。
+  `PlayerControls` は前後曲ボタンを持つが `previous_requested` / `next_requested` を
+  出すだけで、活性は `set_playlist_navigation_available` で外から設定される。
+  `MainWindow` は配線だけを行い、次曲探索や欠損スキップの判断を持たない。
+- **永続化しないもの**: `current_entry_id`、現在行、再生位置、前後曲の履歴。
+  復元の必要性は P6 以降で判断する。
+
 - **終了時保存**: `app.exec()` の戻り後に `entry_id` / `path` / 順序 / 重複行だけを保存する。
   選択行・スクロール位置・現在曲・再生位置・音量・ミュート・欠損状態・
   メタデータは保存しない。保存の失敗はログへ残すだけにして終了処理を止めない

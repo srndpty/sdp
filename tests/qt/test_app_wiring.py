@@ -4,6 +4,7 @@
 本番配線の確認に音声再生は不要。
 """
 
+import json
 import logging
 from collections.abc import Iterator
 from pathlib import Path
@@ -18,6 +19,7 @@ from sdp.core.playback.qt_backend import QtMultimediaBackend
 from sdp.core.playlist.entry import create_entry
 from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.persistence import load_playlist, save_playlist
+from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.services.playlist_session import RESTORE_FAILED_MESSAGE, PlaylistSession
 from sdp.ui.main_window import MainWindow
 from sdp.ui.player_controls import PlayerControls
@@ -57,6 +59,7 @@ def test_build_player_creates_every_layer(
     assert isinstance(composition.backend, PlaybackBackend)
     assert isinstance(composition.controller, PlaybackController)
     assert isinstance(composition.playlist_model, PlaylistModel)
+    assert isinstance(composition.playlist_playback, PlaylistPlaybackController)
     assert isinstance(composition.playlist_session, PlaylistSession)
     assert isinstance(composition.window, MainWindow)
     assert composition.playlist_session.file_path == playlist_file
@@ -239,3 +242,46 @@ def test_non_utf8_playlist_does_not_crash_or_get_overwritten(
     assert not composition.playlist_session.is_save_enabled
     assert composition.playlist_session.save_from(composition.playlist_model) is False
     assert playlist_file.read_bytes() == original
+
+
+# -- プレイリスト再生の配線 --------------------------------------------------
+
+
+def test_playlist_playback_shares_the_wired_model_and_controller(
+    composition: app_module.PlayerComposition, audio_files: list[Path]
+) -> None:
+    """全層が同じ PlaylistModel と PlaybackController を共有している。"""
+    entry_ids = composition.playlist_model.add_paths(audio_files)
+
+    assert composition.playlist_playback.play_entry(entry_ids[0]) is True
+
+    assert composition.playlist_playback.current_entry_id == entry_ids[0]
+    assert composition.controller.source == audio_files[0].resolve()
+
+
+def test_current_entry_is_not_persisted(
+    composition: app_module.PlayerComposition, playlist_file: Path, audio_files: list[Path]
+) -> None:
+    """playlist.json へ current_entry_id や再生位置を保存しない。"""
+    entry_ids = composition.playlist_model.add_paths(audio_files)
+    composition.playlist_playback.play_entry(entry_ids[1])
+
+    composition.playlist_session.save_from(composition.playlist_model)
+
+    document = json.loads(playlist_file.read_text(encoding="utf-8"))
+    assert set(document) == {"schema_version", "entries"}
+    for entry in document["entries"]:
+        assert set(entry) == {"entry_id", "path"}
+
+
+def test_restored_playlist_has_no_current_entry(
+    playlist_file: Path, audio_files: list[Path], qtbot: QtBot
+) -> None:
+    """再起動しても現在 entry は復元されない。"""
+    save_playlist(playlist_file, [create_entry(path) for path in audio_files])
+
+    composition = app_module.build_player(playlist_file)
+    qtbot.addWidget(composition.window)
+
+    assert composition.playlist_model.rowCount() == len(audio_files)
+    assert composition.playlist_playback.current_entry_id is None
