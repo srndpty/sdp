@@ -21,10 +21,12 @@ from sdp.core.playback.controller import PlaybackController
 from sdp.core.playback.types import MediaStatus, PlaybackError
 from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
+from sdp.services.pcm_tap import PcmTap
 from sdp.services.waveform_analysis import WaveformAnalysisService
 from sdp.ui.player_controls import PlayerControls
 from sdp.ui.playlist_view import PlaylistView
 from sdp.ui.shortcuts import ShortcutManager
+from sdp.ui.spectrum_panel import SpectrumPanel
 from sdp.ui.speed_panel import SpeedPanel
 from sdp.ui.waveform_panel import WaveformPanel
 
@@ -71,6 +73,7 @@ class MainWindow(QMainWindow):
         playlist_model: PlaylistModel,
         playlist_playback: PlaylistPlaybackController,
         waveform_analysis: WaveformAnalysisService,
+        pcm_tap: PcmTap,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -84,6 +87,8 @@ class MainWindow(QMainWindow):
         self._controls = PlayerControls(controller)
         self._speed_panel = SpeedPanel(controller)
         self._waveform_panel = WaveformPanel(controller, waveform_analysis)
+        # FFT・タイマー・リングバッファの扱いはPanel側の責務。Windowは配置だけ行う。
+        self._spectrum_panel = SpectrumPanel(controller, pcm_tap)
         self._playlist_view = PlaylistView(playlist_model)
 
         player_panel = QWidget()
@@ -93,6 +98,7 @@ class MainWindow(QMainWindow):
         player_layout.addWidget(self._controls)
         player_layout.addWidget(self._speed_panel)
         player_layout.addWidget(self._waveform_panel)
+        player_layout.addWidget(self._spectrum_panel)
 
         splitter = QSplitter(Qt.Orientation.Vertical, self)
         splitter.addWidget(player_panel)
@@ -101,7 +107,8 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         self.setCentralWidget(splitter)
-        self.resize(720, 540)
+        # 波形とスペクトラムが増えた分だけ既定の高さを広げ、プレイリスト領域を残す。
+        self.resize(720, 700)
 
         self._build_menu()
         self.statusBar().showMessage("音声ファイルを開いてください。")
@@ -165,6 +172,11 @@ class MainWindow(QMainWindow):
         file_menu.addAction(quit_action)
 
     # -- 操作 ---------------------------------------------------------------
+
+    @property
+    def spectrum_panel(self) -> SpectrumPanel:
+        """終了処理でタイマーを止めるために composition root へ公開する。"""
+        return self._spectrum_panel
 
     def show_status_message(self, message: str) -> None:
         """ステータスバーへ短いメッセージを表示する。"""

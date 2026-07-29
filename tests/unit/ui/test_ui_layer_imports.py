@@ -23,6 +23,9 @@ FORBIDDEN_NAMES = {
     "QMediaPlayer",
     "QAudioOutput",
     "QAudioBufferOutput",
+    # PCM の受領は PcmTap（services）の責務。UI は Qt の PCM 型を扱わない。
+    "QAudioBuffer",
+    "QAudioDecoder",
     "save_playlist",
     "load_playlist",
     "PlaylistSession",
@@ -99,3 +102,35 @@ def test_ui_module_does_not_import_playback_implementation(module_path: Path) ->
     forbidden = forbidden_modules(modules)
     assert not forbidden, f"{module_path.name}: {forbidden}"
     assert not (names & FORBIDDEN_NAMES), f"{module_path.name}: {names & FORBIDDEN_NAMES}"
+
+
+def test_spectrum_modules_do_not_import_waveform_analysis_or_playlist() -> None:
+    """スペクトラムUIは波形解析・cache・PlaylistModelへ依存しない。"""
+    forbidden_modules_for_spectrum = {
+        "sdp.services.waveform_analysis",
+        "sdp.core.analysis.waveform_cache",
+        "sdp.core.playlist.model",
+        "sdp.core.playlist.playback_controller",
+    }
+    forbidden_names_for_spectrum = {
+        "WaveformAnalysisService",
+        "WaveformCache",
+        "PlaylistModel",
+        "PlaylistPlaybackController",
+    }
+
+    for name in ("spectrum_widget.py", "spectrum_panel.py"):
+        modules, names = imported_modules_and_names((UI_DIR / name).read_text(encoding="utf-8"))
+        assert not (modules & forbidden_modules_for_spectrum), name
+        assert not (names & forbidden_names_for_spectrum), name
+
+
+def test_spectrum_widget_does_not_import_the_controller_or_the_tap() -> None:
+    """Widgetは純粋な描画層で、ControllerもPcmTapも知らない。"""
+    modules, names = imported_modules_and_names(
+        (UI_DIR / "spectrum_widget.py").read_text(encoding="utf-8")
+    )
+
+    assert "sdp.services.pcm_tap" not in modules
+    assert "sdp.core.playback.controller" not in modules
+    assert not (names & {"PcmTap", "PlaybackController", "PcmRingBuffer", "QTimer"})

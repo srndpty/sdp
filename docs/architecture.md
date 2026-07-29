@@ -17,7 +17,8 @@ sdp の設計文書。要件 ID（PLAY-xx、WAVE-xx 等）とマイルストー�
   将来の mpv 差し替えに必要な最小限の `PlaybackBackend` だけを定義する。
 - 汎用プラグインシステムは作らない。
 - メタデータ取得と波形解析で GUI スレッドをブロックしない。
-- `audioBufferReceived` 内で重い FFT や描画を行わない。PCM は固定長リングバッファへ渡す。
+- `audioBufferReceived` 内で重い FFT や描画を行わない。PCM は固定長リングバッファへ渡す
+  （P5-A で実装。§6.3）。
 - 可視化は固定 FPS のタイマーで最新スナップショットを描画する。
 - 非表示のビジュアライザーは処理を停止する。
 - 再生失敗、解析失敗、メタデータ失敗を独立して扱う。
@@ -45,13 +46,14 @@ sdp/
 │   │   │   └── persistence.py# JSON の保存 / 復元。将来の M3U8 入出力もここへ
 │   │   ├── metadata/reader.py# Mutagen ラッパーと QRunnable ワーカー
 │   │   └── analysis/
-│   │       ├── ring_buffer.py    # 固定長 PCM リングバッファ
-│   │       ├── pcm_tap.py        # QAudioBufferOutput → 正規化 → mono 化 → リングバッファ
-│   │       ├── spectrum.py       # Hann 窓・FFT・バンド集約・平滑化（純粋関数中心）
+│   │       ├── ring_buffer.py    # 固定長 mono float32 PCM リングバッファ（Qt 非依存）
+│   │       ├── pcm.py            # QAudioBuffer → mono float32 のQt境界（波形解析と共有）
+│   │       ├── spectrum.py       # SpectrumFrame、Hann 窓・rFFT・バンド集約・平滑化（純粋関数）
 │   │       ├── waveform.py       # WaveformData、PCM正規化、増分min/max縮約
 │   │       ├── waveform_projection.py # 中央固定窓のpixel min/max投影と座標変換
 │   │       └── waveform_cache.py # npz キャッシュ、キー生成、LRU 容量管理
 │   ├── services/
+│   │   ├── pcm_tap.py        # QAudioBufferOutput → 正規化 → mono 化 → リングバッファ
 │   │   ├── waveform_analysis.py # QAudioDecoder workerと現在sourceの解析調停
 │   │   ├── settings.py       # 設定 dataclass と JSON 入出力、スキーマバージョン
 │   │   ├── single_instance.py# QLocalServer / QLocalSocket と QLockFile
@@ -65,7 +67,8 @@ sdp/
 │       ├── waveform_widget.py# 追従波形（QPainter 自前描画）
 │       ├── waveform_panel.py # 再生・解析Signalと波形Widgetの調停
 │       ├── spectrum_widget.py# スペクトラム（QPainter 自前描画）
-│       ├── level_meter.py    # Peak / RMS メーター
+│       ├── spectrum_panel.py # 再生状態・PCMタップ・スペクトラムWidgetの調停
+│       ├── level_meter.py    # Peak / RMS メーター（P5-B で追加）
 │       └── shortcuts.py      # QShortcut 定義の一元管理
 ├── tests/                    # テスト構成は testing-strategy.md を参照
 ├── assets/test_audio/        # 自作テスト音源（正弦波など、各形式数秒）
@@ -102,8 +105,11 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 | `WaveformCache` | キー生成（path + size + mtime + 解析バージョン）、npz の読み書き、破損検出、LRU 削除 | 解析処理そのもの |
 | `WaveformWidget` | pixel列のpaletteベースQPainter描画、中央線、drag preview、release時のseek要求 | Controller、解析Service、cache、decoder |
 | `WaveformPanel` | Controllerと解析ServiceのSignal接続、path/token照合、表示状態とseek委譲 | 波形投影、cache、Backend、再生順 |
-| `PcmTap` / `PcmRingBuffer` | QAudioBuffer の受領、float32 mono への正規化、リングバッファへの書き込み、スナップショット読み出し | FFT、描画 |
-| 各可視化ウィジェット | 固定 FPS タイマーでスナップショットを取得し、`spectrum.py` の純粋関数を通して描画する。hide / 最小化でタイマー停止と PCM タップ解除 | PCM 取得の詳細 |
+| `PcmTap` | QAudioBuffer の受領と妥当性確認、float32 mono への正規化、リングバッファへの書き込み、sample rate変更検出、source／stop時のclear | FFT、Hann窓、dB変換、QWidget、PlaylistModel、cache、settings、波形解析、シーク |
+| `PcmRingBuffer` | 固定容量のmono float32保持、wrap上書き、最新N sampleのread-only snapshot、短時間lock | Qt、全履歴、FFT |
+| `SpectrumFrame` / `spectrum.py` | Qt非依存のread-only帯域別dBと、Hann窓・rFFT・dB変換・対数band集約・attack/release平滑化 | QColor、QWidget、PCM取得 |
+| `SpectrumWidget` | band別dBのpaletteベースQPainter一括描画、dB基準線、状態文字 | Controller、PcmTap、FFT、平滑化状態、マウス操作 |
+| `SpectrumPanel` | Controllerのstate/source監視、QTimer管理、snapshot取得、Processor呼出、Widget反映、visible／最小化での更新制御 | PCM decode、QAudioBuffer、cache、PlaylistModel、波形data、settings、Backend具体型 |
 | `SettingsSession` | 速度・ピッチ設定の復元、変更監視、デバウンス／終了時保存 | UI、プレイリスト、P6以降の設定 |
 | `SingleInstanceService` | サーバー / クライアントの判定、パス転送、受信通知 | 受け取ったファイルの解釈 |
 
@@ -213,7 +219,8 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 - **所有**: `QMediaPlayer(parent=self)` と `QAudioOutput(parent=self)` を持ち、
   `setAudioOutput` で結び付ける。Backend の破棄で両方とも破棄される。
   外部へは公開せず、UI と Controller は Qt の型に触れない。
-  QAudioBufferOutput は接続しない（PcmTap とリングバッファは P5 の責務）。
+  P5-A で QAudioBufferOutput も所有し `setAudioBufferOutput` で結び付けるが、
+  これは `PlaybackBackend` の契約ではなく Qt 固有の補助ポートとして扱う（§6.2）。
 - **状態**: Qt は source 未設定でも `StoppedState` を返すため、`NO_MEDIA` と `STOPPED` を
   Qt の値だけでは区別できない。Backend が現在の source を内部で保持して判定する
   （公開契約へ source プロパティは追加しない。公開 source は Controller の責務）。
@@ -332,51 +339,233 @@ UI が Backend を直接触ることは禁止し、import 構成のレビュー�
 この結論の前提は「PcmTap の受信 QObject を GUI スレッドに置くこと」である。
 将来 PCM 受信をワーカースレッドへ移す場合は、この前提が崩れるため mutex が必要になる。
 
----
-
-## 6. PCM リングバッファと FFT・描画更新
-
-- リングバッファは float32 mono の固定長 16384 サンプル（48kHz で約 340ms）。
-  書き込みは QAudioBuffer のサンプル形式（int16 / int32 / float）を [-1, 1] へ正規化し、
-  ステレオは平均で mono 化してから追記する。
-- `snapshot(n)` は末尾 n サンプルのコピーを返す（数十 KB のコピーで無視できる）。
-- スペクトラム処理（`spectrum.py`。すべて純粋関数として単体テスト可能にする）:
-  1. `snapshot(4096)` → Hann 窓 → `numpy.fft.rfft` → 振幅 → dB（下限 -70dB）
-  2. 対数周波数軸でバンド集約（既定は 50Hz〜16kHz を 32 バンド、バンド内は最大値）
-  3. 平滑化: `display = max(new, display - release * dt)`。attack は即時
-     （foobar2000 的な挙動）。無音時・停止時は release のみが働き自然に減衰する
-- 描画は 30FPS の QTimer。`hideEvent` と最小化でタイマーを停止し PCM タップを切断、
-  `showEvent` で再開する（SPEC-04）。
-- 速度変更時の挙動は **P0-C で実測済み**（[p0-report.md §8.6](./p0-report.md#86-速度変更時の通知挙動最重要の発見)）。
-  確定した事実は次のとおり。
-  - **QAudioBufferOutput が渡すのは、速度・ピッチ処理を適用する前のデコード済み PCM である。**
-    2.0 倍の varispeed 再生中でも、取得 PCM の FFT ピークは元の周波数のままになる。
-    可視化はこの差を仕様として受け入れるか、ピッチ補正 OFF のときだけ周波数軸を
-    `playbackRate` 倍にスケールするかを P5 で決める。ピッチ補正 ON では補正してはならない。
-  - **1 バッファの `frameCount` は playbackRate によらず一定で、変わるのは通知間隔**
-    （1.0 倍で約 93ms、0.5 倍で約 186ms、2.0 倍で約 46ms）。
-    通知間隔は描画間隔（30FPS = 33ms）より長いため、同じスナップショットを複数回描くことは
-    あっても取りこぼしは起きない。
-  - PCM の供給レートが playbackRate に比例するため、**固定長リングバッファが保持する
-    「聴取時間」は playbackRate に反比例する**（16384 サンプルは 1.0 倍で約 340ms、
-    2.0 倍で約 170ms 相当）。平滑化の時定数を実時間基準で設計する場合は考慮する。
-- **音量とミュートは取得 PCM へ一切影響しない**（P0-C 実測。RMS の差は 0.000000）。
-  可視化は音量設定を適用する前の信号を表す。ミュート中でもレベルは振れる。
-- PCM の解釈について P0-C で確定した事実:
-  - 実環境で観測された `sampleFormat` は **Int16（WAV / FLAC）と Float（MP3 / Vorbis /
-    Opus / AAC）の 2 種類のみ**。`UInt8` と `Int32` は未観測のため実装しない。
-    未対応形式は明示的に失敗させ、silent fallback を作らない。
-  - **`frameCount` はコーデックごとに異なり、同一ファイル内でも一定でない**
-    （先頭バッファはプライミングで短い）。固定バッファ長を前提にしてはならない。
-  - **`QAudioBuffer.startTime()` は負値を取りうる**（MP3 で -25ms、Opus で -6.5ms を観測）。
-    エンコーダー遅延・プリスキップに由来する。時間軸計算で負値を弾かない。
-  - **`QAudioBuffer.constData()` は `None` を返すことがある**。バイト列化の前に判定する。
-    また PySide6 はスロット内の例外を握り潰すため、PcmTap 内で例外を投げない作りにし、
-    無効バッファは件数を数えて捨てる。
-  - 曲切替時に前曲 PCM の混入は観測されなかったが、リングバッファは切替時に
-    明示的に clear する（コストがほぼ無く、確実なため）。
+**P5-A の実装方針**: 上記の実測に依存した設計にはせず、`PcmRingBuffer` は
+`threading.Lock` で自己完結して thread-safe にした。ロックは **memcpy の間だけ**保持し、
+**FFT 中は保持しない**（`snapshot()` はコピーを返し、解析はロック外で行う）。
+受信スレッドが変わっても壊れないため、実測結果は「ワーカースレッド化が不要」という
+性能上の根拠として使い、正しさの前提としては使わない。
 
 ---
+
+## 6. PCM リングバッファと FFT・描画更新（P5-A で実装）
+
+### 6.1 QAudioBufferOutput の実測結果
+
+P0-C（[p0-report.md §8](./p0-report.md#8-p0-c-qaudiobufferoutput-による-pcm-取得と可視化適合性)）に加え、
+P5-A の着手前に pause / stop / 再生中の直接 `setSource` / 終端通知を probe で確認した。
+
+| 項目 | 実測（PySide6 6.10.3 / Qt 6.10.3 / Windows 11） |
+|---|---|
+| `QAudioBufferOutput` / `setAudioBufferOutput` / `audioBufferOutput` | いずれも利用可能 |
+| シグナル | `audioBufferReceived(QAudioBuffer)`（引数 1 つ） |
+| 通常の `QAudioOutput` との併用 | 音声出力は継続。`errorOccurred` は 0 件 |
+| 受信スレッド | **GUI スレッド**（`MainThread` / `Qt mainThread`） |
+| 開始前後の順序 | `setSource` → `LoadingMedia` / `LoadedMedia`（**buffer は届かない**）→ `play()` → `PlayingState` → `BufferingMedia` / `BufferedMedia` → 以後 buffer が届く |
+| pause 中 | **buffer は届かない**（一時停止した時点で通知が止まる） |
+| stop 時 | **buffer は届かない**。`StoppedState` + `LoadedMedia` になる |
+| 再生中の直接 `setSource` | `StoppedState` → `LoadedMedia` → `LoadingMedia` → `LoadedMedia` → `play()` で新 format の buffer だけが届く（**旧 format の残留 0 件**） |
+| `playbackRate` 変更 | format は不変（Float / 44100Hz / 2ch、frameCount も同じ）。変わるのは通知間隔だけ |
+| pitch compensation 切替 | format は不変 |
+| SampleFormat | **WAV は Int16、MP3 は Float**（P0-C の 6 形式実測と一致。`UInt8` / `Int32` は未観測） |
+| channel count / sample rate | 2ch / 44100Hz（Opus のみ 48000Hz） |
+| byteCount と duration | Int16 stereo は 1frame 4byte。1 buffer は 4096frame ≒ 92.9ms（コーデックにより 47〜4608frame と一定でない） |
+| **終端の空 buffer** | **`EndOfMedia` の直前に「format 未設定（`Unknown` / rate 0 / ch 0）で `constData()` が `None`」の buffer が 1 件届く**（P5-A で新たに判明） |
+
+終端の空 buffer は既定値へ丸めず、無効 buffer として件数を数えて捨てる。
+
+### 6.2 PlaybackBackend との境界
+
+- **`PlaybackBackend` の一般インターフェースへ PCM シグナルや Qt の PCM 型を追加しない。**
+  mpv へ差し替えた場合に持ち込めないため、PCM 取得は **Qt Multimedia 固有の補助ポート**として扱う。
+- `QtMultimediaBackend` が `QAudioBufferOutput(parent=self)` を所有し、`setAudioBufferOutput`
+  で `QMediaPlayer` へ結び付ける。format を指定しないため、デコード直後のネイティブ形式が届く
+  （再サンプリングを挟まない）。通常の `QAudioOutput` はそのまま維持する。
+- 公開するのは `audio_buffer_output` という狭い property だけで、**composition root と
+  `PcmTap` 以外は参照しない**。UI 層からの `QAudioBufferOutput` / `QAudioBuffer` /
+  `QtMultimediaBackend` の import は AST 検査で禁止している。
+- `FakePlaybackBackend` へ QAudioBuffer 概念を導入しない（テストで検査する）。
+- 接続は `app.py` の 1 行（`pcm_tap.connect_audio_buffer_output(backend.audio_buffer_output)`）だけ。
+
+### 6.3 PcmTap（音声コールバック）
+
+`services/pcm_tap.py`。`PlaybackController` と `PcmRingBuffer` だけを受け取る QObject。
+
+コールバック（`handle_audio_buffer`）で行ってよいのは次だけとする。
+
+1. buffer の妥当性確認（sample rate / channel count / sample format / `constData()`）
+2. bytes 化（`core/analysis/pcm.py`。波形解析の QAudioDecoder 経路と**同じ変換を再利用**する）
+3. NumPy による正規化と channel 平均による mono 化（`waveform.pcm_bytes_to_mono` を再利用）
+4. リングバッファへの追記
+5. 軽量な `sample_rate_changed` の通知
+
+**行わない**: FFT、band 集約、描画、status bar 更新、ファイル I/O、Model / Controller 操作、
+大量のログ出力（無効 buffer のログは 100 件ごとに 1 回へ間引く）。
+
+- **QAudioBuffer とその memory view をコールバックの外へ持ち出さない。** 必要な PCM だけを
+  新しい float32 配列へコピーする（保持していないことをテストで検査する）。
+- PySide6 はスロット内の例外を呼び出し元へ伝播させないため（P0-C）、**例外を外へ漏らさず**、
+  無効 buffer・未対応 format は件数を数えて捨てる。再生エラーへは変換しない。
+- **clear 契約**: `source_changed` で即時 clear。`state_changed` が `STOPPED` / `NO_MEDIA` に
+  なったら clear（`END_OF_MEDIA` から次曲へ進む場合も前曲 PCM を持ち越さない）。
+  **`PAUSED` では保持する**（最後のフレームを静止表示するため）。
+- **format 変更時**: sample rate が変わったら、新しい rate に合う容量へ**作り直してから**
+  追記する。旧 format のサンプルを新 format へ混ぜない。
+
+### 6.4 PcmRingBuffer
+
+`core/analysis/ring_buffer.py`。Qt 非依存。
+
+- **容量は固定**。標準契約は `round(sample_rate × 2.0)`（48kHz で 96,000 sample = 384KB、
+  44.1kHz で 88,200 sample = 345KB）で、FFT 長を下限とする。sample rate が判明する前は
+  48kHz を既定値として構築し、最大想定 192kHz へ固定して巨大化させない。
+- dtype は float32、1 次元。満杯時は古いサンプルを上書きし、**全履歴は保持しない**。
+  1 回の `append` が容量を超える場合は末尾 capacity 分だけを保持する。
+- `append` ごとの `np.concatenate` や sample 単位の Python ループを使わない
+  （事前確保した配列への 2 分割スライス代入だけで wrap を処理する）。
+- NaN / inf は保持しない（有限性の検査に失敗したときだけ 0 と ±1 へ寄せる）。
+- **`snapshot(n)` は常に長さ `n` の独立した read-only 配列**を返す。保持数が `n` 未満のときは
+  **左側を 0 で埋める**（無効フレームにはしない。起動直後や曲頭でも FFT の shape が安定する）。
+- **thread-safe**。`threading.Lock` を **memcpy の間だけ**保持し、**FFT 中は保持しない**。
+  受信が GUI スレッドである実測（§5）は性能上の根拠として使い、正しさの前提にはしない。
+
+### 6.5 SpectrumFrame と FFT 設定
+
+`core/analysis/spectrum.py`（すべて純粋関数・Qt 非依存で単体テストできる）。
+
+`SpectrumFrame` は frozen dataclass で `frequencies_hz` と `levels_db` だけを持ち、
+shape 一致・float32・1 次元・有限性・周波数の非負と昇順・0dB 以下を検証してから
+コピーして read-only 化する。QColor 等の描画情報は持たない。
+0〜1 の正規化済み表示値は field に持たず、描画側が dB 範囲から変換する。
+
+初期設定は 1 か所の定数へ集約する。
+
+```python
+FFT_SIZE = 4096
+SPECTRUM_BAND_COUNT = 96
+SPECTRUM_MIN_HZ = 30.0
+SPECTRUM_MAX_HZ = 20_000.0
+SPECTRUM_DB_FLOOR = -90.0
+SPECTRUM_FPS = 30
+SPECTRUM_TIMER_INTERVAL_MS = 33
+SPECTRUM_ATTACK = 0.65
+SPECTRUM_RELEASE = 0.15
+```
+
+処理順は次のとおり。
+
+1. 最新 `FFT_SIZE` sample を取得（長い場合は最新側、短い場合は**左 0 padding**）
+2. DC offset 除去（平均を引く。直流は表示帯域を持ち上げない）
+3. Hann 窓（`np.hanning`）
+4. `np.fft.rfft` → 振幅
+5. **窓による振幅補正**: `2.0 / window.sum()`。Hann のコヒーレントゲイン 0.5 と実正弦波の
+   正負対を合わせて補正するため、**0dBFS の正弦波が約 0dB になる**
+   （実測: 100Hz で -1.2dB、1kHz / 10kHz で -0.6dB。band と bin の量子化による差であり、
+   -6dB や +6dB のような系統的なずれはない）。振幅 0.5 の正弦波は約 -6dB。
+   音響測定器としての校正精度までは要求しない。
+6. dB 変換: `magnitude = max(magnitude, 1e-12)` としてから `20 * log10`。log(0) と 0 除算を避ける
+7. floor clamp: `clip(db, SPECTRUM_DB_FLOOR, 0.0)`
+8. band 集約（§6.6）
+9. 時間平滑化（§6.7）
+
+**上限周波数は Nyquist 以下へ制限する**（`effective_max_hz = min(SPECTRUM_MAX_HZ, sample_rate / 2)`）。
+有効帯域が `SPECTRUM_MIN_HZ` 以下になる極端な低 sample rate では、band を捏造せず
+**空フレーム**を返す。
+
+### 6.6 対数周波数バンド
+
+線形 bin をそのまま横軸へ描かず、**30Hz〜min(20kHz, Nyquist) を 96 band** へ集約する。
+境界は `np.logspace`、band の代表周波数は境界の**幾何平均**。
+
+- 対象 bin がある band は、視認性を優先して **band 内の最大 dB** を採る。
+- 対象 bin が無い band（4096 点 / 48kHz では分解能 11.7Hz のため、主に 120Hz 未満）は、
+  **最大値の複製ではなく `np.interp` による補間**で埋める。同じ bin のピーク値が
+  複数 band へ複製されて不自然に広がるのを避けるため。
+
+### 6.7 時間平滑化（SpectrumProcessor）
+
+生の FFT をそのまま描くとちらつくため、attack と release を分けて平滑化する。
+
+```text
+coefficient = attack if 新値 > 前回値 else release
+表示値 = 前回値 + coefficient × (新値 - 前回値)
+```
+
+係数は 0 より大きく 1 以下（1 で即時追従）。既定は attack 0.65 / release 0.15 で、
+立ち上がりが速く減衰が滑らかになる。無音が続けば floor へ収束する。
+
+`SpectrumProcessor` が前フレームと sample rate を保持し、
+**sample rate 変更・source 変更・停止で `reset()`** する。
+**QWidget へ平滑化状態を持たせない。**
+
+### 6.8 pause / stop / source 変更の契約
+
+| 状態 | 挙動 |
+|---|---|
+| `PLAYING` | 約 30FPS で最新 PCM を解析・描画する |
+| `PAUSED` | **最後のフレームを静止表示**し、新しい FFT を止める（タイマー停止）。再開で追従を再開 |
+| `STOPPED` / `NO_MEDIA` | リングバッファ clear、Processor reset、旧フレーム破棄、タイマー停止、プレースホルダー表示 |
+
+`END_OF_MEDIA` から次曲へ進む場合も、前曲の PCM とフレームを次曲の表示へ持ち越さない。
+
+source 変更時は `PlaybackController.source_changed` を PcmTap と SpectrumPanel の**両方**が
+監視し、リングバッファ clear / sample rate 状態 reset / Processor reset / 旧フレーム破棄を
+即時行う。新 source の最初の PCM が届くまではプレースホルダーを表示する。
+**波形解析サービスとは完全に独立**（相互に参照しない）。
+
+### 6.9 SpectrumWidget
+
+`QWidget` を直接継承し、**QPainter で一括描画**する。objectName は `spectrumWidget`、
+accessibleName は `スペクトラム`。minimumHeight 130、sizePolicy は Expanding / Fixed。
+**マウス操作もフォーカスも持たない**（`NoFocus`。シークは波形側の責務）。
+
+- **96 個の子 Widget や QGraphicsItem を作らない。** 1 回の paintEvent で全 bar を描く。
+- pixel 幅より band 数が多い場合は、隣接 band の最大値へ**間引く**（bar 数 ≤ min(band 数, 幅)）。
+- palette ベースで描く（固定 RGB に依存しない）: 背景 `Base`、grid `Mid`、bar `Highlight`、
+  文字 `Text` / `PlaceholderText`。状態を色だけで伝えず、-20 / -40 / -60 / -80dB の
+  基準線と短い日本語の状態文字を併用する。
+- 状態文字は Widget 内の 1 か所へ QPainter で描く（別 QLabel の表示切替で Panel 高を変動させない）。
+
+### 6.10 SpectrumPanel とタイマー
+
+`SpectrumPanel(playback: PlaybackController, pcm_tap: PcmTap)` だけを受け取る。
+
+- 間隔は約 33ms。**`Qt.TimerType.PreciseTimer` を指定する**（既定の CoarseTimer は Windows の
+  15.6ms 粒度のため実測 21FPS 程度に落ちたが、PreciseTimer では実測 30.3FPS を得た）。
+- **タイマー 1 tick で FFT は最大 1 回。** 処理中の再入は専用フラグで防ぐ。
+- タイマーを動かす条件は「`PLAYING` かつ Widget 表示中かつ top-level window が最小化されていない」。
+  それ以外では停止する（SPEC-04）。最小化では子へ hideEvent が来ないため、
+  `showEvent` で top-level window へ event filter を入れて `WindowStateChange` を監視する。
+- タイマー停止後に古い timeout が処理されても安全に何もしない。
+- `QApplication.processEvents()` はタイマーハンドラー内で呼ばない。
+- 最初の PCM が届く前（sample rate が 0）は FFT せずプレースホルダーのまま待つ。
+- **スペクトラムの失敗は再生を妨げない。** 例外はログへ残してプレースホルダー表示へ切り替え、
+  タイマーを止める（ログの大量出力を避ける）。Controller へは何も要求しない。
+
+### 6.11 MainWindow と app.py
+
+`MainWindow` は PlayerControls → SpeedPanel → WaveformPanel → **SpectrumPanel** →
+PlaylistView の順に配置するだけで、FFT・タイマー・リングバッファを持たない。
+可視化が 2 つに増えた分だけ既定ウィンドウ高を 540 → 700 へ広げ、プレイリスト領域を残す。
+`MainWindow` へ具体 Backend は渡さない（`PcmTap` は既存の `WaveformAnalysisService` と
+同じく composition 済みサービスとして受け取る）。
+
+`app.py`（composition root）が `QtMultimediaBackend` → `PlaybackController` →
+`PcmTap` → `QAudioBufferOutput` への接続 → `MainWindow` の順に組み立て、
+`PlayerComposition` が `pcm_tap` を保持する。**`build_player()` だけではタイマーを開始しない。**
+終了時は可視化を先に止める（`spectrum_panel.shutdown()` → `pcm_tap.shutdown()` →
+`waveform_analysis.shutdown()` → `metadata_reader.shutdown()` → settings / playlist 保存）。
+破棄済み QObject へシグナルが飛ばないようにするため、この順序を変えない。
+
+### 6.12 変えていない契約
+
+`PlaybackBackend` のインターフェース、`PlaybackController`（PCM 配列を持たせない）、
+`WaveformAnalysisService`、波形キャッシュ schema、`settings.json`、`playlist.json`、
+`PlaylistModel`、`MetadataReader` はいずれも変更していない。
+`core/analysis/pcm.py` は波形解析にあった QAudioBuffer 変換を**移設して共有した**もので、
+振る舞いは同じ（channel count の検査だけ追加した）。
+
+**P5-B で Peak / RMS レベルメーターを追加する。** その際も PCM 供給基盤はこのまま使い、
+音声コールバックへ FFT や描画を持ち込まない。
 
 ## 7. 波形解析・縮約・キャッシュ
 
@@ -441,8 +630,8 @@ UI が Backend を直接触ることは禁止し、import 構成のレビュー�
   releaseで1回だけController.seekへ委譲する。source変更、clear、hide、disableでdragを取り消す。
 - **composition**: MainWindowはPlayerControls、SpeedPanel、WaveformPanel、PlaylistViewの順に配置する。
   `app.py`がP4-Aと同じWaveformAnalysisServiceをPanelへ渡し、start／shutdown順序は変更しない。
-- P4は解析・cache・追従表示・クリック／ドラッグseekまで実装済み。P5でPCM tap、スペクトラム、
-  レベルメーターを追加する。
+- P4は解析・cache・追従表示・クリック／ドラッグseekまで実装済み。P5-AでPCM tapとスペクトラムを
+  追加した（§6。波形解析とは独立）。P5-Bでレベルメーターを追加する。
 
 ---
 

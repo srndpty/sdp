@@ -35,7 +35,7 @@ Windows 11 向け個人用ローカル音声プレイヤー sdp (sound player) �
 | 設定・プレイリスト永続化 | JSON ファイル（レジストリではない） | 可搬性と手編集のしやすさ |
 | パッケージング | PyInstaller onedir + Inno Setup（per-user） | 起動速度と AV 誤検知の観点で onefile より有利 |
 | 波形キャッシュ形式 | NumPy `.npz`、上限 500MB の LRU | 実装が単純で NumPy 以外の依存が不要 |
-| スペクトラム既定値 | 4096 点 FFT、30FPS、32 バンド対数軸 | 視認性と CPU 負荷の妥協点 |
+| スペクトラム既定値 | 4096 点 FFT、30FPS、32 バンド対数軸 | 視認性と CPU 負荷の妥協点。**P5-Aで96バンド・下限-90dBへ変更した**（4096点FFTでは32バンドが粗すぎたため。CPU負荷は実測0.114ms/フレームで問題なし） |
 | 描画方式 | 自前 QPainter 描画（PyQtGraph は不採用） | 中央固定スクロール等の要件が特殊で、汎用 API との格闘コストの方が高い |
 
 ### 1.3 未検証事項（P0 で検証。結果次第で設計変更）
@@ -259,8 +259,12 @@ MVP にも初回完成版にも含めない。
 — **ここまでで sdp らしい初回完成版**
 
 - **目的**: SPEC-01〜04、VIS-01（余力があれば VIS-02）。
-- **変更ファイル**: `src/sdp/core/analysis/{ring_buffer,pcm_tap,spectrum}.py`、
-  `src/sdp/ui/{spectrum_widget,level_meter}.py`
+- **変更ファイル**: `src/sdp/core/analysis/{ring_buffer,pcm,spectrum}.py`、
+  `src/sdp/services/pcm_tap.py`、`src/sdp/ui/{spectrum_widget,spectrum_panel,level_meter}.py`
+- **進行状況**: P5-A（PCMタップ、リングバッファ、FFT、スペクトラムWidget）は実装・自動テスト済み
+  （実測30.3FPS。詳細は [architecture.md §6](./architecture.md)）。実画面・実マウス・実音による
+  手動受け入れは未完了（[testing-strategy.md §6.10](./testing-strategy.md)）。
+  **P5-B（Peak／RMSレベルメーター、可視化の表示制御と仕上げ）が残っている。**
 - **受け入れ条件**: 30FPS を維持（フレーム時間の 95 パーセンタイルが 33ms 未満）し、
   対数周波数軸のバンド表示、attack/release 平滑化、停止・無音時の減衰が動作する。
   速度変更で表示が破綻しない。非表示・最小化でタイマーと PCM タップが停止する
