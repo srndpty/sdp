@@ -23,6 +23,7 @@ from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.ui.player_controls import PlayerControls
 from sdp.ui.playlist_view import PlaylistView
+from sdp.ui.shortcuts import ShortcutManager
 from sdp.ui.speed_panel import SpeedPanel
 
 WINDOW_TITLE = "sdp"
@@ -126,6 +127,13 @@ class MainWindow(QMainWindow):
         )
         self._controls.set_repeat_mode(playlist_playback.repeat_mode)
         self._controls.set_shuffle_enabled(playlist_playback.shuffle_enabled)
+        # ショートカットは既存Controller群への別入力経路。Windowが寿命だけを保持する。
+        self._shortcut_manager = ShortcutManager(
+            self,
+            controller,
+            playlist_playback,
+            parent=self,
+        )
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("ファイル(&F)")

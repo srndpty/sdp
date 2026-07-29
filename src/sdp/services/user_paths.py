@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 
 APP_DIR_NAME = "sdp"
+SETTINGS_FILE_NAME = "settings.json"
 
 
 def app_data_directory() -> Path:
@@ -21,3 +22,8 @@ def app_data_directory() -> Path:
     local_app_data = os.environ.get("LOCALAPPDATA")
     base = Path(local_app_data) if local_app_data else Path(tempfile.gettempdir())
     return base / APP_DIR_NAME
+
+
+def default_settings_path() -> Path:
+    """既定の設定保存先（``%LOCALAPPDATA%\\sdp\\settings.json``）。"""
+    return app_data_directory() / SETTINGS_FILE_NAME
