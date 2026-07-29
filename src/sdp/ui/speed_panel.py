@@ -17,13 +17,15 @@ from PySide6.QtWidgets import (
 )
 
 from sdp.core.playback.controller import PlaybackController
+from sdp.core.playback.preferences import (
+    DEFAULT_PLAYBACK_RATE,
+    MAX_PLAYBACK_RATE,
+    MIN_PLAYBACK_RATE,
+    PLAYBACK_RATE_PRESETS,
+    PLAYBACK_RATE_STEP,
+)
 
 _logger = logging.getLogger(__name__)
-
-MIN_PLAYBACK_RATE = 0.50
-MAX_PLAYBACK_RATE = 2.00
-DEFAULT_PLAYBACK_RATE = 1.00
-PLAYBACK_RATE_PRESETS = (0.50, 0.75, 1.00, 1.25, 1.50, 2.00)
 
 _RATE_SCALE = 100
 _PITCH_TOOLTIP = (
@@ -75,7 +77,7 @@ class SpeedPanel(QWidget):
         self._rate_spin_box.setObjectName("playbackRateSpinBox")
         self._rate_spin_box.setRange(MIN_PLAYBACK_RATE, MAX_PLAYBACK_RATE)
         self._rate_spin_box.setDecimals(2)
-        self._rate_spin_box.setSingleStep(0.05)
+        self._rate_spin_box.setSingleStep(PLAYBACK_RATE_STEP)
         self._rate_spin_box.setSuffix("×")
         # 編集途中の不完全な文字列を Controller へ送らず、確定時に反映する。
         self._rate_spin_box.setKeyboardTracking(False)
