@@ -34,6 +34,7 @@ from sdp.services.settings import (
     SettingsSession,
     save_settings,
 )
+from sdp.services.waveform_analysis import WaveformAnalysisService
 from sdp.ui.main_window import MainWindow
 from sdp.ui.player_controls import PlayerControls
 from sdp.ui.playlist_view import PlaylistView
@@ -50,17 +51,34 @@ def settings_file(tmp_path: Path) -> Path:
     return tmp_path / "settings.json"
 
 
+@pytest.fixture
+def waveform_cache_directory(tmp_path: Path) -> Path:
+    return tmp_path / "waveform-cache"
+
+
 @pytest.fixture(autouse=True)
-def isolate_default_settings_path(settings_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """各テストが実ユーザーの設定を読み書きしないよう保存先を隔離する。"""
+def isolate_user_data_paths(
+    settings_file: Path,
+    waveform_cache_directory: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """各テストが実ユーザーの設定・cacheを読み書きしないよう隔離する。"""
     monkeypatch.setattr(app_module, "default_settings_path", lambda: settings_file)
+    monkeypatch.setattr(
+        app_module,
+        "default_waveform_cache_directory",
+        lambda: waveform_cache_directory,
+    )
 
 
 @pytest.fixture
 def composition(
-    playlist_file: Path, settings_file: Path, qtbot: QtBot
+    playlist_file: Path,
+    settings_file: Path,
+    waveform_cache_directory: Path,
+    qtbot: QtBot,
 ) -> Iterator[app_module.PlayerComposition]:
-    built = app_module.build_player(playlist_file, settings_file)
+    built = app_module.build_player(playlist_file, settings_file, waveform_cache_directory)
     qtbot.addWidget(built.window)
     yield built
 
@@ -79,7 +97,9 @@ def audio_files(tmp_path: Path) -> list[Path]:
 
 
 def test_build_player_creates_every_layer(
-    composition: app_module.PlayerComposition, playlist_file: Path, settings_file: Path
+    composition: app_module.PlayerComposition,
+    playlist_file: Path,
+    settings_file: Path,
 ) -> None:
     """Backend → Controller → PlaylistModel → 永続化サービス → MainWindow。"""
     assert isinstance(composition.backend, QtMultimediaBackend)
@@ -89,9 +109,11 @@ def test_build_player_creates_every_layer(
     assert isinstance(composition.playlist_playback, PlaylistPlaybackController)
     assert isinstance(composition.playlist_session, PlaylistSession)
     assert isinstance(composition.settings_session, SettingsSession)
+    assert isinstance(composition.waveform_analysis, WaveformAnalysisService)
     assert isinstance(composition.window, MainWindow)
     assert composition.playlist_session.file_path == playlist_file
     assert composition.settings_session.file_path == settings_file
+    assert not composition.waveform_analysis.is_running
 
 
 def test_window_uses_the_wired_objects(composition: app_module.PlayerComposition) -> None:
@@ -208,29 +230,39 @@ def test_entry_point_delegates_to_app_run(monkeypatch: pytest.MonkeyPatch) -> No
     assert calls == ["run"]
 
 
-def test_run_starts_flushes_and_stops_settings_session(
+def test_run_starts_and_stops_background_services_in_order(
     playlist_file: Path,
     monkeypatch: pytest.MonkeyPatch,
     qtbot: QtBot,
 ) -> None:
-    """イベントループ前に監視を開始し、正常終了時にflushしてから停止する。"""
+    """イベントループ前に開始し、波形worker停止後に設定をflushする。"""
     del qtbot
     events: list[str] = []
     original_start = SettingsSession.start
     original_flush = SettingsSession.flush
     original_stop = SettingsSession.stop
+    original_waveform_start = WaveformAnalysisService.start
+    original_waveform_shutdown = WaveformAnalysisService.shutdown
 
     def record_start(session: SettingsSession) -> None:
-        events.append("start")
+        events.append("settings_start")
         original_start(session)
 
     def record_flush(session: SettingsSession) -> bool:
-        events.append("flush")
+        events.append("settings_flush")
         return original_flush(session)
 
     def record_stop(session: SettingsSession) -> None:
-        events.append("stop")
+        events.append("settings_stop")
         original_stop(session)
+
+    def record_waveform_start(service: WaveformAnalysisService) -> None:
+        events.append("waveform_start")
+        original_waveform_start(service)
+
+    def record_waveform_shutdown(service: WaveformAnalysisService, timeout_ms: int = 3_000) -> None:
+        events.append("waveform_shutdown")
+        original_waveform_shutdown(service, timeout_ms)
 
     def ignore_logging_setup() -> None:
         return None
@@ -250,12 +282,21 @@ def test_run_starts_flushes_and_stops_settings_session(
     monkeypatch.setattr(SettingsSession, "start", record_start)
     monkeypatch.setattr(SettingsSession, "flush", record_flush)
     monkeypatch.setattr(SettingsSession, "stop", record_stop)
+    monkeypatch.setattr(WaveformAnalysisService, "start", record_waveform_start)
+    monkeypatch.setattr(WaveformAnalysisService, "shutdown", record_waveform_shutdown)
     monkeypatch.setattr(app_module, "default_playlist_path", injected_playlist_path)
     monkeypatch.setattr(app_module, "create_application", create_immediate_application)
     monkeypatch.setattr(app_module.logging_setup, "configure_logging", ignore_logging_setup)
     monkeypatch.setattr(app_module.logging_setup, "install_excepthook", ignore_logging_setup)
     assert app_module.run([]) == 0
-    assert events == ["start", "exec", "flush", "stop"]
+    assert events == [
+        "settings_start",
+        "waveform_start",
+        "exec",
+        "waveform_shutdown",
+        "settings_flush",
+        "settings_stop",
+    ]
 
 
 # -- 起動時復元 -------------------------------------------------------------

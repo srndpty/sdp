@@ -29,8 +29,8 @@
 |---|---|
 | `analysis/spectrum.py` | 既知の正弦波を入力してピークバンドの位置を確認。窓関数・dB 変換・平滑化の数値検証 |
 | `analysis/ring_buffer.py` | 折り返し、スナップショット、満杯時の上書き |
-| `analysis/waveform.py` の縮約 | 合成 PCM から生成した envelope の min/max の正当性 |
-| `analysis/waveform_cache.py` | キー照合（更新日時・サイズ・解析バージョンの差異で無効化）、破損 npz、LRU 削除 |
+| `analysis/waveform.py` | WaveformDataのread-only／shape／dtype／有限性／範囲検証、UInt8／Int16／Int32／Float正規化、stereo mono化、frame境界、無音／正弦波／clipping、増分chunk境界、端数bucket、1sample追加、旧snapshot不変、60分相当18万bucket |
+| `analysis/waveform_cache.py` | path／size／mtime／analysis version／bucket／format versionのkey無効化matrix、SHA-256名、日本語path、float32往復、必須field／dtype／shape／NaN／inf／min>max／duration／completeの破損matrix、allow_pickle=False、write／fsync／replace失敗、temp回収、hit時刻、決定的500MB LRU、個別削除失敗継続 |
 | `metadata/reader.py` の純粋読取 | タグあり（MP3 / FLAC）・タグなし・壊れたファイル・未対応形式・欠損・ディレクトリ。日本語と空白、複数アーティストの結合、空文字の `None` 化、長さの丸めと NaN / inf / 負値の防御、長さ不明でもタグを捨てないこと、既知の解析・I/O失敗だけを`MetadataReadError`へ正規化し、属性取得などの予期しない例外は変換せず伝播すること、読み取りで元ファイルを書き換えないこと。タグ付きファイルはテスト音源を tmp_path へ複製して Mutagen 自身で書き込む（外部プロセスを起動しない） |
 | `metadata/types.py` | `MetadataStatus` の値、`TrackMetadata` の不変性、長さの表示整形 |
 | `playlist/entry.py` | entry_id の一意性と復元時の保持、パスの絶対化（相対・`~`・日本語・空白）、直接構築を含む欠損の検出と再確認、不変性 |
@@ -61,6 +61,8 @@
 | プレイリストの永続化ライフサイクル | 保存先の決定、ファイル未作成での空起動、順序・entry_id・重複行・日本語パス・欠損行の復元、並べ替え / 削除 / 全消去後の保存、読み書き I/O エラーのログ記録。**破損ファイルではクラッシュせず空で起動し、その起動の保存を無効化して既存ファイルを上書きしないこと** |
 | UI 層の依存 | `src/sdp/ui/` 配下を再帰走査し、`qt_backend` / `QMediaPlayer` / `QAudioOutput` 自身またはその配下をimportしていないことを標準ライブラリの `ast` で検査する（親モジュール経由も完全修飾して判定し、新しい依存は追加しない） |
 | `MetadataReader` | 実ファイルに対する非同期完了、GUIスレッドでの反映、entry_id・token・path照合、削除・欠損・不適用結果のtoken回収、shutdown後の論理キャンセル、専用poolの並列上限。実行中の同期I/Oを強制停止できないことは協調的shutdownの制約として扱う |
+| `WaveformAnalysisService` | fake decode境界でstart冪等、source監視、source変更時の即時clear、partial／完了／失敗、cache hit／破損miss、request tokenと回収、source切替cancel、stale結果・旧cache保存防止、解析中のsize／mtime変更を終端失敗にすること、読取中削除、GUI thread受信、stat再確認とLRUがworker側であること、縮約中のGUI heartbeat、60分相当stream、timeout後もthread終了まで待つshutdown／QObject削除を検証する |
+| 実`QAudioDecoder` | 音声出力deviceを使わず、WAVとMP3のPCM、実duration、有限min/max、partial、decoderのthread affinity、不正ファイル、decoder生成後のsource切替cancel、shutdown後のthread終了を通常CIで検証する |
 | 可視化ウィジェット | 表示 ON/OFF でタイマーと PCM タップが停止すること（SPEC-04） |
 
 ## 4. 実音再生テスト（`audio` マーカー。ローカル手動実行のみ）
@@ -223,6 +225,18 @@ D&D は実際のマウス操作でしか確認できないため自動化しな�
 - [ ] 変更直後に終了しても値が保存され、再起動後のSpeedPanelへ復元される
 - [ ] 音量、mute、repeat、shuffle、現在曲、再生位置は再起動後に復元されない
 - [ ] 破損した`settings.json`で既定値起動・通知・元ファイル保護が行われる
+
+## 6.8 P4-A 手動スモーク（波形解析基盤）
+
+P4-Aには表示Widgetがないため、ログと`%LOCALAPPDATA%\sdp\cache\waveforms`を観測する。
+
+- [ ] WAV／圧縮音源を開くと再生を妨げずcacheが生成される
+- [ ] 同じ音源の再loadはcache hitになり、mtime／size変更後は再解析される
+- [ ] cacheを壊してもクラッシュせず再解析・置換される
+- [ ] 解析中のsource切替で旧結果が公開・保存されない
+- [ ] 解析中も再生、シーク、速度、pitch、プレイリスト操作が応答する
+- [ ] 終了時にwaveformAnalysisThreadが残らない
+- [ ] cacheは500MB上限のLRU対象となり、音源directoryへファイルを作らない
 
 ## 7. 手動チェックリスト（リリース前）
 

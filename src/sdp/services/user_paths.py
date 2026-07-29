@@ -10,6 +10,7 @@ from pathlib import Path
 
 APP_DIR_NAME = "sdp"
 SETTINGS_FILE_NAME = "settings.json"
+WAVEFORM_CACHE_DIRECTORY = Path("cache") / "waveforms"
 
 
 def app_data_directory() -> Path:
@@ -27,3 +28,8 @@ def app_data_directory() -> Path:
 def default_settings_path() -> Path:
     """既定の設定保存先（``%LOCALAPPDATA%\\sdp\\settings.json``）。"""
     return app_data_directory() / SETTINGS_FILE_NAME
+
+
+def default_waveform_cache_directory() -> Path:
+    """既定の波形キャッシュ保存先。"""
+    return app_data_directory() / WAVEFORM_CACHE_DIRECTORY
