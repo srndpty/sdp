@@ -10,7 +10,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from PySide6.QtWidgets import QPushButton
+from PySide6.QtWidgets import QCheckBox, QDoubleSpinBox, QPushButton
 from pytestqt.qtbot import QtBot
 
 from sdp import app as app_module
@@ -28,6 +28,7 @@ from sdp.services.playlist_session import RESTORE_FAILED_MESSAGE, PlaylistSessio
 from sdp.ui.main_window import MainWindow
 from sdp.ui.player_controls import PlayerControls
 from sdp.ui.playlist_view import PlaylistView
+from sdp.ui.speed_panel import SpeedPanel
 
 
 @pytest.fixture
@@ -72,8 +73,10 @@ def test_build_player_creates_every_layer(
 def test_window_uses_the_wired_objects(composition: app_module.PlayerComposition) -> None:
     """MainWindow の子ウィジェットが配線済みの Controller と Model を使う。"""
     controls = composition.window.findChild(PlayerControls)
+    speed_panel = composition.window.findChild(SpeedPanel)
     playlist_view = composition.window.findChild(PlaylistView)
     assert controls is not None
+    assert speed_panel is not None
     assert playlist_view is not None
 
     composition.controller.set_volume(0.5)
@@ -81,6 +84,24 @@ def test_window_uses_the_wired_objects(composition: app_module.PlayerComposition
 
     composition.playlist_model.add_paths([])
     assert composition.playlist_model.rowCount() == 0
+
+
+def test_build_player_reflects_controller_speed_and_pitch(
+    composition: app_module.PlayerComposition,
+) -> None:
+    """本番配線のSpeedPanelは同じControllerの状態を表示する。"""
+    spin_box = composition.window.findChild(QDoubleSpinBox, "playbackRateSpinBox")
+    pitch = composition.window.findChild(QCheckBox, "pitchCompensationCheckBox")
+    assert spin_box is not None
+    assert pitch is not None
+
+    composition.controller.set_playback_rate(1.25)
+    composition.controller.set_pitch_compensation(False)
+
+    assert spin_box.value() == 1.25
+    assert pitch.isChecked() is False
+    assert composition.backend.playback_rate == pytest.approx(1.25, rel=1e-6)
+    assert composition.backend.pitch_compensation is False
 
 
 def test_composition_does_not_let_the_window_own_the_backend(

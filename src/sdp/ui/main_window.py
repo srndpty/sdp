@@ -23,6 +23,7 @@ from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.ui.player_controls import PlayerControls
 from sdp.ui.playlist_view import PlaylistView
+from sdp.ui.speed_panel import SpeedPanel
 
 WINDOW_TITLE = "sdp"
 NO_FILE_TEXT = "ファイル未選択"
@@ -76,6 +77,7 @@ class MainWindow(QMainWindow):
         self._file_name_label = QLabel(NO_FILE_TEXT)
         self._file_name_label.setObjectName("fileNameLabel")
         self._controls = PlayerControls(controller)
+        self._speed_panel = SpeedPanel(controller)
         self._playlist_view = PlaylistView(playlist_model)
 
         player_panel = QWidget()
@@ -83,6 +85,7 @@ class MainWindow(QMainWindow):
         player_layout.setContentsMargins(0, 0, 0, 0)
         player_layout.addWidget(self._file_name_label)
         player_layout.addWidget(self._controls)
+        player_layout.addWidget(self._speed_panel)
 
         splitter = QSplitter(Qt.Orientation.Vertical, self)
         splitter.addWidget(player_panel)

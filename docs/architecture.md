@@ -88,6 +88,7 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 | `PlaybackBackend` | `load` / `play` / `pause` / `stop` / `seek` / `set_volume` / `set_muted` / `set_playback_rate` / `set_pitch_compensation` と、位置・長さ・状態・メディア状況・エラーのシグナル。**mpv 差し替えに必要な最小限のみ** | プレイリストの知識、UI の知識 |
 | `QtMultimediaBackend` | QMediaPlayer / QAudioOutput の所有（QAudioBufferOutput は P5 で追加）と、上記インターフェースへの変換。Qt の enum・QUrl・エラーをアプリ内の型へ写す | 曲順ロジック、値の検証 |
 | `PlaybackController` | 1 つの source の再生（読み込み・状態・位置・音量・速度）と Backend との境界 | 曲順、プレイリストの知識 |
+| `SpeedPanel` | 0.5～2.0倍の速度操作、プリセット、ピッチ補正切替とControllerとの双方向同期 | Backend、プレイリスト、メタデータ、永続化 |
 | `PlaylistPlaybackController` | 「今どの entry を再生中か」の唯一の管理者。順次再生、前後曲、曲終了時の次曲決定、欠損スキップ | デコード、描画、行データの所有 |
 | `PlaylistModel` | 行データ、並べ替え、D&D、欠損フラグ、重複許可（entry_id 採番） | 再生状態の所有（現在行は Controller が entry_id で参照する） |
 | `MetadataReader` | ワーカーで Mutagen による読み取りを行い、シグナルで Model へ反映する | GUI スレッドでのブロッキング I/O |
@@ -103,8 +104,9 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 実装済みなのは `types.py` / `backend.py` / `controller.py`（P1-A）、
 `qt_backend.py`（P1-B）、`app.py` / `ui/main_window.py` / `ui/player_controls.py` /
 `services/logging_setup.py`（P1-C）。
-表中の曲順・リピート・シャッフルは P2 以降で Controller へ追加する。
-速度・ピッチの操作 UI（`speed_panel.py`）、プレイリスト、可視化は未実装。
+曲順・リピート・シャッフルとプレイリストはP2、速度・ピッチの操作UI
+（`speed_panel.py`）はP3-Aで実装済み。ショートカットと設定永続化はP3-B、
+可視化は後続フェーズで実装する。
 
 - **状態とエラーの型**（`types.py`。すべて Qt 非依存）
   - `PlaybackState`: `NO_MEDIA` / `STOPPED` / `PLAYING` / `PAUSED`。
@@ -138,6 +140,33 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
   Backend の setter が予期せぬ Python 例外を送出した場合は直前の要求値へ戻して再送出する。
   厳密な等値比較は行わない。
 - **同じ値の再設定**は Backend を呼ばず通知もしない（no-op）ものとして全設定で統一する。
+
+### 3.2 速度・ピッチ操作UI（P3-A）
+
+- **`SpeedPanel`の責務**: `PlaybackController`だけを受け取り、速度とピッチ補正だけを
+  操作・表示する。Backend、`PlaylistModel`、`PlaylistPlaybackController`、metadata、
+  settingsは知らない。`MainWindow`は既存のControllerを渡してPlayerControls直下へ配置する。
+- **真値**: `PlaybackController.playback_rate`と`pitch_compensation`を唯一の真値とする。
+  初期表示と外部変更はControllerの公開property／Signalから反映する。Controllerが保持する
+  要求速度はBackendのfloat32読み戻し誤差（相対1e-6以内）では上書きされないため、
+  UI表示も1.25が1.249999等へ振動しない。
+- **速度範囲**: 製品UIは0.50～2.00倍、標準1.00倍。Controllerの一般契約は
+  「正の有限値」のまま狭めない。Sliderは整数50～200を保持し、`rate = value / 100`、
+  `value = round(rate * 100)`の一か所で変換する。SpinBoxは小数2桁・0.05刻みで、
+  編集途中の不完全な文字列を送らないようkeyboard trackingを無効にする。Controllerが
+  UI範囲外の速度を持つ場合はSlider／SpinBoxを無効化して実値を「操作範囲外」と明示し、
+  有効なままの1.0倍resetから通常範囲へ復帰できるようにする。暗黙のclampは行わない。
+- **双方向同期**: Slider／SpinBoxのユーザー変更を互いへ反映してControllerへ1回だけ送り、
+  Controller通知は両Widgetへ反映するだけでsetterへ返送しない。Widget更新は
+  `QSignalBlocker`で囲み、同期Signalによる再帰・二重Backend呼出を防ぐ。
+- **プリセットとreset**: 0.50 / 0.75 / 1.00 / 1.25 / 1.50 / 2.00を一つの定数で定義する。
+  「1.0倍に戻す」は速度だけを1.00へ戻し、ピッチ補正状態は変えない。同値はno-op。
+- **ピッチモード**: 補正ONは速度だけを変えて音高をおおむね維持するtime-stretch、
+  OFFはレコード回転数変更のように速度と音高が連動するvarispeed。文字とツールチップで
+  区別し、色だけに依存しない。切替は再生中も即時反映する。
+- **セッション内設定**: sourceなしでも変更できる。速度・ピッチ変更はload／再生状態／positionを
+  操作しない。直接load、プレイリスト曲切替、自動次曲、Repeat ONE／ALL、シャッフルでも
+  1.00へ戻さず維持する。再起動後の復元とショートカットはP3-Bで追加する。
 
 #### QtMultimediaBackend（P1-B）
 
