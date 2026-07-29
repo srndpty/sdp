@@ -7,7 +7,7 @@
 
 import json
 import logging
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from enum import IntEnum
 from pathlib import Path
 from typing import Any
@@ -22,6 +22,7 @@ from PySide6.QtCore import (
     Qt,
 )
 
+from sdp.core.metadata.types import MetadataStatus, TrackMetadata, format_duration_ms
 from sdp.core.playlist.entry import FileStatus, PlaylistEntry, create_entry
 
 _logger = logging.getLogger(__name__)
@@ -46,6 +47,33 @@ PATH_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 FILE_STATUS_ROLE = int(Qt.ItemDataRole.UserRole) + 2
 """エントリのファイル状態（:class:`FileStatus`）を取得する role。"""
 
+TITLE_ROLE = int(Qt.ItemDataRole.UserRole) + 3
+"""メタデータのタイトル（``str | None``）。表示用のフォールバックはしない。"""
+
+ARTIST_ROLE = int(Qt.ItemDataRole.UserRole) + 4
+"""メタデータのアーティスト（``str | None``）。"""
+
+ALBUM_ROLE = int(Qt.ItemDataRole.UserRole) + 5
+"""メタデータのアルバム（``str | None``）。"""
+
+DURATION_MS_ROLE = int(Qt.ItemDataRole.UserRole) + 6
+"""メタデータの長さ（``int | None``、ミリ秒）。整形しない生の値。"""
+
+METADATA_STATUS_ROLE = int(Qt.ItemDataRole.UserRole) + 7
+"""メタデータの読み込み状態（:class:`MetadataStatus`）。"""
+
+METADATA_FAILED_TOOLTIP = "メタデータを読み取れませんでした。"
+"""読み取り失敗のツールチップ。例外文字列やトレースバックは出さない。"""
+
+METADATA_ROLES: tuple[int, ...] = (
+    TITLE_ROLE,
+    ARTIST_ROLE,
+    ALBUM_ROLE,
+    DURATION_MS_ROLE,
+    METADATA_STATUS_ROLE,
+)
+"""メタデータ由来の role。再生制御はこれだけの変化では何もしない。"""
+
 
 _ROOT = QModelIndex()
 """無効（＝ルート）を表す親インデックス。
@@ -56,16 +84,31 @@ _ROOT = QModelIndex()
 
 
 class Column(IntEnum):
-    """列。タイトル・アーティスト等のメタデータ列は P2-D で追加する。"""
+    """列。
 
+    先頭列はメタデータのタイトルを表示し、取得できていなければファイル名へ
+    フォールバックする。``NAME`` は P2-B までの別名として残す
+    （同じ列を「ファイル名」と「タイトル」で二重に並べない）。
+    """
+
+    TITLE = 0
     NAME = 0
-    PATH = 1
+    ARTIST = 1
+    ALBUM = 2
+    DURATION = 3
+    PATH = 4
 
 
 _HEADERS: dict[Column, str] = {
-    Column.NAME: "ファイル名",
+    Column.TITLE: "タイトル",
+    Column.ARTIST: "アーティスト",
+    Column.ALBUM: "アルバム",
+    Column.DURATION: "長さ",
     Column.PATH: "パス",
 }
+
+_METADATA_COLUMNS = (Column.TITLE, Column.ARTIST, Column.ALBUM, Column.DURATION)
+"""メタデータで表示が変わる列の範囲（先頭から長さまで）。"""
 
 
 class PlaylistModel(QAbstractTableModel):
@@ -108,6 +151,11 @@ class PlaylistModel(QAbstractTableModel):
                 ENTRY_ID_ROLE: QByteArray(b"entryId"),
                 PATH_ROLE: QByteArray(b"path"),
                 FILE_STATUS_ROLE: QByteArray(b"fileStatus"),
+                TITLE_ROLE: QByteArray(b"title"),
+                ARTIST_ROLE: QByteArray(b"artist"),
+                ALBUM_ROLE: QByteArray(b"album"),
+                DURATION_MS_ROLE: QByteArray(b"durationMs"),
+                METADATA_STATUS_ROLE: QByteArray(b"metadataStatus"),
             }
         )
         return roles
@@ -126,13 +174,39 @@ class PlaylistModel(QAbstractTableModel):
             return entry.path
         if role == FILE_STATUS_ROLE:
             return entry.file_status
+        if role == TITLE_ROLE:
+            return None if entry.metadata is None else entry.metadata.title
+        if role == ARTIST_ROLE:
+            return None if entry.metadata is None else entry.metadata.artist
+        if role == ALBUM_ROLE:
+            return None if entry.metadata is None else entry.metadata.album
+        if role == DURATION_MS_ROLE:
+            return None if entry.metadata is None else entry.metadata.duration_ms
+        if role == METADATA_STATUS_ROLE:
+            return entry.metadata_status
         if role == int(Qt.ItemDataRole.ToolTipRole):
+            if entry.metadata_status is MetadataStatus.FAILED:
+                return f"{entry.path}\n{METADATA_FAILED_TOOLTIP}"
             return str(entry.path)
         if role == int(Qt.ItemDataRole.DisplayRole):
-            if index.column() == Column.NAME:
-                return entry.display_name
-            if index.column() == Column.PATH:
-                return str(entry.path)
+            return self._display_text(entry, index.column())
+        return None
+
+    def _display_text(self, entry: PlaylistEntry, column: int) -> str | None:
+        """表示文字列。タイトルは常にファイル名へフォールバックする。"""
+        if column == Column.TITLE:
+            return entry.display_title
+        if column == Column.PATH:
+            return str(entry.path)
+        metadata = entry.metadata
+        if metadata is None:
+            return "" if column in _METADATA_COLUMNS else None
+        if column == Column.ARTIST:
+            return metadata.artist or ""
+        if column == Column.ALBUM:
+            return metadata.album or ""
+        if column == Column.DURATION:
+            return "" if metadata.duration_ms is None else format_duration_ms(metadata.duration_ms)
         return None
 
     def headerData(
@@ -419,6 +493,59 @@ class PlaylistModel(QAbstractTableModel):
         if row is None:
             return False
         return self._refresh_row(row)
+
+    # -- メタデータ ---------------------------------------------------------
+
+    def mark_metadata_loading(self, entry_id: str) -> bool:
+        """読み取り中にする。表示は変わらないため状態 role だけ通知する。"""
+        return self._replace_entry(
+            entry_id,
+            lambda entry: entry.with_metadata_loading(),
+            roles=[METADATA_STATUS_ROLE],
+        )
+
+    def apply_metadata(self, entry_id: str, metadata: TrackMetadata) -> bool:
+        """読み取れたメタデータを反映する。"""
+        return self._replace_entry(entry_id, lambda entry: entry.with_metadata(metadata))
+
+    def mark_metadata_failed(self, entry_id: str) -> bool:
+        """読み取り失敗にする。表示はファイル名フォールバックへ戻る。"""
+        return self._replace_entry(entry_id, lambda entry: entry.with_metadata_failed())
+
+    def clear_metadata(self, entry_id: str) -> bool:
+        """メタデータを捨てて未要求へ戻す（再読み取り可能にする）。"""
+        return self._replace_entry(entry_id, lambda entry: entry.without_metadata())
+
+    def _replace_entry(
+        self,
+        entry_id: str,
+        transform: Callable[[PlaylistEntry], PlaylistEntry],
+        *,
+        roles: list[int] | None = None,
+    ) -> bool:
+        """entry_id で 1 行だけ差し替える。行番号やパスでは更新しない。
+
+        値が変わらなければ何もしない。Model 全体のリセットは行わない。
+        """
+        row = self._row_by_entry_id.get(entry_id)
+        if row is None:
+            return False
+        entry = self._entries[row]
+        updated = transform(entry)
+        if updated.metadata == entry.metadata and updated.metadata_status is entry.metadata_status:
+            return False
+        self._entries[row] = updated
+        changed_roles = (
+            [*METADATA_ROLES, int(Qt.ItemDataRole.DisplayRole), int(Qt.ItemDataRole.ToolTipRole)]
+            if roles is None
+            else roles
+        )
+        self.dataChanged.emit(
+            self.index(row, _METADATA_COLUMNS[0]),
+            self.index(row, _METADATA_COLUMNS[-1]),
+            changed_roles,
+        )
+        return True
 
     def missing_entry_ids(self) -> tuple[str, ...]:
         """欠損しているエントリの entry_id。"""

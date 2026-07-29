@@ -14,6 +14,8 @@ from PySide6.QtWidgets import QPushButton
 from pytestqt.qtbot import QtBot
 
 from sdp import app as app_module
+from sdp.core.metadata.reader import MetadataReader
+from sdp.core.metadata.types import MetadataStatus, TrackMetadata
 from sdp.core.playback.backend import PlaybackBackend
 from sdp.core.playback.controller import PlaybackController
 from sdp.core.playback.qt_backend import QtMultimediaBackend
@@ -353,3 +355,100 @@ def test_repeat_and_shuffle_reset_on_restart(
     assert composition.playlist_playback.repeat_mode is RepeatMode.OFF
     assert composition.playlist_playback.shuffle_enabled is False
     assert composition.playlist_playback.current_entry_id is None
+
+
+# -- メタデータ -------------------------------------------------------------
+
+
+def test_composition_holds_the_metadata_reader(
+    composition: app_module.PlayerComposition,
+) -> None:
+    """MetadataReader を composition が保持し、build だけでは動き出さない。"""
+    assert isinstance(composition.metadata_reader, MetadataReader)
+    assert composition.metadata_reader.is_running is False
+
+
+def test_build_player_does_not_start_background_work(
+    playlist_file: Path, audio_files: list[Path], qtbot: QtBot
+) -> None:
+    """build_player だけでは読み取りを始めない（既存テストを不安定にしない）。"""
+    save_playlist(playlist_file, [create_entry(path) for path in audio_files])
+
+    composition = app_module.build_player(playlist_file)
+    qtbot.addWidget(composition.window)
+
+    assert all(
+        entry.metadata_status is MetadataStatus.NOT_REQUESTED
+        for entry in composition.playlist_model.entries()
+    )
+
+
+def test_started_reader_reads_restored_and_added_entries(
+    playlist_file: Path, audio_files: list[Path], qtbot: QtBot
+) -> None:
+    """start 後は復元済みエントリも追加分も読み取る。"""
+    save_playlist(playlist_file, [create_entry(audio_files[0])])
+    composition = app_module.build_player(playlist_file)
+    qtbot.addWidget(composition.window)
+    model = composition.playlist_model
+
+    composition.metadata_reader.start()
+
+    qtbot.waitUntil(
+        lambda: model.entry_at(0).metadata_status in (MetadataStatus.LOADED, MetadataStatus.FAILED),
+        timeout=10_000,
+    )
+    model.add_paths([audio_files[1]])
+    qtbot.waitUntil(
+        lambda: model.entry_at(1).metadata_status in (MetadataStatus.LOADED, MetadataStatus.FAILED),
+        timeout=10_000,
+    )
+    composition.metadata_reader.shutdown(timeout_ms=2_000)
+    assert composition.metadata_reader.is_running is False
+
+
+def test_metadata_is_not_persisted_and_is_reread_after_restart(
+    playlist_file: Path, audio_files: list[Path], qtbot: QtBot
+) -> None:
+    """メタデータは保存されず、再起動後は未取得から始まる。"""
+    composition = app_module.build_player(playlist_file)
+    qtbot.addWidget(composition.window)
+    entry_ids = composition.playlist_model.add_paths(audio_files)
+    composition.playlist_model.apply_metadata(
+        entry_ids[0], TrackMetadata(title="保存されない", duration_ms=1000)
+    )
+    composition.playlist_session.save_from(composition.playlist_model)
+
+    document = json.loads(playlist_file.read_text(encoding="utf-8"))
+    assert set(document) == {"schema_version", "entries"}
+    for entry in document["entries"]:
+        assert set(entry) == {"entry_id", "path"}
+
+    restored = app_module.build_player(playlist_file)
+    qtbot.addWidget(restored.window)
+    assert all(
+        entry.metadata is None and entry.metadata_status is MetadataStatus.NOT_REQUESTED
+        for entry in restored.playlist_model.entries()
+    )
+
+
+def test_metadata_failure_does_not_disable_saving(
+    composition: app_module.PlayerComposition, playlist_file: Path, audio_files: list[Path]
+) -> None:
+    """メタデータ失敗でプレイリスト保存は無効にならない。"""
+    entry_ids = composition.playlist_model.add_paths(audio_files)
+    composition.playlist_model.mark_metadata_failed(entry_ids[0])
+
+    assert composition.playlist_session.is_save_enabled is True
+    assert composition.playlist_session.save_from(composition.playlist_model) is True
+    assert len(load_playlist(playlist_file)) == len(audio_files)
+
+
+def test_ui_layer_does_not_import_mutagen() -> None:
+    """UI 層は Mutagen も MetadataReader も知らない。"""
+    from sdp.ui import main_window as main_window_module
+    from sdp.ui import playlist_view as playlist_view_module
+
+    for module in (main_window_module, playlist_view_module):
+        for forbidden in ("mutagen", "MetadataReader", "read_track_metadata"):
+            assert not hasattr(module, forbidden), f"{module.__name__}: {forbidden}"

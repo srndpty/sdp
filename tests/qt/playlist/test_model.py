@@ -234,8 +234,8 @@ def test_header_data(model: PlaylistModel, audio_files: list[Path]) -> None:
     model.add_paths(audio_files[:1])
 
     assert (
-        model.headerData(Column.NAME, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole)
-        == "ファイル名"
+        model.headerData(Column.TITLE, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole)
+        == "タイトル"
     )
     assert (
         model.headerData(Column.PATH, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole)
