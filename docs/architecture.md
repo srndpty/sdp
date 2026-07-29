@@ -388,12 +388,14 @@ UI が Backend を直接触ることは禁止し、import 構成のレビュー�
 - **thread境界**: `_WaveformWorker`を専用QThreadへmoveし、そのthread上でQAudioDecoderを生成する。
   bufferReadyごとにbytes化、正規化、縮約を行い、GUIへは不変なWaveformDataだけをqueued Signalで
   返す。最初の完成bucket、その後1024bucket増加または250ms経過でpartialを通知し、完了時は
-  必ず最終結果を通知する。GUI threadではdecode、全sample縮約、cache走査を行わない。
+  必ず最終結果を通知する。GUI threadではdecode、全sample縮約、cache走査、解析中のstatを行わない。
 - **現在sourceとcancel**: `WaveformAnalysisService`はPlaybackControllerの`source`と
-  `source_changed`だけを使用する。単調増加tokenとpath、size、mtimeを結果ごとに照合し、source変更、
-  shutdown、ファイル更新後の古いpartial／完了／cache保存を捨てる。workerはdecode開始、buffer前後、
-  partial、cache保存、完了の境界でthread-safeなcancel状態を確認し、QAudioDecoderへstopを要求する。
-  解析失敗は専用Signalとログだけで扱い、PlaybackControllerの状態や再生エラーへ混ぜない。
+  `source_changed`だけを使用する。GUI側は単調増加token・path・現在sourceだけを照合し、source変更時は
+  workerの開始を待たず直ちに`analysis_cleared`を通知する。size／mtimeの再確認はworkerがpartial・完了・
+  cache境界で行い、現在sourceが解析中に変化した場合は専用の`analysis_failed`で必ず要求を終端する。
+  source変更とshutdownではthread-safeなcancel状態を即時設定してQAudioDecoderへstopを要求し、workerが
+  cancel処理を終えたtokenはregistryから回収する。解析失敗はPlaybackControllerの状態や再生エラーへ
+  混ぜない。
 - **cache key**: 解決済み絶対path、size、mtime_ns、analysis version 1、20ms bucket、mono format
   version 1をcanonical JSONからSHA-256化する。ファイル名はhashだけで、生pathを含めない。
 - **npz schema**: minimum、maximum、bucket_duration_ms、duration_ms、analysis_version、
@@ -407,8 +409,10 @@ UI が Backend を直接触ることは禁止し、import 構成のレビュー�
   個別削除失敗はログに残して後続を処理する。
 - **ライフサイクル**: `build_player()`はserviceを保持するだけでthreadを開始しない。`run()`は
   metadata開始後にserviceをstartし、終了時はmetadataより先にserviceをshutdownする。shutdownは
-  token無効化、decoder停止要求、thread quit、明示timeout付きwaitを行う。Qt内部decodeや注入された
-  同期処理が戻らない場合の厳密な終了期限は保証しない。
+  token無効化、decoder停止要求、thread quit、明示timeout付きwaitを行う。timeout時は警告後も
+  `QThread.terminate()`を使わず終了まで待ち、実行中QThreadを所有したままQObjectを破棄しない。
+  Qt内部decodeや注入された同期処理が戻らない場合の厳密な終了期限は保証しない。厳密な期限が
+  必要になった場合は解析を終了可能な子プロセスへ隔離する。
 - P4-Aでは解析・cacheまでを実装し、画面表示、±30秒追従、クリック／ドラッグseekはP4-Bで追加する。
 
 ---

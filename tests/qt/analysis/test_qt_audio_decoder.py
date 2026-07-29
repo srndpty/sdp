@@ -1,9 +1,11 @@
 """実QAudioDecoderによるWAV・圧縮音源・失敗・thread終了を検証する。"""
 
+import threading
 from pathlib import Path
 
 import numpy as np
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtTest import QSignalSpy
 from pytestqt.qtbot import QtBot
 
@@ -63,11 +65,22 @@ def test_real_decoder_cancel_does_not_publish_old_source(tmp_path: Path, qtbot: 
     controller = PlaybackController(FakePlaybackBackend())
     service = WaveformAnalysisService(controller, tmp_path / "cache")
     finished = QSignalSpy(service.analysis_finished)
+    decoder_created = threading.Event()
+
+    def record_decoder_created(on_worker_thread: bool) -> None:
+        if on_worker_thread:
+            decoder_created.set()
+
+    service._worker.decoder_created.connect(  # pyright: ignore[reportPrivateUsage]
+        record_decoder_created,
+        Qt.ConnectionType.DirectConnection,
+    )
     first = (ASSETS / "sine440.wav").resolve()
     second = (ASSETS / "sine440.mp3").resolve()
     service.start()
 
     controller.load(first)
+    assert decoder_created.wait(timeout=5)
     controller.load(second)
 
     qtbot.waitUntil(lambda: finished.count() == 1, timeout=10_000)

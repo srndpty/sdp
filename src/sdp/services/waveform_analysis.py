@@ -29,6 +29,7 @@ _logger = logging.getLogger(__name__)
 PARTIAL_BUCKET_INTERVAL = 1_024
 PARTIAL_TIME_INTERVAL_MS = 250
 SHUTDOWN_TIMEOUT_MS = 3_000
+FILE_CHANGED_MESSAGE = "解析中に音声ファイルが変更されました。"
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +70,11 @@ class _CancellationRegistry:
     def discard(self, token: int) -> None:
         with self._lock:
             self._cancelled.discard(token)
+
+    def count(self) -> int:
+        """テストと診断向けに未回収token数を返す。"""
+        with self._lock:
+            return len(self._cancelled)
 
 
 class _WaveformWorker(QObject):
@@ -118,6 +124,9 @@ class _WaveformWorker(QObject):
         if self._cancelled(request):
             return
         if cached is not None:
+            if not _key_still_matches(request):
+                self._fail(request, FILE_CHANGED_MESSAGE)
+                return
             self._terminal = True
             self.finished.emit(request, cached, True)
             return
@@ -129,11 +138,12 @@ class _WaveformWorker(QObject):
     @Slot(int)
     def cancel(self, token: int) -> None:
         request = self._request
-        if request is None or request.token != token:
-            return
-        if self._decoder is not None:
-            self._decoder.stop()
-        self._cleanup_decoder()
+        if request is not None and request.token == token:
+            if self._decoder is not None:
+                self._decoder.stop()
+            self._cleanup_decoder()
+        # cancelより前にqueueされた旧cache保存は既にcancel状態を確認済み。
+        self._cancellations.discard(token)
 
     @Slot(object, object)
     def save_cache(self, request_value: object, data_value: object) -> None:
@@ -162,7 +172,7 @@ class _WaveformWorker(QObject):
                 if self._cancelled(request):
                     return
                 self._append_mono(request, chunk.samples, chunk.sample_rate)
-                if self._cancelled(request):
+                if self._terminal or self._cancelled(request):
                     return
             self._finish(request)
         except (OSError, ValueError) as error:
@@ -199,6 +209,8 @@ class _WaveformWorker(QObject):
             self._append_mono(request, samples, sample_rate)
         except ValueError as error:
             self._fail(request, str(error))
+        if self._terminal:
+            return
         if self._cancelled(request):
             decoder.stop()
             self._cleanup_decoder()
@@ -236,12 +248,18 @@ class _WaveformWorker(QObject):
             or self._partial_timer.elapsed() >= PARTIAL_TIME_INTERVAL_MS
         )
         if should_emit and not self._cancelled(request):
+            if not _key_still_matches(request):
+                self._fail(request, FILE_CHANGED_MESSAGE)
+                return
             self.partial.emit(request, self._reducer.snapshot(complete=False))
             self._last_partial_bucket = count
             self._partial_timer.restart()
 
     def _finish(self, request: WaveformRequest) -> None:
         if self._terminal or self._cancelled(request):
+            return
+        if not _key_still_matches(request):
+            self._fail(request, FILE_CHANGED_MESSAGE)
             return
         self._terminal = True
         reducer = self._reducer
@@ -257,6 +275,8 @@ class _WaveformWorker(QObject):
         if self._terminal or self._cancelled(request):
             return
         self._terminal = True
+        if self._decoder is not None:
+            self._decoder.stop()
         self.failed.emit(request, message)
         self._cleanup_decoder()
 
@@ -344,15 +364,23 @@ class WaveformAnalysisService(QObject):
         self._thread.requestInterruption()
         self._thread.quit()
         if not self._thread.wait(timeout_ms):
-            _logger.warning("波形解析threadの終了待ちがタイムアウトしました（%dms）。", timeout_ms)
+            _logger.warning(
+                "波形解析threadが%dms以内に終了しません。"
+                "安全なQObject破棄のため終了まで待機します。",
+                timeout_ms,
+            )
+            # 実行中QThreadを子に持ったまま戻るとQObject破棄時に致命的となる。
+            # terminateは使わず、協調的な処理が戻るまで待つ。
+            self._thread.wait()
 
     @Slot(object)
     def _on_source_changed(self, source: object) -> None:
         if self._shutdown or not self._started:
             return
         self._invalidate_current()
+        # Bのworker処理を待たず、source変更時点でAの表示を解除できる契約。
+        self.analysis_cleared.emit()
         if source is None:
-            self.analysis_cleared.emit()
             return
         if not isinstance(source, Path):
             return
@@ -400,23 +428,20 @@ class WaveformAnalysisService(QObject):
 
     @Slot(object, str)
     def _on_worker_failed(self, request_value: object, message: str) -> None:
-        # 読取中の削除など、失敗原因そのものがstat不一致の場合も現在要求なら通知する。
-        request = self._applicable_request(request_value, require_current_key=False)
+        request = self._applicable_request(request_value)
         if request is not None:
             _logger.warning("波形解析に失敗しました: %s (%s)", request.path, message)
             self.analysis_failed.emit(request.path, request.token, message)
+            if self._request == request:
+                self._request = None
 
-    def _applicable_request(
-        self, value: object, *, require_current_key: bool = True
-    ) -> WaveformRequest | None:
+    def _applicable_request(self, value: object) -> WaveformRequest | None:
         if self._shutdown or not isinstance(value, WaveformRequest):
             return None
         current = self._request
         if current is None or value.token != current.token or value.path != current.path:
             return None
         if self._playback.source != value.path:
-            return None
-        if require_current_key and not _key_still_matches(value):
             return None
         return value
 

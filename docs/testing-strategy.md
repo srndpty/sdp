@@ -61,8 +61,8 @@
 | プレイリストの永続化ライフサイクル | 保存先の決定、ファイル未作成での空起動、順序・entry_id・重複行・日本語パス・欠損行の復元、並べ替え / 削除 / 全消去後の保存、読み書き I/O エラーのログ記録。**破損ファイルではクラッシュせず空で起動し、その起動の保存を無効化して既存ファイルを上書きしないこと** |
 | UI 層の依存 | `src/sdp/ui/` 配下を再帰走査し、`qt_backend` / `QMediaPlayer` / `QAudioOutput` 自身またはその配下をimportしていないことを標準ライブラリの `ast` で検査する（親モジュール経由も完全修飾して判定し、新しい依存は追加しない） |
 | `MetadataReader` | 実ファイルに対する非同期完了、GUIスレッドでの反映、entry_id・token・path照合、削除・欠損・不適用結果のtoken回収、shutdown後の論理キャンセル、専用poolの並列上限。実行中の同期I/Oを強制停止できないことは協調的shutdownの制約として扱う |
-| `WaveformAnalysisService` | fake decode境界でstart冪等、source監視、partial／完了／失敗、cache hit／破損miss、request token、source切替cancel、stale結果・旧cache保存防止、mtime変更、読取中削除、GUI thread受信、worker側LRU、GUI heartbeat、60分相当stream、shutdown／QObject削除を検証する |
-| 実`QAudioDecoder` | 音声出力deviceを使わず、WAVとMP3のPCM、実duration、有限min/max、partial、decoderのthread affinity、不正ファイル、shutdown後のthread終了を通常CIで検証する |
+| `WaveformAnalysisService` | fake decode境界でstart冪等、source監視、source変更時の即時clear、partial／完了／失敗、cache hit／破損miss、request tokenと回収、source切替cancel、stale結果・旧cache保存防止、解析中のsize／mtime変更を終端失敗にすること、読取中削除、GUI thread受信、stat再確認とLRUがworker側であること、縮約中のGUI heartbeat、60分相当stream、timeout後もthread終了まで待つshutdown／QObject削除を検証する |
+| 実`QAudioDecoder` | 音声出力deviceを使わず、WAVとMP3のPCM、実duration、有限min/max、partial、decoderのthread affinity、不正ファイル、decoder生成後のsource切替cancel、shutdown後のthread終了を通常CIで検証する |
 | 可視化ウィジェット | 表示 ON/OFF でタイマーと PCM タップが停止すること（SPEC-04） |
 
 ## 4. 実音再生テスト（`audio` マーカー。ローカル手動実行のみ）

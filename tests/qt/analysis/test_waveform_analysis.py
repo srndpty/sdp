@@ -12,10 +12,16 @@ from pytestqt.qtbot import QtBot
 from shiboken6 import isValid
 
 from fakes.fake_playback_backend import FakePlaybackBackend
-from sdp.core.analysis.waveform import WaveformData
-from sdp.core.analysis.waveform_cache import WaveformCache, WaveformCacheKey
+from sdp.core.analysis.waveform import WAVEFORM_BUCKET_MS, WaveformData
+from sdp.core.analysis.waveform_cache import (
+    WAVEFORM_ANALYSIS_VERSION,
+    WAVEFORM_FORMAT_VERSION,
+    WaveformCache,
+    WaveformCacheKey,
+)
 from sdp.core.playback.controller import PlaybackController
 from sdp.services.waveform_analysis import (
+    FILE_CHANGED_MESSAGE,
     DecodedChunk,
     DecodeFunction,
     WaveformAnalysisService,
@@ -190,6 +196,42 @@ def test_source_change_cancels_old_result_and_cache_write(
     service.shutdown()
 
 
+def test_source_change_clears_old_waveform_before_new_worker_starts(
+    controller: PlaybackController, tmp_path: Path, qtbot: QtBot
+) -> None:
+    """AからBへの変更時はBのworker開始を待たず旧波形を解除する。"""
+    first = make_audio_file(tmp_path, "A.wav")
+    second = make_audio_file(tmp_path, "B.wav")
+    entered = threading.Event()
+    release = threading.Event()
+
+    def controlled_decode(path: Path, cancelled: Callable[[], bool]) -> Iterator[DecodedChunk]:
+        if path == second.resolve():
+            entered.set()
+            release.wait(timeout=5)
+        if not cancelled():
+            yield DecodedChunk(np.ones(2_000, dtype=np.float32), 1_000)
+
+    service = make_service(controller, tmp_path / "cache", controlled_decode)
+    cleared = QSignalSpy(service.analysis_cleared)
+    started = QSignalSpy(service.analysis_started)
+    finished = QSignalSpy(service.analysis_finished)
+    service.start()
+    controller.load(first)
+    qtbot.waitUntil(lambda: finished.count() == 1, timeout=5_000)
+    clear_count = cleared.count()
+    start_count = started.count()
+
+    controller.load(second)
+
+    assert cleared.count() == clear_count + 1
+    assert started.count() == start_count
+    assert entered.wait(timeout=5)
+    release.set()
+    qtbot.waitUntil(lambda: finished.count() == 2, timeout=5_000)
+    service.shutdown()
+
+
 def test_same_path_with_changed_mtime_is_reanalyzed(
     controller: PlaybackController, tmp_path: Path, qtbot: QtBot
 ) -> None:
@@ -287,6 +329,84 @@ def test_file_removed_during_read_emits_failure(
     service.shutdown()
 
 
+def test_file_changed_during_analysis_emits_terminal_failure(
+    controller: PlaybackController, tmp_path: Path, qtbot: QtBot
+) -> None:
+    """現在sourceの内容変更はsilent破棄せず、失敗で要求を終了する。"""
+    source = make_audio_file(tmp_path)
+    initial_key = WaveformCacheKey.from_path(source)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def controlled_decode(path: Path, cancelled: Callable[[], bool]) -> Iterator[DecodedChunk]:
+        del path
+        entered.set()
+        release.wait(timeout=5)
+        if not cancelled():
+            yield DecodedChunk(np.ones(2_000, dtype=np.float32), 1_000)
+
+    cache_dir = tmp_path / "cache"
+    service = make_service(controller, cache_dir, controlled_decode)
+    finished = QSignalSpy(service.analysis_finished)
+    failed = QSignalSpy(service.analysis_failed)
+    service.start()
+    controller.load(source)
+    assert entered.wait(timeout=5)
+    source.write_bytes(b"changed audio with a different size")
+    release.set()
+    qtbot.waitUntil(lambda: failed.count() == 1, timeout=5_000)
+
+    assert finished.count() == 0
+    assert failed.at(0)[2] == FILE_CHANGED_MESSAGE
+    assert not (cache_dir / initial_key.filename).exists()
+    assert service._request is None  # pyright: ignore[reportPrivateUsage]
+    service.shutdown()
+
+
+def test_file_identity_rechecks_run_only_on_worker_thread(
+    controller: PlaybackController,
+    tmp_path: Path,
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """要求生成後のstat再確認をGUI threadで実行しない。"""
+    source = make_audio_file(tmp_path)
+    threads: list[QThread] = []
+    original_from_path = WaveformCacheKey.from_path
+
+    def recording_from_path(
+        cls: type[WaveformCacheKey],
+        path: Path,
+        *,
+        analysis_version: int = WAVEFORM_ANALYSIS_VERSION,
+        bucket_ms: int = WAVEFORM_BUCKET_MS,
+        format_version: int = WAVEFORM_FORMAT_VERSION,
+    ) -> WaveformCacheKey:
+        del cls
+        threads.append(QThread.currentThread())
+        return original_from_path(
+            path,
+            analysis_version=analysis_version,
+            bucket_ms=bucket_ms,
+            format_version=format_version,
+        )
+
+    monkeypatch.setattr(WaveformCacheKey, "from_path", classmethod(recording_from_path))
+    service = make_service(controller, tmp_path / "cache")
+    finished = QSignalSpy(service.analysis_finished)
+    service.start()
+    controller.load(source)
+    qtbot.waitUntil(lambda: finished.count() == 1, timeout=5_000)
+
+    assert len(threads) >= 3
+    assert threads[0] is service.thread()
+    assert all(
+        thread is service._thread  # pyright: ignore[reportPrivateUsage]
+        for thread in threads[1:]
+    )
+    service.shutdown()
+
+
 def test_cache_pruning_runs_on_worker_thread(
     controller: PlaybackController,
     tmp_path: Path,
@@ -324,6 +444,73 @@ def test_service_can_be_deleted_after_shutdown(
     assert not isValid(service)
 
 
+def test_shutdown_waits_for_blocked_worker_after_timeout(
+    controller: PlaybackController,
+    tmp_path: Path,
+    qtbot: QtBot,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """短いtimeoutを超えてもworker終了まで待ち、安全にQObjectを削除できる。"""
+    source = make_audio_file(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_decode(path: Path, cancelled: Callable[[], bool]) -> Iterator[DecodedChunk]:
+        del path, cancelled
+        entered.set()
+        release.wait(timeout=5)
+        yield DecodedChunk(np.zeros(20, dtype=np.float32), 1_000)
+
+    service = make_service(controller, tmp_path / "cache", blocked_decode)
+    service.start()
+    controller.load(source)
+    assert entered.wait(timeout=5)
+    releaser = threading.Timer(0.05, release.set)
+    releaser.start()
+
+    with caplog.at_level("WARNING"):
+        service.shutdown(timeout_ms=1)
+    releaser.join(timeout=1)
+
+    assert not service._thread.isRunning()  # pyright: ignore[reportPrivateUsage]
+    assert "安全なQObject破棄のため終了まで待機します" in caplog.text
+    service.deleteLater()
+    qtbot.waitUntil(lambda: not isValid(service))
+    assert not isValid(service)
+
+
+def test_cancelled_tokens_are_reclaimed_after_worker_handles_cancel(
+    controller: PlaybackController, tmp_path: Path, qtbot: QtBot
+) -> None:
+    """曲切替で論理cancelしたtokenをworker終端後に回収する。"""
+    first = make_audio_file(tmp_path, "A.wav")
+    second = make_audio_file(tmp_path, "B.wav")
+    entered = threading.Event()
+    release = threading.Event()
+
+    def controlled_decode(path: Path, cancelled: Callable[[], bool]) -> Iterator[DecodedChunk]:
+        if path == first.resolve():
+            entered.set()
+            release.wait(timeout=5)
+        if not cancelled():
+            yield DecodedChunk(np.ones(2_000, dtype=np.float32), 1_000)
+
+    service = make_service(controller, tmp_path / "cache", controlled_decode)
+    finished = QSignalSpy(service.analysis_finished)
+    service.start()
+    controller.load(first)
+    assert entered.wait(timeout=5)
+    controller.load(second)
+    assert service._cancellations.count() == 1  # pyright: ignore[reportPrivateUsage]
+    release.set()
+    qtbot.waitUntil(lambda: finished.count() == 1, timeout=5_000)
+    qtbot.waitUntil(
+        lambda: service._cancellations.count() == 0,  # pyright: ignore[reportPrivateUsage]
+        timeout=5_000,
+    )
+    service.shutdown()
+
+
 def test_gui_heartbeat_runs_while_worker_is_blocked(
     controller: PlaybackController, tmp_path: Path, qtbot: QtBot
 ) -> None:
@@ -354,6 +541,7 @@ def test_gui_heartbeat_runs_while_worker_is_blocked(
     controller.load(source)
     assert entered.wait(timeout=5)
     qtbot.waitUntil(lambda: len(ticks) >= 3, timeout=2_000)
+    ticks_before_reduction = len(ticks)
     release.set()
     qtbot.waitUntil(lambda: finished.count() == 1, timeout=5_000)
     data = finished.at(0)[2]
@@ -361,5 +549,6 @@ def test_gui_heartbeat_runs_while_worker_is_blocked(
     assert data.minimum.size == 180_000
     assert data.minimum.nbytes + data.maximum.nbytes == 1_440_000
     assert partial.count() >= 2
+    assert len(ticks) > ticks_before_reduction
     timer.stop()
     service.shutdown()
