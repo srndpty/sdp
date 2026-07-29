@@ -4,7 +4,7 @@ PlaybackController の公開 API とシグナルだけを使う。
 再生実装（QMediaPlayer など）には触れない。
 """
 
-from PySide6.QtCore import QSignalBlocker, Qt
+from PySide6.QtCore import QSignalBlocker, Qt, Signal
 from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
@@ -48,7 +48,16 @@ class PlayerControls(QWidget):
 
     Controller への操作と、Controller からの通知による表示更新だけを行う。
     状態に応じた表示・活性の更新は :meth:`_apply_state` の 1 か所へ集約する。
+
+    前後曲は曲順を知らないと決められないため、このウィジェットは要求を
+    シグナルで出すだけにして、プレイリスト側の Controller へは触れない。
     """
+
+    previous_requested = Signal()
+    """前の曲が要求された。"""
+
+    next_requested = Signal()
+    """次の曲が要求された。"""
 
     def __init__(self, controller: PlaybackController, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -56,6 +65,13 @@ class PlayerControls(QWidget):
         # ユーザーがシークバーをドラッグしている間は、Backend からの位置通知で
         # つまみを動かさない（操作が奪われるため）。
         self._is_seeking = False
+
+        self._previous_button = QPushButton("前の曲")
+        self._previous_button.setObjectName("previousTrackButton")
+        self._previous_button.setEnabled(False)
+        self._next_button = QPushButton("次の曲")
+        self._next_button.setObjectName("nextTrackButton")
+        self._next_button.setEnabled(False)
 
         self._play_button = QPushButton("再生")
         self._play_button.setObjectName("playButton")
@@ -97,9 +113,11 @@ class PlayerControls(QWidget):
         seek_row.addWidget(self._duration_label)
 
         button_row = QHBoxLayout()
+        button_row.addWidget(self._previous_button)
         button_row.addWidget(self._play_button)
         button_row.addWidget(self._pause_button)
         button_row.addWidget(self._stop_button)
+        button_row.addWidget(self._next_button)
         button_row.addStretch(1)
         button_row.addWidget(self._state_label)
 
@@ -114,6 +132,9 @@ class PlayerControls(QWidget):
         layout.addLayout(volume_row, 2, 0)
 
     def _connect_widgets(self) -> None:
+        # 前後曲は再生実装へ触らず、要求としてだけ外へ出す（配線は MainWindow）。
+        self._previous_button.clicked.connect(self.previous_requested)
+        self._next_button.clicked.connect(self.next_requested)
         self._play_button.clicked.connect(self._on_play_clicked)
         self._pause_button.clicked.connect(self._on_pause_clicked)
         self._stop_button.clicked.connect(self._on_stop_clicked)
@@ -138,6 +159,13 @@ class PlayerControls(QWidget):
         self._on_duration_changed(self._controller.duration_ms)
         self._on_position_changed(self._controller.position_ms)
         self._apply_state(self._controller.state)
+
+    # -- 外部からの設定 -----------------------------------------------------
+
+    def set_playlist_navigation_available(self, previous: bool, next_: bool) -> None:
+        """前後曲ボタンの活性を設定する。判定はプレイリスト側の責務。"""
+        self._previous_button.setEnabled(previous)
+        self._next_button.setEnabled(next_)
 
     # -- ウィジェット操作 ---------------------------------------------------
 

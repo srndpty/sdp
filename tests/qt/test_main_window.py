@@ -20,6 +20,7 @@ from sdp.core.playback.types import (
     PlaybackErrorCode,
 )
 from sdp.core.playlist.model import PlaylistModel
+from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.ui import main_window as main_window_module
 from sdp.ui.main_window import MainWindow
 from sdp.ui.player_controls import PlayerControls
@@ -44,10 +45,20 @@ def playlist_model(qtbot: QtBot) -> Iterator[PlaylistModel]:
 
 
 @pytest.fixture
+def playlist_playback(
+    controller: PlaybackController, playlist_model: PlaylistModel
+) -> Iterator[PlaylistPlaybackController]:
+    yield PlaylistPlaybackController(controller, playlist_model)
+
+
+@pytest.fixture
 def window(
-    controller: PlaybackController, playlist_model: PlaylistModel, qtbot: QtBot
+    controller: PlaybackController,
+    playlist_model: PlaylistModel,
+    playlist_playback: PlaylistPlaybackController,
+    qtbot: QtBot,
 ) -> Iterator[MainWindow]:
-    main = MainWindow(controller, playlist_model)
+    main = MainWindow(controller, playlist_model, playlist_playback)
     qtbot.addWidget(main)
     yield main
 
@@ -84,10 +95,10 @@ def action_of(window: MainWindow, name: str) -> QAction:
 # -- 依存の向き -------------------------------------------------------------
 
 
-def test_main_window_takes_a_controller_and_a_playlist_model() -> None:
-    """MainWindow が受け取るのは PlaybackController と PlaylistModel（と親）だけ。"""
+def test_main_window_takes_only_its_three_dependencies() -> None:
+    """MainWindow が受け取るのは Controller・Model・プレイリスト再生制御（と親）だけ。"""
     parameters = list(inspect.signature(MainWindow.__init__).parameters)
-    assert parameters == ["self", "controller", "playlist_model", "parent"]
+    assert parameters == ["self", "controller", "playlist_model", "playlist_playback", "parent"]
 
 
 def test_main_window_module_does_not_import_the_qt_backend() -> None:

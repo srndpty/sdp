@@ -406,20 +406,19 @@ class PlaylistModel(QAbstractTableModel):
 
         ファイルが削除・復元された場合に呼ぶ。変化した行だけ ``dataChanged`` を出す。
         """
-        changed = 0
-        last_column = len(Column) - 1
-        for row, entry in enumerate(self._entries):
-            refreshed = entry.with_refreshed_status()
-            if refreshed is entry:
-                continue
-            self._entries[row] = refreshed
-            changed += 1
-            self.dataChanged.emit(
-                self.index(row, 0),
-                self.index(row, last_column),
-                [FILE_STATUS_ROLE],
-            )
-        return changed
+        return sum(1 for row in range(len(self._entries)) if self._refresh_row(row))
+
+    def refresh_entry_status(self, entry_id: str) -> bool:
+        """1 件だけファイル状態を再確認し、変化したら ``True`` を返す。
+
+        再生直前や次曲の探索で使う。全行を走査しないため 1000 件でも軽い。
+        存在しない entry_id と、状態が変わらなかった場合は ``False``。
+        entry_id と path は変えない。
+        """
+        row = self._row_by_entry_id.get(entry_id)
+        if row is None:
+            return False
+        return self._refresh_row(row)
 
     def missing_entry_ids(self) -> tuple[str, ...]:
         """欠損しているエントリの entry_id。"""
@@ -428,6 +427,20 @@ class PlaylistModel(QAbstractTableModel):
         )
 
     # -- 内部 ---------------------------------------------------------------
+
+    def _refresh_row(self, row: int) -> bool:
+        """1 行のファイル状態を再確認する。変化した場合だけ ``dataChanged`` を出す。"""
+        entry = self._entries[row]
+        refreshed = entry.with_refreshed_status()
+        if refreshed is entry:
+            return False
+        self._entries[row] = refreshed
+        self.dataChanged.emit(
+            self.index(row, 0),
+            self.index(row, len(Column) - 1),
+            [FILE_STATUS_ROLE],
+        )
+        return True
 
     def _rebuild_index(self) -> None:
         self._row_by_entry_id = {entry.entry_id: row for row, entry in enumerate(self._entries)}

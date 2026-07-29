@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 from sdp.core.playback.controller import PlaybackController
 from sdp.core.playback.types import MediaStatus, PlaybackError
 from sdp.core.playlist.model import PlaylistModel
+from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.ui.player_controls import PlayerControls
 from sdp.ui.playlist_view import PlaylistView
 
@@ -63,6 +64,7 @@ class MainWindow(QMainWindow):
         self,
         controller: PlaybackController,
         playlist_model: PlaylistModel,
+        playlist_playback: PlaylistPlaybackController,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -98,6 +100,23 @@ class MainWindow(QMainWindow):
         controller.media_status_changed.connect(self._on_media_status_changed)
         controller.error_occurred.connect(self._on_error_occurred)
         self._playlist_view.message_requested.connect(self.show_status_message)
+
+        # プレイリスト再生の配線。次曲探索や欠損スキップの判断はここに置かない。
+        self._playlist_view.entry_activated.connect(playlist_playback.play_entry)
+        self._controls.previous_requested.connect(playlist_playback.play_previous)
+        self._controls.next_requested.connect(playlist_playback.play_next)
+        playlist_playback.current_entry_changed.connect(self._on_current_entry_changed)
+        playlist_playback.navigation_availability_changed.connect(
+            self._controls.set_playlist_navigation_available
+        )
+        playlist_playback.message_requested.connect(self.show_status_message)
+
+        # Controller が Model 復元後に作られた場合も、接続前に確定していた状態を反映する。
+        self._on_current_entry_changed(playlist_playback.current_entry_id)
+        self._controls.set_playlist_navigation_available(
+            playlist_playback.can_play_previous,
+            playlist_playback.can_play_next,
+        )
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("ファイル(&F)")
@@ -152,6 +171,9 @@ class MainWindow(QMainWindow):
         self._file_name_label.setToolTip(str(source))
         self.setWindowTitle(f"{WINDOW_TITLE} — {source.name}")
         self.statusBar().showMessage(_MEDIA_STATUS_MESSAGES[MediaStatus.LOADING])
+
+    def _on_current_entry_changed(self, entry_id: object) -> None:
+        self._playlist_view.set_current_entry_id(entry_id if isinstance(entry_id, str) else None)
 
     def _on_media_status_changed(self, status: MediaStatus) -> None:
         if status is MediaStatus.INVALID_MEDIA and self._has_current_source_error:

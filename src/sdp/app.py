@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QApplication
 from sdp.core.playback.controller import PlaybackController
 from sdp.core.playback.qt_backend import QtMultimediaBackend
 from sdp.core.playlist.model import PlaylistModel
+from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.services import logging_setup
 from sdp.services.playlist_session import PlaylistSession, default_playlist_path
 from sdp.ui.main_window import MainWindow
@@ -36,14 +37,16 @@ class PlayerComposition:
     backend: QtMultimediaBackend
     controller: PlaybackController
     playlist_model: PlaylistModel
+    playlist_playback: PlaylistPlaybackController
     playlist_session: PlaylistSession
     window: MainWindow
 
 
 def build_player(playlist_file: Path | None = None) -> PlayerComposition:
-    """Backend → Controller → PlaylistModel → MainWindow の順に組み立てる。
+    """Backend → Controller → PlaylistModel → プレイリスト再生 → MainWindow の順に組み立てる。
 
     保存済みプレイリストの復元もここで行う（UI は永続化を知らない）。
+    保存対象は ``PlaylistModel.entries()`` だけで、現在 entry や再生位置は保存しない。
     ``playlist_file`` はテストから保存先を差し替えるための入口。
 
     QApplication が既に存在していることが前提（ウィジェットの生成に必要）。
@@ -51,15 +54,17 @@ def build_player(playlist_file: Path | None = None) -> PlayerComposition:
     backend = QtMultimediaBackend()
     controller = PlaybackController(backend)
     playlist_model = PlaylistModel()
+    playlist_playback = PlaylistPlaybackController(controller, playlist_model)
     session = PlaylistSession(default_playlist_path() if playlist_file is None else playlist_file)
     restore_message = session.load_into(playlist_model)
-    window = MainWindow(controller, playlist_model)
+    window = MainWindow(controller, playlist_model, playlist_playback)
     if restore_message is not None:
         window.show_status_message(restore_message)
     return PlayerComposition(
         backend=backend,
         controller=controller,
         playlist_model=playlist_model,
+        playlist_playback=playlist_playback,
         playlist_session=session,
         window=window,
     )

@@ -24,7 +24,7 @@ from pytestqt.qtbot import QtBot
 
 from sdp.core.playlist.model import Column, PlaylistModel
 from sdp.ui import playlist_view as playlist_view_module
-from sdp.ui.playlist_view import MissingEntryDelegate, PlaylistView
+from sdp.ui.playlist_view import PlaylistEntryDelegate, PlaylistView
 
 
 @pytest.fixture
@@ -418,7 +418,7 @@ def test_missing_row_is_greyed_out(
     """欠損行は Disabled/Text の色で描かれ、利用可能な行とは異なる。"""
     model.add_paths([audio_files[0], tmp_path / "ない曲.wav"])
     delegate = table_of(view).itemDelegate()
-    assert isinstance(delegate, MissingEntryDelegate)
+    assert isinstance(delegate, PlaylistEntryDelegate)
 
     available_option = QStyleOptionViewItem()
     delegate.initStyleOption(available_option, model.index(0, Column.NAME))
@@ -500,7 +500,7 @@ def test_view_is_released_after_deletion(qtbot: QtBot) -> None:
 def test_delegate_ignores_invalid_index(view: PlaylistView) -> None:
     """無効な index でも例外にならない。"""
     delegate = table_of(view).itemDelegate()
-    assert isinstance(delegate, MissingEntryDelegate)
+    assert isinstance(delegate, PlaylistEntryDelegate)
     option = QStyleOptionViewItem()
 
     delegate.initStyleOption(option, QModelIndex())
