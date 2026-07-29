@@ -21,6 +21,7 @@ from sdp.core.playlist.entry import create_entry
 from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.persistence import load_playlist, save_playlist
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
+from sdp.core.playlist.types import RepeatMode
 from sdp.services.playlist_session import RESTORE_FAILED_MESSAGE, PlaylistSession
 from sdp.ui.main_window import MainWindow
 from sdp.ui.player_controls import PlayerControls
@@ -308,3 +309,47 @@ def test_restored_playlist_initializes_navigation_buttons(
 
     next_.click()
     assert composition.playlist_playback.current_entry_id == saved[0].entry_id
+
+
+# -- リピート・シャッフル ---------------------------------------------------
+
+
+def test_production_wiring_uses_a_non_seeded_rng(
+    composition: app_module.PlayerComposition, audio_files: list[Path]
+) -> None:
+    """本番構成は固定 seed を使わない（初期状態は OFF / シャッフルなし）。"""
+    assert composition.playlist_playback.repeat_mode is RepeatMode.OFF
+    assert composition.playlist_playback.shuffle_enabled is False
+    del audio_files
+
+
+def test_repeat_and_shuffle_are_not_persisted(
+    composition: app_module.PlayerComposition, playlist_file: Path, audio_files: list[Path]
+) -> None:
+    """playlist.json へ repeat / shuffle / history を書かない。"""
+    entry_ids = composition.playlist_model.add_paths(audio_files)
+    composition.playlist_playback.set_repeat_mode(RepeatMode.ALL)
+    composition.playlist_playback.set_shuffle_enabled(True)
+    composition.playlist_playback.play_entry(entry_ids[0])
+
+    composition.playlist_session.save_from(composition.playlist_model)
+
+    document = json.loads(playlist_file.read_text(encoding="utf-8"))
+    assert set(document) == {"schema_version", "entries"}
+    for entry in document["entries"]:
+        assert set(entry) == {"entry_id", "path"}
+
+
+def test_repeat_and_shuffle_reset_on_restart(
+    playlist_file: Path, audio_files: list[Path], qtbot: QtBot
+) -> None:
+    """再起動で repeat は OFF、shuffle は False へ戻る。"""
+    save_playlist(playlist_file, [create_entry(path) for path in audio_files])
+
+    composition = app_module.build_player(playlist_file)
+    qtbot.addWidget(composition.window)
+
+    assert composition.playlist_model.rowCount() == len(audio_files)
+    assert composition.playlist_playback.repeat_mode is RepeatMode.OFF
+    assert composition.playlist_playback.shuffle_enabled is False
+    assert composition.playlist_playback.current_entry_id is None

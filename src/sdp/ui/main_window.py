@@ -110,6 +110,10 @@ class MainWindow(QMainWindow):
             self._controls.set_playlist_navigation_available
         )
         playlist_playback.message_requested.connect(self.show_status_message)
+        self._controls.repeat_mode_requested.connect(playlist_playback.cycle_repeat_mode)
+        self._controls.shuffle_toggled.connect(playlist_playback.set_shuffle_enabled)
+        playlist_playback.repeat_mode_changed.connect(self._controls.set_repeat_mode)
+        playlist_playback.shuffle_enabled_changed.connect(self._controls.set_shuffle_enabled)
 
         # Controller が Model 復元後に作られた場合も、接続前に確定していた状態を反映する。
         self._on_current_entry_changed(playlist_playback.current_entry_id)
@@ -117,6 +121,8 @@ class MainWindow(QMainWindow):
             playlist_playback.can_play_previous,
             playlist_playback.can_play_next,
         )
+        self._controls.set_repeat_mode(playlist_playback.repeat_mode)
+        self._controls.set_shuffle_enabled(playlist_playback.shuffle_enabled)
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("ファイル(&F)")
