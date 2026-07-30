@@ -227,9 +227,9 @@ def fit_window_state(
     契約:
 
     - **完全に画面外なら**primary screen（``screens[0]``）の中央へ移動する。
-    - タイトルバー相当の帯が十分に画面内へ残っていれば、位置はそのまま使う。
-      マルチモニターの負座標は正当な値として扱い、負だからという理由で拒否しない。
-    - サイズはprimary screenのavailable sizeを超えないようclampし、
+    - タイトルバー相当の帯が最も重なる画面、次にウィンドウ矩形が最も重なる画面を
+      復元先とする。マルチモニターの負座標は正当な値として扱う。
+    - サイズは復元先screenのavailable sizeを超えないようclampし、
       ``minimum_size`` を下回らないようにする。
     - 画面情報が取れない場合（``screens`` が空）は、サイズの下限だけを保証して
       位置には触れない（誤った補正で画面外へ動かさない）。
@@ -241,20 +241,67 @@ def fit_window_state(
         return WindowState(state.x, state.y, width, height, state.maximized)
 
     primary = screens[0]
-    width = min(width, primary.width)
-    height = min(height, primary.height)
+    target = _best_matching_screen(state, screens)
+    if target is None:
+        width = min(width, primary.width)
+        height = min(height, primary.height)
+        # どの画面とも重ならない（モニターを外した等）。primary中央へ戻す。
+        return WindowState(
+            x=primary.x + (primary.width - width) // 2,
+            y=primary.y + (primary.height - height) // 2,
+            width=width,
+            height=height,
+            maximized=state.maximized,
+        )
+
+    target_width = min(width, target.width)
+    target_height = min(height, target.height)
+    size_was_clamped = target_width != width or target_height != height
+    width = target_width
+    height = target_height
     candidate = WindowState(state.x, state.y, width, height, state.maximized)
-    if any(_title_band_is_visible(candidate, screen) for screen in screens):
+    if size_was_clamped:
+        return _fit_position_inside_screen(candidate, target)
+    if _title_band_is_visible(candidate, target):
         return candidate
 
-    # どの画面ともタイトルバーが重ならない（モニターを外した等）。中央へ戻す。
+    return _fit_position_to_keep_title_band_visible(candidate, target)
+
+
+def _best_matching_screen(state: WindowState, screens: Sequence[ScreenRect]) -> ScreenRect | None:
+    """保存矩形が属する画面を、タイトル帯、全体矩形の順で選ぶ。"""
+    title_overlaps = [(_title_band_overlap_area(state, screen), screen) for screen in screens]
+    title_area, title_screen = max(title_overlaps, key=lambda item: item[0])
+    if title_area > 0:
+        return title_screen
+
+    window_overlaps = [(_window_overlap_area(state, screen), screen) for screen in screens]
+    window_area, window_screen = max(window_overlaps, key=lambda item: item[0])
+    return window_screen if window_area > 0 else None
+
+
+def _fit_position_to_keep_title_band_visible(state: WindowState, screen: ScreenRect) -> WindowState:
+    """選んだ画面でタイトル帯を掴める最小範囲だけ位置を補正する。"""
+    visible_width = min(MINIMUM_VISIBLE_WIDTH, state.width)
+    band_height = min(TITLE_BAR_BAND_HEIGHT, state.height)
+    x = max(screen.x - state.width + visible_width, state.x)
+    x = min(screen.right - visible_width, x)
+    y = max(screen.y, state.y)
+    y = min(screen.bottom - band_height, y)
     return WindowState(
-        x=primary.x + (primary.width - width) // 2,
-        y=primary.y + (primary.height - height) // 2,
-        width=width,
-        height=height,
+        x=x,
+        y=y,
+        width=state.width,
+        height=state.height,
         maximized=state.maximized,
     )
+
+
+def _fit_position_inside_screen(state: WindowState, screen: ScreenRect) -> WindowState:
+    """サイズ補正後の矩形全体を、選んだ画面のavailable geometryへ収める。"""
+    x = max(screen.x, min(screen.right - state.width, state.x))
+    y = max(screen.y, min(screen.bottom - state.height, state.y))
+    return WindowState(x, y, state.width, state.height, state.maximized)
 
 
 def distribute_splitter_sizes(
@@ -285,6 +332,50 @@ def _title_band_is_visible(state: WindowState, screen: ScreenRect) -> bool:
     return overlap_width >= min(MINIMUM_VISIBLE_WIDTH, state.width) and overlap_height >= min(
         TITLE_BAR_BAND_HEIGHT, state.height
     )
+
+
+def _title_band_overlap_area(state: WindowState, screen: ScreenRect) -> int:
+    """ウィンドウ上端のタイトル帯と画面の交差面積。"""
+    band_bottom = state.y + min(TITLE_BAR_BAND_HEIGHT, state.height)
+    return _intersection_area(
+        state.x,
+        state.y,
+        state.right,
+        band_bottom,
+        screen.x,
+        screen.y,
+        screen.right,
+        screen.bottom,
+    )
+
+
+def _window_overlap_area(state: WindowState, screen: ScreenRect) -> int:
+    """ウィンドウ矩形と画面の交差面積。"""
+    return _intersection_area(
+        state.x,
+        state.y,
+        state.right,
+        state.bottom,
+        screen.x,
+        screen.y,
+        screen.right,
+        screen.bottom,
+    )
+
+
+def _intersection_area(
+    left_a: int,
+    top_a: int,
+    right_a: int,
+    bottom_a: int,
+    left_b: int,
+    top_b: int,
+    right_b: int,
+    bottom_b: int,
+) -> int:
+    width = max(0, min(right_a, right_b) - max(left_a, left_b))
+    height = max(0, min(bottom_a, bottom_b) - max(top_a, top_b))
+    return width * height
 
 
 def _window_from_json(value: object) -> WindowState | None:

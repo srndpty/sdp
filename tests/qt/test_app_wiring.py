@@ -47,6 +47,7 @@ from sdp.services.settings import (
 )
 from sdp.services.ui_state import (
     MINIMUM_SPLITTER_SIZE,
+    ScreenRect,
     SplitterState,
     UiState,
     WindowState,
@@ -1214,9 +1215,20 @@ def test_default_ui_state_path_is_in_the_app_data_directory() -> None:
 
 
 def test_ui_state_is_restored_before_the_window_is_shown(
-    playlist_file: Path, settings_file: Path, ui_state_file: Path, qtbot: QtBot
+    playlist_file: Path,
+    settings_file: Path,
+    ui_state_file: Path,
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """保存済みのgeometryと前回フォルダーは、表示前に適用される。"""
+
+    # CIの仮想screenサイズに依存せず、画面内geometryの復元配線だけを検証する。
+    def fixed_screens(window: MainWindow) -> list[ScreenRect]:
+        del window
+        return [ScreenRect(x=0, y=0, width=1920, height=1040)]
+
+    monkeypatch.setattr(MainWindow, "_screen_rects", fixed_screens)
     save_ui_state(
         ui_state_file,
         UiState(

@@ -281,19 +281,11 @@ class MainWindow(QMainWindow):
     def file_dialog_directory(self) -> str:
         """ファイルダイアログの初期ディレクトリ。
 
-        保存済みの前回フォルダーが今も存在するときだけ使い、存在しない・
-        アクセスできない場合は空文字（Qtの既定動作）へfallbackする。
+        GUIスレッドで存在確認すると切断済みネットワークパス等で停止し得るため、
+        保存値はI/OせずそのままQtへ渡す。未保存の場合だけ空文字を返す。
         """
         directory = self._last_open_directory
-        if directory is None:
-            return ""
-        try:
-            if not directory.is_dir():
-                return ""
-        except OSError:
-            _logger.debug("前回フォルダーへアクセスできません: %s", directory)
-            return ""
-        return str(directory)
+        return "" if directory is None else str(directory)
 
     def connect_ui_state_changed(self, slot: Callable[[], None]) -> None:
         """UI状態の変更通知を購読する（UiStateSession用の小さな入口）。"""
@@ -332,8 +324,12 @@ class MainWindow(QMainWindow):
                     minimum_size=(max(1, minimum.width()), max(1, minimum.height())),
                 )
                 self.setGeometry(fitted.x, fitted.y, fitted.width, fitted.height)
+                window_state = self.windowState() & ~Qt.WindowState.WindowMinimized
                 if fitted.maximized:
-                    self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
+                    window_state |= Qt.WindowState.WindowMaximized
+                else:
+                    window_state &= ~Qt.WindowState.WindowMaximized
+                self.setWindowState(window_state)
             splitter = state.main_splitter
             if splitter is not None:
                 self._pending_splitter = splitter

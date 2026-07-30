@@ -374,13 +374,82 @@ def test_window_below_the_screen_is_moved_back() -> None:
 
 
 def test_window_larger_than_the_screen_is_clamped() -> None:
-    """画面より大きいサイズはprimary screenのavailable size以内へ収める。"""
+    """画面より大きいサイズは所属screenのavailable size以内へ収める。"""
     state = WindowState(x=0, y=0, width=5000, height=4000, maximized=False)
 
     fitted = fit_window_state(state, [FULL_HD])
 
     assert fitted.width == FULL_HD.width
     assert fitted.height == FULL_HD.height
+
+
+def test_oversized_window_on_smaller_secondary_is_clamped_to_secondary() -> None:
+    """小さいsecondary上の過大Windowをprimaryではなくsecondary基準で縮める。"""
+    primary = ScreenRect(x=0, y=0, width=3840, height=2160)
+    secondary = ScreenRect(x=3840, y=0, width=1280, height=720)
+    state = WindowState(x=4000, y=100, width=1800, height=1000, maximized=False)
+
+    fitted = fit_window_state(state, [primary, secondary])
+
+    assert (fitted.x, fitted.y) == (secondary.x, secondary.y)
+    assert (fitted.width, fitted.height) == (secondary.width, secondary.height)
+    assert fitted.right <= secondary.right
+    assert fitted.bottom <= secondary.bottom
+
+
+def test_large_window_on_larger_secondary_is_not_clamped_to_primary() -> None:
+    """大きいsecondaryで有効なサイズを、小さいprimary基準で縮めない。"""
+    primary = ScreenRect(x=0, y=0, width=1280, height=720)
+    secondary = ScreenRect(x=1280, y=0, width=2560, height=1440)
+    state = WindowState(x=1400, y=100, width=1800, height=1000, maximized=False)
+
+    assert fit_window_state(state, [primary, secondary]) == state
+
+
+@pytest.mark.parametrize(
+    ("secondary", "state"),
+    [
+        (
+            ScreenRect(x=-1280, y=0, width=1280, height=720),
+            WindowState(x=-1280, y=0, width=1800, height=900, maximized=False),
+        ),
+        (
+            ScreenRect(x=0, y=-720, width=1280, height=720),
+            WindowState(x=0, y=-720, width=1800, height=900, maximized=False),
+        ),
+    ],
+)
+def test_oversized_window_uses_negative_coordinate_secondary(
+    secondary: ScreenRect, state: WindowState
+) -> None:
+    """左側・上側の負座標monitorも所属画面として選択する。"""
+    primary = ScreenRect(x=0, y=0, width=1920, height=1080)
+
+    fitted = fit_window_state(state, [primary, secondary])
+
+    assert (fitted.x, fitted.y) == (secondary.x, secondary.y)
+    assert (fitted.width, fitted.height) == (secondary.width, secondary.height)
+
+
+def test_screen_with_largest_title_overlap_is_selected() -> None:
+    """複数画面に跨る場合はタイトル帯の重なりが最大の画面を選ぶ。"""
+    primary = ScreenRect(x=0, y=0, width=1000, height=800)
+    secondary = ScreenRect(x=1000, y=0, width=2000, height=1200)
+    state = WindowState(x=200, y=100, width=1900, height=900, maximized=False)
+
+    fitted = fit_window_state(state, [primary, secondary])
+
+    assert (fitted.width, fitted.height) == (state.width, state.height)
+
+
+def test_window_body_overlap_selects_screen_when_title_is_above_screens() -> None:
+    """タイトル帯が外でも本体が重なる画面を選び、掴める位置へ補正する。"""
+    state = WindowState(x=200, y=-100, width=800, height=600, maximized=False)
+
+    fitted = fit_window_state(state, [FULL_HD])
+
+    assert fitted.x == state.x
+    assert fitted.y == FULL_HD.y
 
 
 def test_minimum_size_is_respected() -> None:
