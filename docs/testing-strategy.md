@@ -476,6 +476,36 @@ QtのoffscreenテストではOSのforeground制約を完全に代替できない
 - [ ] 通常起動とUAC昇格起動の間で、二重起動や内部エラー表示が起きない
 - [ ] Window終了後にタスクマネージャー上sdp／python processが残らない
 
+## 6.16 P7-B1 PyInstaller onedir配布物
+
+自動検証では、CLI純粋関数、通常起動／selftest境界、frozen時のresource path、
+selftestがWindow・設定・cacheを作らないことを確認する。`tools/package_layout.py`は
+`sdp.exe`、Python DLL、Qt Core／GUI／Widgets／Multimedia、`qwindows.dll`を検査し、
+Python source、tests、開発ツール、ユーザー保存ファイルの混入を拒否する。
+
+```powershell
+pwsh -File scripts/build-package.ps1
+pwsh -File scripts/package-smoke.ps1
+```
+
+スモークは配布物をrepository外の一時directoryへコピーし、開発用Pythonやuvを含まない
+制限PATHと隔離LOCALAPPDATAで`sdp.exe --selftest`を実行する。実GUIは自動終了させず、
+以下をWindows 11で手動確認する。
+
+- [ ] `sdp.exe`を直接起動し、consoleが表示されずWindowが開く
+- [ ] WAV／MP3／FLAC／Ogg Vorbis／Opus／M4A／AACを低音量で再生できる
+- [ ] 日本語・空白path、複数path、相対pathを受け取れる
+- [ ] 起動済み配布版へ別PowerShellから転送でき、2つ目のprocessが残らない
+- [ ] 最小化復帰と最大化維持が動作する
+- [ ] 波形・スペクトラム・レベル、速度・ピッチを実音で確認できる
+- [ ] 終了後にprocessが残らず、直ちに再起動できる
+- [ ] read-onlyな配置directoryから起動してもユーザーデータは`LOCALAPPDATA`へ保存される
+- [ ] Windows Defenderのスキャン結果と初回起動警告を記録する
+- [ ] `dist/sdp`をZIP化・展開してもselftestとGUI起動が成功する
+
+自動selftestはcodec decodeと可聴音、Windows foreground制約、Defender、DPI、
+外部配布ライセンス遵守を証明しない。これらはrelease前の独立した手動ゲートとする。
+
 ## 7. 手動チェックリスト（リリース前）
 
 - [ ] ファイルの D&D 追加で順序が維持される

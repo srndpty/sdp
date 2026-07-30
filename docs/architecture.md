@@ -1416,13 +1416,35 @@ Pathに変換できない引数だけを無視する。
 
 ## 12. パッケージングとインストーラー
 
-- PyInstaller は **onedir** を使う（onefile は起動が遅く、アンチウイルス誤検知も増えるため）。
-- spec で `QtQml` / `QtQuick` / `QtNetwork` などの不要な Qt モジュールと翻訳ファイルを除外して
-  サイズを削減する（PySide6 + NumPy で 200MB 前後になる見込み。推測）。
-- バージョン情報リソースとアイコンを埋め込む。`--selftest` 起動フラグを用意する
-  （[testing-strategy.md](./testing-strategy.md) 参照）。
-- Inno Setup で per-user インストール（管理者権限不要）、関連付け登録、スタートメニュー登録を行う。
-  コード署名は初期スコープ外。
+### 12.1 P7-B1 onedir配布物
+
+- PyInstaller 6の**onedir**を使い、`packaging/sdp.spec`を唯一のビルド定義とする。
+- entry pointは`src/sdp/__main__.py`、windowed（consoleなし）、UPXなしとする。
+- `sdp.exe`とPython、PySide6、Qt plugin、NumPy、Mutagen等は`dist/sdp`と
+  `dist/sdp/_internal`へ配置する。Qt DLLやpluginを手作業でコピーしない。
+- `sdp`のpackage metadataを同梱し、`sdp.__version__`は`pyproject.toml`のversionを使う。
+- `resources.py`は開発時にrepository root、frozen時にexe directoryと`_internal`を区別する。
+  ユーザーデータは従来どおり`%LOCALAPPDATA%/sdp`であり、exe隣へ保存しない。
+- テスト音源、pytest、Ruff、Pyright等の開発物は同梱しない。
+- 配布物にsdpのMIT License、第三者通知、wheelから収集したライセンス原文を含める。
+
+PySide6 6.10.3の標準hookによるP7-B1実測では、`ffmpegmediaplugin.dll`と
+`windowsmediaplugin.dll`、FFmpegのavcodec／avformat／avutil／swresample／swscale DLLを
+収集した。Qt 6の既定はFFmpeg backendで、Windows Media Foundation backendはQt 6.10から
+非推奨である。sdp自身は外部FFmpeg CLIを同梱・起動しない。各形式は実際のbackend、codec、
+hardware driver等にも左右されるため、selftestのclass構築成功を全codec対応の証明にしない。
+（[Qt Multimedia backend](https://doc.qt.io/qt-6/qtmultimedia-index.html)）
+
+`--selftest`は通常起動と独立したCLI modeで、`PlayerComposition`、Window、音声再生、
+単一instance IPCを開始しない。Qt Widgets／Network／Multimediaの必須classを構築し、
+ログ保存先とQt temp directoryへの書き込みを確認する。成功0、依存または書き込み失敗1、
+不正引数2を返す。これは起動診断であり、実音や全codecの受け入れを代替しない。
+
+### 12.2 P7-B2以降
+
+Inno Setupのper-user installer、ファイル関連付け、アプリアイコン、Windows version resource、
+コード署名はP7-B1に含めない。Qt/PySide6の外部配布条件と必要文書も、installer公開前に
+採用ライセンスに基づいて監査する。
 
 ---
 

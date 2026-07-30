@@ -325,7 +325,9 @@ P6-C（UX仕上げと破損・失敗時の統合確認）**の3つへ分割す�
 
 **P6完了時点を、パッケージング前の機能完成版とする。**
 P7-A（起動引数と単一instance）は実装・自動テスト済みで、
-Windows上の手動受け入れを残している。P7-B（パッケージと関連付け）は未着手。
+Windows上の手動受け入れを残している。P7-B1（PyInstaller onedirビルドとselftest）は
+実装済みで、実画面・実音と外部配布ライセンス監査を残している。
+P7-B2（installerと関連付け）は未着手。
 
 ### P7: Windows 統合と配布（P7-A: 単一instanceと引数、P7-B: パッケージとインストーラー）
 
@@ -334,6 +336,10 @@ Windows上の手動受け入れを残している。P7-B（パッケージと関
   `LaunchRequest`、version付き・256KiB上限のlocal IPC、primary／secondary／stale判定、
   composition構築中の受理queue、初回および実行中のplaylist末尾追加、
   引数なしを含む前面化要求、終了時解放を実装した。
+- **P7-B1進捗**: PyInstaller 6 onedir spec、`--selftest`、安全なbuild／smoke script、
+  配布layout検査、ライセンス原文収集を実装。実画面・全形式の実音・Defender・
+  Qt/PySide6外部配布条件の監査は未完了。installer、関連付け、icon、version resourceは
+  P7-B2へ分離した。
 - **P7-B変更候補**: `src/sdp/services/win_integration.py`、
   `src/sdp/__main__.py`（`--selftest`）、
   `packaging/{sdp.spec,installer.iss}`、`docs/testing-strategy.md`（手動チェックリスト）
