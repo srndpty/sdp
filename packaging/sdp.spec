@@ -3,6 +3,7 @@
 
 from importlib.metadata import distribution
 from pathlib import Path
+import shutil
 import sys
 
 from PyInstaller.utils.hooks import copy_metadata
@@ -108,3 +109,9 @@ collect = COLLECT(
     upx_exclude=[],
     name="sdp",
 )
+
+# COLLECTはdatasを_internalへ置くため、利用者がZIP展開直後に読める位置
+# （sdp.exeと同じ階層）へライセンス文書を複製する。原文一式は_internal/licenses/に残す。
+package_root = Path(DISTPATH) / "sdp"
+for document in project_documents:
+    shutil.copy2(document, package_root / document.name)

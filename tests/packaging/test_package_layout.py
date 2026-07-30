@@ -12,6 +12,8 @@ def _create_minimum_package(root: Path) -> None:
     (root / "_internal" / "PySide6" / "plugins" / "platforms").mkdir(parents=True)
     for relative in (
         "sdp.exe",
+        "LICENSE",
+        "THIRD_PARTY_NOTICES.txt",
         "_internal/python313.dll",
         "_internal/PySide6/Qt6Core.dll",
         "_internal/PySide6/Qt6Gui.dll",
@@ -59,6 +61,18 @@ def test_missing_runtime_and_development_files_are_reported(tmp_path: Path) -> N
     assert any("開発用ディレクトリ" in failure for failure in failures)
     assert any("Pythonソース" in failure for failure in failures)
     assert any("ユーザーデータ" in failure for failure in failures)
+
+
+def test_license_documents_must_be_readable_next_to_the_executable(tmp_path: Path) -> None:
+    """ZIP展開直後に読めるよう、ルート直下のライセンス文書を必須にする。"""
+    _create_minimum_package(tmp_path)
+    (tmp_path / "LICENSE").unlink()
+    (tmp_path / "THIRD_PARTY_NOTICES.txt").unlink()
+
+    failures = validate_package_layout(tmp_path)
+
+    assert any("ルートにLICENSE" in failure for failure in failures)
+    assert any("ルートにTHIRD_PARTY_NOTICES.txt" in failure for failure in failures)
 
 
 def test_missing_multimedia_backend_and_license_are_reported(tmp_path: Path) -> None:

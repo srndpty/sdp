@@ -36,8 +36,8 @@ def validate_package_layout(package_directory: Path) -> tuple[str, ...]:
         "FFmpeg avutil": "avutil-*.dll",
         "FFmpeg swresample": "swresample-*.dll",
         "Visual C++ Runtime": "VCRUNTIME*.dll",
-        "sdp license": "LICENSE",
-        "third-party notices": "THIRD_PARTY_NOTICES.txt",
+        "sdp license（_internal内）": "LICENSE",
+        "third-party notices（_internal内）": "THIRD_PARTY_NOTICES.txt",
         "Python license": "licenses/Python/LICENSE.txt",
         "PySide6 license notice": "licenses/PySide6/LicenseRef-Qt-Commercial.txt",
         "NumPy license": "licenses/numpy/LICENSE.txt",
@@ -47,6 +47,11 @@ def validate_package_layout(package_directory: Path) -> tuple[str, ...]:
     for label, pattern in required_patterns.items():
         if not any(root.rglob(pattern)):
             failures.append(f"{label}がありません（{pattern}）")
+
+    # 利用者がZIP展開直後に読めるよう、ライセンス文書はsdp.exeと同じ階層にも置く。
+    for name in ("LICENSE", "THIRD_PARTY_NOTICES.txt"):
+        if not (root / name).is_file():
+            failures.append(f"配布物ルートに{name}がありません")
 
     for item in root.rglob("*"):
         if item.is_dir() and item.name.lower() in _FORBIDDEN_DIRECTORIES:
