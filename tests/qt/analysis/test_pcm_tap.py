@@ -16,7 +16,7 @@ from sdp.core.analysis.ring_buffer import PcmRingBuffer, pcm_ring_capacity
 from sdp.core.analysis.spectrum import FFT_SIZE
 from sdp.core.playback.controller import PlaybackController
 from sdp.core.playback.types import PlaybackState
-from sdp.services.pcm_tap import PcmTap
+from sdp.services.pcm_tap import PcmTap, VisualizationPcmSnapshot
 
 
 @pytest.fixture
@@ -197,6 +197,72 @@ def test_stereo_snapshots_are_independent_read_only_copies(tap: PcmTap) -> None:
     assert not left.flags.writeable
     assert not right.flags.writeable
     assert not np.shares_memory(left, right)
+
+
+def test_visualization_snapshot_contains_one_format_generation(tap: PcmTap) -> None:
+    """統合snapshotはformatとmono／L／Rを同一世代から返す。"""
+    send(tap, int16_buffer([3_277, 6_554], sample_rate=44_100))
+
+    snapshot = tap.snapshot_visualization(mono_frames=1, level_frames=1)
+
+    assert snapshot.sample_rate == 44_100
+    assert snapshot.channel_count == 2
+    assert snapshot.mono.tolist() == pytest.approx([0.15], abs=1e-4)
+    assert snapshot.left.tolist() == pytest.approx([0.1], abs=1e-4)
+    assert snapshot.right.tolist() == pytest.approx([0.2], abs=1e-4)
+    assert not snapshot.mono.flags.writeable
+    assert not snapshot.left.flags.writeable
+    assert not snapshot.right.flags.writeable
+
+
+def test_visualization_snapshot_cannot_observe_a_partial_format_switch(tap: PcmTap) -> None:
+    """writer threadのformat切替途中でも、旧新世代を混在させない。"""
+    send(tap, int16_buffer([1_000, 2_000], sample_rate=44_100))
+    mono_appended = threading.Event()
+    release_writer = threading.Event()
+    snapshot_started = threading.Event()
+    snapshot_finished = threading.Event()
+    original_append = tap.ring_buffer.append
+    observed: list[VisualizationPcmSnapshot] = []
+
+    def blocking_append(samples: object) -> None:
+        original_append(samples)  # pyright: ignore[reportArgumentType]
+        mono_appended.set()
+        assert release_writer.wait(timeout=2.0)
+
+    def write_new_generation() -> None:
+        send(tap, int16_buffer([3_000, 5_000], sample_rate=48_000))
+
+    def take_snapshot() -> None:
+        snapshot_started.set()
+        observed.append(tap.snapshot_visualization(mono_frames=1, level_frames=1))
+        snapshot_finished.set()
+
+    tap.ring_buffer.append = blocking_append  # pyright: ignore[reportAttributeAccessIssue]
+    writer = threading.Thread(target=write_new_generation)
+    reader = threading.Thread(target=take_snapshot)
+    writer.start()
+    try:
+        assert mono_appended.wait(timeout=2.0)
+        reader.start()
+        assert snapshot_started.wait(timeout=2.0)
+        # mono追記中はTap全体のlockを保持しているため、統合snapshotは完了しない。
+        assert not snapshot_finished.wait(timeout=0.05)
+    finally:
+        release_writer.set()
+        writer.join(timeout=2.0)
+        if reader.ident is not None:
+            reader.join(timeout=2.0)
+
+    assert not writer.is_alive()
+    assert not reader.is_alive()
+    assert len(observed) == 1
+    snapshot = observed[0]
+    assert snapshot.sample_rate == 48_000
+    assert snapshot.channel_count == 2
+    assert snapshot.mono.tolist() == pytest.approx([4_000 / 32_768], abs=1e-4)
+    assert snapshot.left.tolist() == pytest.approx([3_000 / 32_768], abs=1e-4)
+    assert snapshot.right.tolist() == pytest.approx([5_000 / 32_768], abs=1e-4)
 
 
 def test_appends_accumulate_across_buffers(tap: PcmTap) -> None:

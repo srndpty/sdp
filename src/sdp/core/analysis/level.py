@@ -155,7 +155,12 @@ class _PeakHold:
         # 今回のtickのうち、保持時間を過ぎていた秒数だけを減衰へ使う。
         decay_seconds = max(0.0, self._elapsed_seconds - max(self._hold_seconds, started))
         decayed = previous - self._release_db_per_second * decay_seconds
-        held = max(self._db_floor, peak_db, decayed)
+        if peak_db >= decayed:
+            # 減衰線が現在Peakへ追いついた時点を、新しいholdの獲得として扱う。
+            self._elapsed_seconds = 0.0
+            self._hold_db = peak_db
+            return peak_db
+        held = max(self._db_floor, decayed)
         self._hold_db = held
         return held
 

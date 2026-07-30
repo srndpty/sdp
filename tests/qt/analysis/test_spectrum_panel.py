@@ -386,28 +386,29 @@ def test_snapshot_uses_the_fft_size(
     monkeypatch: pytest.MonkeyPatch,
     qtbot: QtBot,
 ) -> None:
-    """mono snapshot長はFFT_SIZE、L／R snapshot長はLevel窓長に一致する。"""
-    mono_requested: list[int] = []
-    stereo_requested: list[int] = []
-    original_mono = PcmTap.snapshot_mono
-    original_stereo = PcmTap.snapshot_stereo
+    """統合snapshotを1回だけ呼び、FFTとLevelの各窓長を指定する。"""
+    requested: list[tuple[int, int]] = []
+    original = PcmTap.snapshot_visualization
 
-    def record_mono(instance: PcmTap, frame_count: int) -> object:
-        mono_requested.append(frame_count)
-        return original_mono(instance, frame_count)
+    def record(
+        instance: PcmTap,
+        *,
+        mono_frames: int,
+        level_frames: int,
+    ) -> object:
+        requested.append((mono_frames, level_frames))
+        return original(
+            instance,
+            mono_frames=mono_frames,
+            level_frames=level_frames,
+        )
 
-    def record_stereo(instance: PcmTap, frame_count: int) -> object:
-        stereo_requested.append(frame_count)
-        return original_stereo(instance, frame_count)
-
-    monkeypatch.setattr(PcmTap, "snapshot_mono", record_mono)
-    monkeypatch.setattr(PcmTap, "snapshot_stereo", record_stereo)
+    monkeypatch.setattr(PcmTap, "snapshot_visualization", record)
     start_playing(controller, tap, sources[0])
 
-    qtbot.waitUntil(lambda: bool(mono_requested) and bool(stereo_requested), timeout=2_000)
+    qtbot.waitUntil(lambda: bool(requested), timeout=2_000)
 
-    assert set(mono_requested) == {FFT_SIZE}
-    assert set(stereo_requested) == {LEVEL_WINDOW_SIZE}
+    assert set(requested) == {(FFT_SIZE, LEVEL_WINDOW_SIZE)}
 
 
 def test_no_fft_before_the_first_pcm_arrives(
@@ -807,7 +808,7 @@ def test_snapshot_failure_stops_both_visualizations(
     def explode(*args: object, **kwargs: object) -> object:
         raise RuntimeError("想定外のsnapshot失敗")
 
-    monkeypatch.setattr(PcmTap, "snapshot_stereo", explode)
+    monkeypatch.setattr(PcmTap, "snapshot_visualization", explode)
     start_playing(controller, tap, sources[0])
     calls_before = list(backend.calls)
 

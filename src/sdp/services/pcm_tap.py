@@ -12,6 +12,8 @@ FFT、Peak／RMS、dB変換、Peak hold、描画、ファイル I/O、Model / Co
 """
 
 import logging
+import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -33,6 +35,17 @@ _logger = logging.getLogger(__name__)
 
 _DISCARD_LOG_INTERVAL = 100
 """無効bufferのログ間隔。音声コールバックからログを大量に出さないため。"""
+
+
+@dataclass(frozen=True, slots=True)
+class VisualizationPcmSnapshot:
+    """同一時点のformatとmono／L／R PCMをまとめた可視化用snapshot。"""
+
+    mono: NDArray[np.float32]
+    left: NDArray[np.float32]
+    right: NDArray[np.float32]
+    sample_rate: int
+    channel_count: int
 
 
 class PcmTap(QObject):
@@ -75,6 +88,8 @@ class PcmTap(QObject):
         self._unexpected_error_count = 0
         self._buffer_output: QAudioBufferOutput | None = None
         self._shutdown = False
+        # formatと3本のリングバッファを、可視化から見て1つの世代として扱う。
+        self._snapshot_lock = threading.RLock()
 
         playback.source_changed.connect(self._on_source_changed)
         playback.state_changed.connect(self._on_state_changed)
@@ -97,16 +112,19 @@ class PcmTap(QObject):
     @property
     def sample_rate(self) -> int:
         """最新PCMのsample rate。まだ届いていなければ0。"""
-        return self._sample_rate
+        with self._snapshot_lock:
+            return self._sample_rate
 
     @property
     def channel_count(self) -> int:
         """最新PCMのchannel count。まだ届いていなければ0。"""
-        return self._channel_count
+        with self._snapshot_lock:
+            return self._channel_count
 
     @property
     def available_frame_count(self) -> int:
-        return self._mono_buffer.available
+        with self._snapshot_lock:
+            return self._mono_buffer.available
 
     @property
     def received_buffer_count(self) -> int:
@@ -129,7 +147,28 @@ class PcmTap(QObject):
 
         mono音源では左右が同じ値になる（PCM変換時に複製している）。
         """
-        return self._left_buffer.snapshot(frame_count), self._right_buffer.snapshot(frame_count)
+        with self._snapshot_lock:
+            return self._left_buffer.snapshot(frame_count), self._right_buffer.snapshot(frame_count)
+
+    def snapshot_visualization(
+        self,
+        *,
+        mono_frames: int,
+        level_frames: int,
+    ) -> VisualizationPcmSnapshot:
+        """formatとmono／L／Rを同一世代から取得する。
+
+        コピー完了後にlockを解放するため、FFT・Peak／RMS・描画中はPCM受信を
+        妨げない。各配列はリングバッファの契約どおり独立したread-onlyコピー。
+        """
+        with self._snapshot_lock:
+            return VisualizationPcmSnapshot(
+                mono=self._mono_buffer.snapshot(mono_frames),
+                left=self._left_buffer.snapshot(level_frames),
+                right=self._right_buffer.snapshot(level_frames),
+                sample_rate=self._sample_rate,
+                channel_count=self._channel_count,
+            )
 
     # -- 接続 ---------------------------------------------------------------
 
@@ -174,9 +213,11 @@ class PcmTap(QObject):
 
     def clear(self) -> None:
         """3本のリングバッファとformat状態を解除する。"""
-        for buffer in (self._mono_buffer, self._left_buffer, self._right_buffer):
-            buffer.clear()
-        self._set_format(0, 0)
+        with self._snapshot_lock:
+            for buffer in (self._mono_buffer, self._left_buffer, self._right_buffer):
+                buffer.clear()
+            sample_rate_changed, channel_count_changed = self._replace_format(0, 0)
+            self._emit_format_changes(sample_rate_changed, channel_count_changed, 0, 0)
 
     # -- Qt シグナル --------------------------------------------------------
 
@@ -198,16 +239,31 @@ class PcmTap(QObject):
                 self._discard("QAudioBuffer以外が通知されました")
                 return
             chunk = audio_buffer_to_pcm_chunk(value)
-            if chunk.sample_rate != self._sample_rate or chunk.channel_count != self._channel_count:
-                # 旧formatのサンプルを混ぜないため、3本とも容量ごと作り直す。
-                capacity = pcm_ring_capacity(chunk.sample_rate, FFT_SIZE)
-                for buffer in (self._mono_buffer, self._left_buffer, self._right_buffer):
-                    buffer.set_capacity(capacity)
-                self._set_format(chunk.sample_rate, chunk.channel_count)
-            self._mono_buffer.append(chunk.mono)
-            self._left_buffer.append(chunk.left)
-            self._right_buffer.append(chunk.right)
-            self._received_count += 1
+            with self._snapshot_lock:
+                # shutdownと変換が競合した場合も、変換済みPCMを終端後に追記しない。
+                if self._shutdown:
+                    return
+                if (
+                    chunk.sample_rate != self._sample_rate
+                    or chunk.channel_count != self._channel_count
+                ):
+                    # 旧formatのサンプルを混ぜないため、3本とも容量ごと作り直す。
+                    capacity = pcm_ring_capacity(chunk.sample_rate, FFT_SIZE)
+                    for buffer in (self._mono_buffer, self._left_buffer, self._right_buffer):
+                        buffer.set_capacity(capacity)
+                sample_rate_changed, channel_count_changed = self._replace_format(
+                    chunk.sample_rate, chunk.channel_count
+                )
+                self._mono_buffer.append(chunk.mono)
+                self._left_buffer.append(chunk.left)
+                self._right_buffer.append(chunk.right)
+                self._received_count += 1
+                self._emit_format_changes(
+                    sample_rate_changed,
+                    channel_count_changed,
+                    chunk.sample_rate,
+                    chunk.channel_count,
+                )
         except ValueError as error:
             self._discard(str(error))
         except Exception:
@@ -239,12 +295,25 @@ class PcmTap(QObject):
 
     # -- 内部 ---------------------------------------------------------------
 
-    def _set_format(self, sample_rate: int, channel_count: int) -> None:
-        if sample_rate != self._sample_rate:
-            self._sample_rate = sample_rate
+    def _replace_format(self, sample_rate: int, channel_count: int) -> tuple[bool, bool]:
+        """lock内でformatを置換し、各値が変化したかを返す。"""
+        sample_rate_changed = sample_rate != self._sample_rate
+        channel_count_changed = channel_count != self._channel_count
+        self._sample_rate = sample_rate
+        self._channel_count = channel_count
+        return sample_rate_changed, channel_count_changed
+
+    def _emit_format_changes(
+        self,
+        sample_rate_changed: bool,
+        channel_count_changed: bool,
+        sample_rate: int,
+        channel_count: int,
+    ) -> None:
+        """formatと3本の更新後に通知する（同期slotからのsnapshot再入も可能）。"""
+        if sample_rate_changed:
             self.sample_rate_changed.emit(sample_rate)
-        if channel_count != self._channel_count:
-            self._channel_count = channel_count
+        if channel_count_changed:
             self.channel_count_changed.emit(channel_count)
 
     def _discard(self, reason: str) -> None:

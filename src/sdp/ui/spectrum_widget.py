@@ -4,6 +4,8 @@ band ごとに子WidgetやQGraphicsItemを作らず、1回のpaintEventで全bar
 FFT・平滑化・タイマーは持たない（SpectrumPanelの責務）。
 """
 
+import math
+
 from PySide6.QtCore import QEvent, QLineF, QRectF, Qt
 from PySide6.QtGui import QPainter, QPaintEvent, QPalette, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
@@ -56,8 +58,8 @@ class SpectrumWidget(QWidget):
         return self._last_bar_count
 
     def set_db_floor(self, db_floor: float) -> None:
-        if db_floor >= 0.0:
-            raise ValueError("db_floorは負の値である必要があります")
+        if isinstance(db_floor, bool) or not math.isfinite(db_floor) or db_floor >= 0.0:
+            raise ValueError("db_floorは負の有限値である必要があります")
         if db_floor == self._db_floor:
             return
         self._db_floor = db_floor

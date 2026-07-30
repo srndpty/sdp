@@ -430,6 +430,10 @@ float32・同じ長さ・read-only）と `sample_rate` / `channel_count` を持�
   **`PAUSED` では保持する**（最後のフレームを静止表示するため）。
 - **format 変更時**: sample rate が変わったら、新しい rate に合う容量へ**作り直してから**
   追記する。旧 format のサンプルを新 format へ混ぜない。
+- **可視化snapshotの原子性**: PcmTap全体の短時間lockで、format更新とmono／L／Rへのappendを
+  1単位として保護する。`snapshot_visualization()`も同じlock内でsample rate／channel countと
+  3配列をコピーし、異なるbuffer世代やformatを混在させない。lockはコピー後に解放し、
+  FFT・Peak／RMS・描画中は保持しない。個々の`PcmRingBuffer`のthread-safe契約も維持する。
 - **shutdown契約**: shutdownは終端操作とする。接続とController監視を解除してPCMをclearし、
   queue済みbufferや直接slot呼出を含む以後の入力を無視する。shutdown後の再接続は禁止する。
 
@@ -454,12 +458,12 @@ float32・同じ長さ・read-only）と `sample_rate` / `channel_count` を持�
 バッファを導入して `PcmRingBuffer` の契約を複雑化させない。3 本でも 48kHz × 2 秒 ×
 float32 で合計約 1.1MB（実測 1,125KB = 96,000 sample × 3 × 4byte）であり、固定容量で十分小さい。
 
-- 公開 API は `snapshot(n)`（mono の互換 API）、`snapshot_mono(n)`、`snapshot_stereo(n)`。
-  `snapshot_stereo` は左右で**別の**read-only 配列を返す。
+- 公開 API は `snapshot(n)`（mono の互換 API）、`snapshot_mono(n)`、`snapshot_stereo(n)`と、
+  format＋mono／L／Rを同一世代で返す`snapshot_visualization()`。
+  `snapshot_stereo`と統合snapshotは左右で**別の**read-only配列を返す。
 - sample rate 変更・**channel count 変更**・source 変更・stop では**3 本すべて**を
   clear / 作り直す（旧 format や旧 channel layout のサンプルを混ぜない）。
-- 1 tick のうちに同じリングバッファから複数回 snapshot を取らない
-  （mono 用と L / R 用がそれぞれ 1 回で、合計 2 回の呼び出しになる）。
+- Panelは1 tickにつき`snapshot_visualization()`を1回だけ呼び、formatと3配列をまとめて取得する。
 
 ### 6.5 SpectrumFrame と FFT 設定
 
@@ -601,7 +605,8 @@ NumPy 配列は持たない。0〜1 の正規化済み表示値も持たず、�
 - 保持時間（既定 1.0 秒）を過ぎた**ぶんだけ** `24.0 dB/秒` で減衰させる。減衰量は
   経過秒に比例するため、**タイマー FPS の揺れやこま落ちで減衰速度が変わらない**
   （1 tick で 2 秒進めた場合と 2 tick で 1 秒ずつ進めた場合が同じ結果になる）。
-- 減衰中も**現在 Peak と floor より下へは落とさない**。
+- 減衰中も**現在 Peak と floor より下へは落とさない**。減衰線が現在Peakへ追いついた場合は、
+  そのPeakを新しいholdとして保持時間を測り直す。
 - `reset()` で hold と経過時間を捨てる（stop / source 変更 / format 変更）。
 - **`QElapsedTimer` は Panel 側が持ち**、Processor へは経過秒だけを渡す（純粋関数に近い状態機械）。
   pause 中は `process` を呼ばないため、hold の時間も進まない。
@@ -630,13 +635,11 @@ MainWindow の依存を増やしたり、汎用オーディオグラフやイベ
 
 1 tick の処理順は次のとおり。
 
-1. sample rate を読む
-2. mono snapshot を **1 回**（FFT 長 4096）
-3. L / R snapshot を **1 回**（Level 窓長 4096）
-4. 実経過秒を `QElapsedTimer.restart()` で取り出す
-5. FFT + band 集約 + 平滑化を**最大 1 回**
-6. Peak / RMS + Peak hold を**最大 1 回**
-7. 2 つの Widget を更新する
+1. sample rate／channel count／mono（FFT長4096）／L／R（Level窓長4096）の統合snapshotを**1回**取得
+2. 実経過秒を `QElapsedTimer.restart()` で取り出す
+3. FFT + band 集約 + 平滑化を**最大 1 回**
+4. Peak / RMS + Peak hold を**最大 1 回**
+5. 2 つの Widget を更新する
 
 - 間隔は約 33ms。**`Qt.TimerType.PreciseTimer` を指定する**（既定の CoarseTimer は Windows の
   15.6ms 粒度のため実測 21FPS 程度に落ちたが、PreciseTimer では実測 30.3FPS を得た）。

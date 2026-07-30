@@ -268,11 +268,12 @@ class SpectrumPanel(QWidget):
             return
         self._processing = True
         try:
-            sample_rate = self._pcm_tap.sample_rate
             try:
-                mono = self._pcm_tap.snapshot_mono(self._processor.fft_size)
+                snapshot = self._pcm_tap.snapshot_visualization(
+                    mono_frames=self._processor.fft_size,
+                    level_frames=LEVEL_WINDOW_SIZE,
+                )
                 self._snapshot_count += 1
-                left, right = self._pcm_tap.snapshot_stereo(LEVEL_WINDOW_SIZE)
                 self._stereo_snapshot_count += 1
             except Exception:
                 # 共通のsnapshot失敗は両方の可視化を止める（再生は妨げない）。
@@ -285,14 +286,14 @@ class SpectrumPanel(QWidget):
                 self._stop_timer()
                 return
             elapsed_seconds = self._consumed_elapsed_seconds()
-            if sample_rate < 1:
+            if snapshot.sample_rate < 1:
                 # 最初のPCMが届くまではプレースホルダーのまま待つ。
                 return
 
             # 解析ごとに例外境界を分ける。片方の失敗で他方と再生を止めない。
             if not self._spectrum_failed:
                 try:
-                    spectrum_frame = self._processor.process(mono, sample_rate)
+                    spectrum_frame = self._processor.process(snapshot.mono, snapshot.sample_rate)
                     self._analysis_count += 1
                     self._widget.set_frame(spectrum_frame)
                     self._widget.set_status_text("")
@@ -305,7 +306,9 @@ class SpectrumPanel(QWidget):
             if not self._level_failed:
                 try:
                     level_frame = self._level_processor.process(
-                        left, right, elapsed_seconds=elapsed_seconds
+                        snapshot.left,
+                        snapshot.right,
+                        elapsed_seconds=elapsed_seconds,
                     )
                     self._level_count += 1
                     self._level_widget.set_frame(level_frame)

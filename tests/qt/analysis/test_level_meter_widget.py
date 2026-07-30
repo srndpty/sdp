@@ -224,10 +224,11 @@ def test_db_floor_can_be_narrowed(widget: LevelMeterWidget) -> None:
     assert widget.last_rms_bar_count == 2
 
 
-def test_invalid_db_floor_is_rejected(widget: LevelMeterWidget) -> None:
-    """0以上の下限は受け付けない。"""
+@pytest.mark.parametrize("value", [0.0, 1.0, float("nan"), float("inf"), True, False])
+def test_invalid_db_floor_is_rejected(widget: LevelMeterWidget, value: float | bool) -> None:
+    """0以上・非有限値・boolの下限は受け付けない。"""
     with pytest.raises(ValueError, match="db_floor"):
-        widget.set_db_floor(0.0)
+        widget.set_db_floor(value)
 
 
 def test_clear_frame_discards_the_previous_levels(widget: LevelMeterWidget) -> None:

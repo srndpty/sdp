@@ -374,6 +374,27 @@ def test_peak_hold_does_not_fall_below_the_current_peak() -> None:
     assert frame.left_peak_hold_db == pytest.approx(-6.02, abs=0.01)
 
 
+def test_peak_hold_restarts_for_each_channel_when_decay_reaches_the_current_peak() -> None:
+    """減衰線が左右の現在Peakへ追いついた時点から、各Peakを再び1秒保持する。"""
+    processor = LevelProcessor(hold_seconds=1.0, release_db_per_second=20.0)
+    processor.process(constant(1.0), constant(1.0), elapsed_seconds=0.0)
+
+    acquired = processor.process(constant(0.1), constant(0.01), elapsed_seconds=3.5)
+
+    assert acquired.left_peak_hold_db == pytest.approx(-20.0, abs=0.01)
+    assert acquired.right_peak_hold_db == pytest.approx(-40.0, abs=0.01)
+
+    held = processor.process(constant(0.0), constant(0.0), elapsed_seconds=0.9)
+
+    assert held.left_peak_hold_db == pytest.approx(-20.0, abs=0.01)
+    assert held.right_peak_hold_db == pytest.approx(-40.0, abs=0.01)
+
+    decayed = processor.process(constant(0.0), constant(0.0), elapsed_seconds=0.2)
+
+    assert decayed.left_peak_hold_db == pytest.approx(-22.0, abs=0.01)
+    assert decayed.right_peak_hold_db == pytest.approx(-42.0, abs=0.01)
+
+
 def test_peak_hold_does_not_fall_below_the_floor() -> None:
     """極端に大きいelapsedでもfloor未満へ行かない。"""
     processor = LevelProcessor()
