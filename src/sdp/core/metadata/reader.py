@@ -266,11 +266,15 @@ class MetadataReader(QObject):
             self._playlist.rowsRemoved.disconnect(self._on_rows_removed)
             self._playlist.dataChanged.disconnect(self._on_data_changed)
             self._playlist.modelReset.disconnect(self._on_model_reset)
-        self._pool.clear()
+        self._clear_pending_tasks()
         if not self._pool.waitForDone(timeout_ms):
             _logger.warning(
                 "メタデータ読み取りの終了待ちがタイムアウトしました（%dms）。", timeout_ms
             )
+
+    def _clear_pending_tasks(self) -> None:
+        """まだ開始していない読み取りtaskを破棄する。"""
+        self._pool.clear()
 
     # -- Model の変化 -------------------------------------------------------
 

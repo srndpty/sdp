@@ -537,21 +537,28 @@ def test_shutdown_clears_pending_tasks_and_returns(
         path.write_bytes(b"x")
     read_function = RecordingReader()
     read_function.hold()
-    reader = MetadataReader(playlist, read_function=read_function, max_threads=1)
+    pending_cleared = threading.Event()
+
+    class SynchronizedShutdownReader(MetadataReader):
+        """pending taskの破棄後に実行中workerを解放するtest double。"""
+
+        def _clear_pending_tasks(self) -> None:
+            super()._clear_pending_tasks()
+            pending_cleared.set()
+            read_function.release()
+
+    reader = SynchronizedShutdownReader(
+        playlist,
+        read_function=read_function,
+        max_threads=1,
+    )
     playlist.add_paths(paths)
     reader.start()
     qtbot.waitUntil(lambda: read_function.started.is_set(), timeout=WAIT_TIMEOUT_MS)
 
-    # workerを先に解放すると、高速環境ではshutdownより前に全queueを処理し終える。
-    # shutdownが未開始taskをclearしたあと、実行中の1件だけを解放する順序に固定する。
-    release_timer = threading.Timer(0.05, read_function.release)
-    release_timer.start()
-    try:
-        reader.shutdown(timeout_ms=2_000)
-    finally:
-        release_timer.cancel()
-        release_timer.join()
+    reader.shutdown(timeout_ms=2_000)
 
+    assert pending_cleared.is_set()
     assert reader.is_running is False
     # 全 50 件が実行される前に終わっている。
     assert read_function.call_count() < len(paths)
