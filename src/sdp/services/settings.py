@@ -1,7 +1,8 @@
 """再生設定・可視化表示設定の設定ファイル、および保存ライフサイクル。
 
 - 設定の検証・JSON変換・schema移行はQt非依存な関数として置く。
-- :class:`SettingsSession` が復元とデバウンス保存を担う。
+- :class:`AppSettingsController` が実行時の適用（PlaybackControllerと可視化）を調停し、
+  :class:`SettingsSession` が復元とデバウンス保存だけを担う。
 - この層からUI（QWidget）とBackendの具体型は参照しない。
 """
 
@@ -10,11 +11,11 @@ import logging
 import math
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
-from PySide6.QtCore import QObject, QTimer
+from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
 from sdp.core.playback.controller import PlaybackController
 from sdp.core.playback.preferences import MAX_PLAYBACK_RATE, MIN_PLAYBACK_RATE
@@ -149,13 +150,86 @@ def validate_settings(settings: AppSettings) -> None:
             raise ValueError(f"{name}はboolで指定してください: {value!r}")
 
 
+class AppSettingsController(QObject):
+    """適用済み設定のsnapshotを保持し、変更を各層へ配る調停サービス。
+
+    - 再生速度とピッチ補正は :class:`PlaybackController` へ適用する。
+    - 可視化の表示ON/OFFは :attr:`settings_changed` で公開するだけで、
+      どのWidgetをどう隠すかは知らない（MainWindowの配置責務）。
+    - JSON読み書き、QDialog、Backend具体型、PCM解析、FFT／レベル計算、
+      プレイリスト操作は持たない。
+
+    SpeedPanelやショートカットからControllerが直接変更された場合も、
+    snapshotを追従させて保存対象を1か所に保つ。
+    """
+
+    settings_changed = Signal(object)
+    """適用済み設定が変化した（引数は :class:`AppSettings`）。"""
+
+    def __init__(self, playback: PlaybackController, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._playback = playback
+        self._shutdown = False
+        self._settings = AppSettings(
+            playback_rate=playback.playback_rate,
+            pitch_compensation=playback.pitch_compensation,
+        )
+        playback.playback_rate_changed.connect(self._on_playback_rate_changed)
+        playback.pitch_compensation_changed.connect(self._on_pitch_compensation_changed)
+
+    @property
+    def settings(self) -> AppSettings:
+        """現在適用済みの設定snapshot。"""
+        return self._settings
+
+    def apply(self, settings: AppSettings) -> None:
+        """検証してから差分のある項目だけ適用する（同値なら通知もしない）。"""
+        validate_settings(settings)
+        if settings == self._settings:
+            return
+        # 先にsnapshotを確定させ、Controllerからのechoで二重通知しない。
+        self._set_settings(settings)
+        if settings.playback_rate != self._playback.playback_rate:
+            self._playback.set_playback_rate(settings.playback_rate)
+        if settings.pitch_compensation != self._playback.pitch_compensation:
+            self._playback.set_pitch_compensation(settings.pitch_compensation)
+
+    def shutdown(self) -> None:
+        """Controller監視を解除する（冪等）。"""
+        if self._shutdown:
+            return
+        self._shutdown = True
+        for signal, slot in (
+            (self._playback.playback_rate_changed, self._on_playback_rate_changed),
+            (self._playback.pitch_compensation_changed, self._on_pitch_compensation_changed),
+        ):
+            try:
+                signal.disconnect(slot)
+            except RuntimeError:
+                _logger.debug("AppSettingsControllerのController接続は既に解除されています")
+
+    @Slot(float)
+    def _on_playback_rate_changed(self, value: float) -> None:
+        self._set_settings(replace(self._settings, playback_rate=float(value)))
+
+    @Slot(bool)
+    def _on_pitch_compensation_changed(self, value: bool) -> None:
+        self._set_settings(replace(self._settings, pitch_compensation=bool(value)))
+
+    def _set_settings(self, settings: AppSettings) -> None:
+        if settings == self._settings:
+            return
+        self._settings = settings
+        self.settings_changed.emit(settings)
+
+
 class SettingsSession(QObject):
-    """Controllerとsettings.jsonの復元・デバウンス保存を取り持つ。"""
+    """設定snapshotとsettings.jsonの復元・デバウンス保存を取り持つ。"""
 
     def __init__(
         self,
         file_path: Path,
-        controller: PlaybackController,
+        app_settings: AppSettingsController,
         *,
         debounce_ms: int = DEFAULT_DEBOUNCE_MS,
         retry_ms: int = DEFAULT_RETRY_MS,
@@ -163,7 +237,7 @@ class SettingsSession(QObject):
     ) -> None:
         super().__init__(parent)
         self._file_path = file_path
-        self._controller = controller
+        self._app_settings = app_settings
         self._save_enabled = True
         self._started = False
         self._debounce_ms = max(1, debounce_ms)
@@ -188,7 +262,12 @@ class SettingsSession(QObject):
         return self._started
 
     def load(self) -> str | None:
-        """Controller初期値を欠落キーの既定値として復元する。"""
+        """現在のsnapshotを欠落キーの既定値として復元し、適用する。
+
+        version 1 のファイルを読んでもここでは保存しない（起動直後に
+        version 2 で無条件に書き換えない）。次にユーザーが設定を変更したとき、
+        通常の保存契機で version 2 として保存される。
+        """
         defaults = self._snapshot()
         try:
             settings = load_settings(self._file_path, defaults)
@@ -197,8 +276,7 @@ class SettingsSession(QObject):
             self._save_enabled = False
             return RESTORE_FAILED_MESSAGE
 
-        self._controller.set_playback_rate(settings.playback_rate)
-        self._controller.set_pitch_compensation(settings.pitch_compensation)
+        self._app_settings.apply(settings)
         self._last_saved = settings
         return None
 
@@ -207,8 +285,7 @@ class SettingsSession(QObject):
         if self._started:
             return
         self._started = True
-        self._controller.playback_rate_changed.connect(self._schedule_save)
-        self._controller.pitch_compensation_changed.connect(self._schedule_save)
+        self._app_settings.settings_changed.connect(self._schedule_save)
 
     def flush(self) -> bool:
         """未保存snapshotを即時保存する。失敗しても例外を外へ出さない。"""
@@ -239,8 +316,7 @@ class SettingsSession(QObject):
         if not self._started:
             return
         self._started = False
-        self._controller.playback_rate_changed.disconnect(self._schedule_save)
-        self._controller.pitch_compensation_changed.disconnect(self._schedule_save)
+        self._app_settings.settings_changed.disconnect(self._schedule_save)
 
     def _schedule_save(self, value: object) -> None:
         del value
@@ -249,7 +325,4 @@ class SettingsSession(QObject):
             self._timer.start(self._debounce_ms)
 
     def _snapshot(self) -> AppSettings:
-        return AppSettings(
-            playback_rate=self._controller.playback_rate,
-            pitch_compensation=self._controller.pitch_compensation,
-        )
+        return self._app_settings.settings

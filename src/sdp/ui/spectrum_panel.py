@@ -61,6 +61,8 @@ class SpectrumPanel(QWidget):
         self._stereo_snapshot_count = 0
         self._analysis_count = 0
         self._level_count = 0
+        self._spectrum_enabled = True
+        self._level_enabled = True
         self._watched_window: QWidget | None = None
         # Peak holdの減衰をタイマー回数ではなく実時間で進めるための時計。
         self._level_clock = QElapsedTimer()
@@ -123,6 +125,29 @@ class SpectrumPanel(QWidget):
     def level_count(self) -> int:
         """Peak／RMS計算回数（タイマー1tickにつき最大1回）。"""
         return self._level_count
+
+    @property
+    def is_spectrum_visible(self) -> bool:
+        return self._spectrum_enabled
+
+    @property
+    def is_level_meter_visible(self) -> bool:
+        return self._level_enabled
+
+    def set_spectrum_visible(self, visible: bool) -> None:
+        """スペクトラムの表示と解析をまとめて切り替える（設定からの要求）。
+
+        非表示のあいだはmono snapshotもFFTも行わない。旧フレームと平滑化履歴は
+        破棄し、再表示時は最新PCMから描き直す。
+        """
+        self._set_visualization_enabled(spectrum=visible)
+
+    def set_level_meter_visible(self, visible: bool) -> None:
+        """レベルメーターの表示と計算をまとめて切り替える（設定からの要求）。
+
+        非表示のあいだはL／R snapshotもPeak／RMSも行わず、Peak holdも捨てる。
+        """
+        self._set_visualization_enabled(level=visible)
 
     def shutdown(self) -> None:
         """接続とタイマーを終端し、以後の通知で再開しない（冪等）。"""
@@ -228,6 +253,33 @@ class SpectrumPanel(QWidget):
             self._level_widget.clear_frame(STOPPED_MESSAGE if stopped else LEVEL_NO_SOURCE_MESSAGE)
         self._update_timer()
 
+    def _set_visualization_enabled(
+        self, *, spectrum: bool | None = None, level: bool | None = None
+    ) -> None:
+        if spectrum is not None and spectrum != self._spectrum_enabled:
+            self._spectrum_enabled = spectrum
+            self._widget.setVisible(spectrum)
+            if not spectrum:
+                # 非表示中に古いフレームと平滑化履歴を残さない。
+                self._processor.reset()
+                self._widget.clear_frame(self._placeholder_message(NO_SOURCE_MESSAGE))
+        if level is not None and level != self._level_enabled:
+            self._level_enabled = level
+            self._level_widget.setVisible(level)
+            if not level:
+                self._level_processor.reset()
+                self._level_widget.clear_frame(self._placeholder_message(LEVEL_NO_SOURCE_MESSAGE))
+        # 両方非表示ならPanel自体も畳み、レイアウトへ空欄を残さない。
+        self.setVisible(self._spectrum_enabled or self._level_enabled)
+        self._update_timer()
+
+    def _placeholder_message(self, no_source_message: str) -> str:
+        if self._playback.source is None:
+            return no_source_message
+        if self._playback.state is PlaybackState.PLAYING:
+            return WAITING_MESSAGE
+        return STOPPED_MESSAGE
+
     def _update_timer(self) -> None:
         if self._should_run():
             if not self._timer.isActive():
@@ -245,12 +297,20 @@ class SpectrumPanel(QWidget):
         return (
             not self._shutdown
             and not self._snapshot_failed
-            # 片方だけの失敗では、生き残った解析のためにタイマーを続ける。
-            and not (self._spectrum_failed and self._level_failed)
+            # 片方だけの失敗・非表示では、生き残った解析のためにタイマーを続ける。
+            and (self._spectrum_active() or self._level_active())
             and self._playback.state is PlaybackState.PLAYING
             and self.isVisible()
             and not window.isMinimized()
         )
+
+    def _spectrum_active(self) -> bool:
+        """スペクトラムを更新してよい（表示中かつ失敗していない）。"""
+        return self._spectrum_enabled and not self._spectrum_failed
+
+    def _level_active(self) -> bool:
+        """レベルメーターを更新してよい（表示中かつ失敗していない）。"""
+        return self._level_enabled and not self._level_failed
 
     def _watch_top_level_window(self) -> None:
         window = self.window()
@@ -268,13 +328,18 @@ class SpectrumPanel(QWidget):
             return
         self._processing = True
         try:
+            # 非表示の可視化にはPCMを要求しない（frame数0でコピーも行わない）。
+            spectrum_active = self._spectrum_active()
+            level_active = self._level_active()
             try:
                 snapshot = self._pcm_tap.snapshot_visualization(
-                    mono_frames=self._processor.fft_size,
-                    level_frames=LEVEL_WINDOW_SIZE,
+                    mono_frames=self._processor.fft_size if spectrum_active else 0,
+                    level_frames=LEVEL_WINDOW_SIZE if level_active else 0,
                 )
-                self._snapshot_count += 1
-                self._stereo_snapshot_count += 1
+                if spectrum_active:
+                    self._snapshot_count += 1
+                if level_active:
+                    self._stereo_snapshot_count += 1
             except Exception:
                 # 共通のsnapshot失敗は両方の可視化を止める（再生は妨げない）。
                 _logger.exception("PCMスナップショットの取得に失敗しました")
@@ -291,7 +356,7 @@ class SpectrumPanel(QWidget):
                 return
 
             # 解析ごとに例外境界を分ける。片方の失敗で他方と再生を止めない。
-            if not self._spectrum_failed:
+            if spectrum_active:
                 try:
                     spectrum_frame = self._processor.process(snapshot.mono, snapshot.sample_rate)
                     self._analysis_count += 1
@@ -303,7 +368,7 @@ class SpectrumPanel(QWidget):
                     self._processor.reset()
                     self._widget.clear_frame(FAILED_MESSAGE)
 
-            if not self._level_failed:
+            if level_active:
                 try:
                     level_frame = self._level_processor.process(
                         snapshot.left,

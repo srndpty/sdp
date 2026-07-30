@@ -21,6 +21,7 @@ from sdp.core.playlist.model import Column, PlaylistModel
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.core.playlist.types import RepeatMode
 from sdp.services.pcm_tap import PcmTap
+from sdp.services.settings import AppSettingsController
 from sdp.services.waveform_analysis import WaveformAnalysisService
 from sdp.ui import playlist_view as playlist_view_module
 from sdp.ui.main_window import MainWindow
@@ -377,7 +378,14 @@ def wired_window(qtbot: QtBot, tmp_path: Path) -> Iterator[tuple[MainWindow, Pla
     model = PlaylistModel()
     playlist_playback = PlaylistPlaybackController(playback, model)
     waveform_analysis = WaveformAnalysisService(playback, tmp_path / "waveform-cache")
-    window = MainWindow(playback, model, playlist_playback, waveform_analysis, PcmTap(playback))
+    window = MainWindow(
+        playback,
+        model,
+        playlist_playback,
+        waveform_analysis,
+        PcmTap(playback),
+        AppSettingsController(playback),
+    )
     qtbot.addWidget(window)
     yield window, model
     waveform_analysis.shutdown()
@@ -432,7 +440,14 @@ def test_window_applies_navigation_snapshot_from_prepopulated_model(
     playlist_playback = PlaylistPlaybackController(playback, model)
 
     waveform_analysis = WaveformAnalysisService(playback, tmp_path / "waveform-cache")
-    window = MainWindow(playback, model, playlist_playback, waveform_analysis, PcmTap(playback))
+    window = MainWindow(
+        playback,
+        model,
+        playlist_playback,
+        waveform_analysis,
+        PcmTap(playback),
+        AppSettingsController(playback),
+    )
     qtbot.addWidget(window)
     controls = window.findChild(PlayerControls)
     assert controls is not None
@@ -594,7 +609,14 @@ def test_initial_repeat_and_shuffle_state_is_applied_on_wiring(
     playlist_playback.set_shuffle_enabled(True)
 
     waveform_analysis = WaveformAnalysisService(playback, tmp_path / "waveform-cache")
-    window = MainWindow(playback, model, playlist_playback, waveform_analysis, PcmTap(playback))
+    window = MainWindow(
+        playback,
+        model,
+        playlist_playback,
+        waveform_analysis,
+        PcmTap(playback),
+        AppSettingsController(playback),
+    )
     qtbot.addWidget(window)
 
     controls = window.findChild(PlayerControls)

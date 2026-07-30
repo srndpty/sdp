@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from PySide6.QtGui import QAction
 from PySide6.QtMultimedia import (
     QAudioBuffer,
     QAudioBufferOutput,
@@ -40,6 +41,7 @@ from sdp.services.settings import (
 )
 from sdp.services.settings import (
     AppSettings,
+    AppSettingsController,
     SettingsSession,
     save_settings,
 )
@@ -456,7 +458,7 @@ def test_corrupted_settings_does_not_disable_playlist_saving(
     """設定失敗とプレイリスト保存失敗は独立させる。"""
     # fixture構築後なので、破損状態を独立したsessionへ読み込ませる。
     settings_file.write_text("{壊れた", encoding="utf-8")
-    failed_session = SettingsSession(settings_file, composition.controller)
+    failed_session = SettingsSession(settings_file, composition.app_settings)
     assert failed_session.load() == SETTINGS_RESTORE_FAILED_MESSAGE
 
     composition.playlist_model.add_paths(audio_files)
@@ -1016,3 +1018,146 @@ def test_visualization_schemas_are_unchanged(
     assert waveform_cache.WAVEFORM_ANALYSIS_VERSION == 1
     assert waveform_cache.WAVEFORM_FORMAT_VERSION == 1
     assert waveform_cache.WAVEFORM_BUCKET_MS == 20
+
+
+# -- 設定と可視化の配線（P6-A）----------------------------------------------
+
+
+def test_composition_holds_the_settings_mediator(
+    composition: app_module.PlayerComposition,
+) -> None:
+    """AppSettingsControllerを保持し、SettingsSessionと同じsnapshotを使う。"""
+    app_settings = composition.app_settings
+    assert isinstance(app_settings, AppSettingsController)
+    assert app_settings.settings.playback_rate == pytest.approx(
+        composition.controller.playback_rate
+    )
+    assert composition.window.settings_dialog is None
+
+
+def test_restored_visualization_settings_are_applied_before_show(
+    playlist_file: Path, settings_file: Path, qtbot: QtBot
+) -> None:
+    """保存済みの表示設定はWindow表示前に反映される。"""
+    save_settings(
+        settings_file,
+        AppSettings(1.0, True, waveform_visible=False, level_meter_visible=False),
+    )
+
+    composition = app_module.build_player(playlist_file, settings_file)
+    qtbot.addWidget(composition.window)
+    window = composition.window
+
+    assert composition.app_settings.settings.waveform_visible is False
+    assert window.waveform_panel.isVisibleTo(window) is False
+    assert window.spectrum_panel.is_spectrum_visible is True
+    assert window.spectrum_panel.is_level_meter_visible is False
+    # 表示前の反映なので、まだ一度も表示していない。
+    assert not window.isVisible()
+
+
+def test_version_one_settings_start_with_every_visualization_visible(
+    playlist_file: Path, settings_file: Path, qtbot: QtBot
+) -> None:
+    """旧version 1の設定ファイルからでも正常起動し、可視化はすべて表示になる。"""
+    settings_file.write_text(
+        '{"schema_version": 1, "playback_rate": 1.25, "pitch_compensation": false}\n',
+        encoding="utf-8",
+    )
+    original = settings_file.read_bytes()
+
+    composition = app_module.build_player(playlist_file, settings_file)
+    qtbot.addWidget(composition.window)
+
+    assert composition.controller.playback_rate == pytest.approx(1.25)
+    assert composition.app_settings.settings.waveform_visible is True
+    assert composition.app_settings.settings.spectrum_visible is True
+    assert composition.app_settings.settings.level_meter_visible is True
+    assert composition.playlist_session.is_save_enabled
+    # 起動しただけでは version 2 へ書き換えない。
+    assert settings_file.read_bytes() == original
+
+
+def test_build_player_does_not_save_settings(
+    composition: app_module.PlayerComposition, settings_file: Path
+) -> None:
+    """初期読込と初期適用では保存が走らない。"""
+    assert not settings_file.exists()
+    assert composition.settings_session.is_running is False
+
+
+def test_dialog_changes_reach_the_controller_and_the_panels(
+    composition: app_module.PlayerComposition, qtbot: QtBot
+) -> None:
+    """設定ダイアログの適用がControllerと各Panelへ届く。"""
+    window = composition.window
+    window.show()
+    qtbot.waitExposed(window)
+    action = window.findChild(QAction, "openSettingsAction")
+    assert action is not None
+    action.trigger()
+    dialog = window.settings_dialog
+    assert dialog is not None
+
+    dialog.settings_requested.emit(
+        AppSettings(1.5, False, waveform_visible=False, spectrum_visible=False)
+    )
+
+    assert composition.controller.playback_rate == pytest.approx(1.5)
+    assert composition.backend.playback_rate == pytest.approx(1.5)
+    assert composition.backend.pitch_compensation is False
+    assert not window.waveform_panel.isVisible()
+    assert not window.spectrum_panel.is_spectrum_visible
+    assert window.spectrum_panel.is_level_meter_visible
+    window.spectrum_panel.shutdown()
+
+
+def test_settings_changes_are_flushed_on_shutdown(
+    composition: app_module.PlayerComposition, settings_file: Path
+) -> None:
+    """終了時のflushで最終設定がversion 2として保存される。"""
+    composition.settings_session.start()
+    composition.app_settings.apply(AppSettings(1.25, True, spectrum_visible=False))
+
+    assert composition.settings_session.flush() is True
+
+    document = json.loads(settings_file.read_text(encoding="utf-8"))
+    assert document["schema_version"] == 2
+    assert document["spectrum_visible"] is False
+    assert document["playback_rate"] == pytest.approx(1.25)
+
+
+def test_settings_save_failure_does_not_block_playlist_saving(
+    composition: app_module.PlayerComposition,
+    playlist_file: Path,
+    audio_files: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """設定保存の失敗はプレイリスト保存も再生も妨げない。"""
+
+    def failing_save(path: Path, settings: AppSettings) -> None:
+        del path, settings
+        raise OSError("保存失敗")
+
+    monkeypatch.setattr("sdp.services.settings.save_settings", failing_save)
+    composition.settings_session.start()
+    composition.app_settings.apply(AppSettings(1.5, True))
+    composition.playlist_model.add_paths(audio_files)
+
+    with caplog.at_level(logging.ERROR):
+        assert composition.settings_session.flush() is False
+
+    assert composition.playlist_session.save_from(composition.playlist_model) is True
+    assert len(load_playlist(playlist_file)) == len(audio_files)
+    assert composition.controller.playback_rate == pytest.approx(1.5)
+
+
+def test_ui_layer_does_not_read_the_settings_file() -> None:
+    """UI層は設定JSONの読み書きを知らない（調停サービス経由だけ）。"""
+    from sdp.ui import main_window as main_window_module
+    from sdp.ui import settings_dialog as settings_dialog_module
+
+    for module in (main_window_module, settings_dialog_module):
+        for forbidden in ("load_settings", "save_settings", "SettingsSession", "json"):
+            assert not hasattr(module, forbidden), f"{module.__name__}: {forbidden}"

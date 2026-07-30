@@ -23,11 +23,13 @@ from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.core.playlist.types import RepeatMode
 from sdp.services.pcm_tap import PcmTap
+from sdp.services.settings import AppSettings, AppSettingsController
 from sdp.services.waveform_analysis import WaveformAnalysisService
 from sdp.ui import main_window as main_window_module
 from sdp.ui.main_window import MainWindow
 from sdp.ui.player_controls import PlayerControls
 from sdp.ui.playlist_view import PlaylistView
+from sdp.ui.settings_dialog import SettingsDialog
 from sdp.ui.speed_panel import SpeedPanel
 
 
@@ -65,7 +67,14 @@ def window(
 ) -> Iterator[MainWindow]:
     waveform_analysis = WaveformAnalysisService(controller, tmp_path / "waveform-cache")
     pcm_tap = PcmTap(controller)
-    main = MainWindow(controller, playlist_model, playlist_playback, waveform_analysis, pcm_tap)
+    main = MainWindow(
+        controller,
+        playlist_model,
+        playlist_playback,
+        waveform_analysis,
+        pcm_tap,
+        AppSettingsController(controller),
+    )
     qtbot.addWidget(main)
     yield main
     main.spectrum_panel.shutdown()
@@ -106,9 +115,9 @@ def action_of(window: MainWindow, name: str) -> QAction:
 
 
 def test_main_window_takes_only_its_composed_dependencies() -> None:
-    """Controller・Model・プレイリスト再生・波形解析・PCMタップ（と親）だけを受け取る。
+    """Controller・Model・プレイリスト再生・波形解析・PCMタップ・設定調停（と親）だけ。
 
-    具体Backend（QtMultimediaBackend）はここへ渡さない。
+    具体Backend（QtMultimediaBackend）とSettingsSession（JSON保存）は渡さない。
     """
     parameters = list(inspect.signature(MainWindow.__init__).parameters)
     assert parameters == [
@@ -118,6 +127,7 @@ def test_main_window_takes_only_its_composed_dependencies() -> None:
         "playlist_playback",
         "waveform_analysis",
         "pcm_tap",
+        "app_settings",
         "parent",
     ]
 
@@ -415,3 +425,172 @@ def test_open_action_opens_the_file_dialog(
     action_of(window, "openAction").trigger()
 
     assert backend.call_args("load") == [(audio_file.resolve(),)]
+
+
+# -- 設定（P6-A）------------------------------------------------------------
+
+
+def app_settings_of(window: MainWindow) -> AppSettingsController:
+    settings_controller = window._app_settings  # pyright: ignore[reportPrivateUsage]
+    return settings_controller
+
+
+def test_settings_action_opens_the_dialog(window: MainWindow) -> None:
+    """ツールメニューの設定アクションからダイアログが開く。"""
+    assert window.settings_dialog is None
+
+    action_of(window, "openSettingsAction").trigger()
+
+    dialog = window.settings_dialog
+    assert isinstance(dialog, SettingsDialog)
+    assert dialog.isVisible()
+    assert dialog.applied_settings == app_settings_of(window).settings
+
+
+def test_settings_dialog_is_not_opened_twice(window: MainWindow) -> None:
+    """既に開いている場合は新しく作らず前面へ出す。"""
+    action_of(window, "openSettingsAction").trigger()
+    first = window.settings_dialog
+
+    action_of(window, "openSettingsAction").trigger()
+
+    assert window.settings_dialog is first
+    assert len(window.findChildren(SettingsDialog)) == 1
+
+
+def test_settings_dialog_can_be_reopened_after_closing(window: MainWindow, qtbot: QtBot) -> None:
+    """閉じたあとは再度開ける。"""
+    action_of(window, "openSettingsAction").trigger()
+    first = window.settings_dialog
+    assert first is not None
+
+    first.reject()
+    qtbot.waitUntil(lambda: window.settings_dialog is None, timeout=2_000)
+    action_of(window, "openSettingsAction").trigger()
+
+    assert window.settings_dialog is not None
+    assert window.settings_dialog is not first
+
+
+def test_reopened_dialog_shows_the_current_settings(window: MainWindow, qtbot: QtBot) -> None:
+    """開き直したダイアログには最新の適用済み設定が入る。"""
+    app_settings_of(window).apply(AppSettings(1.5, False, spectrum_visible=False))
+
+    action_of(window, "openSettingsAction").trigger()
+    dialog = window.settings_dialog
+    assert dialog is not None
+
+    assert dialog.applied_settings.playback_rate == pytest.approx(1.5)
+    assert dialog.applied_settings.spectrum_visible is False
+    del qtbot
+
+
+def test_dialog_request_is_applied_through_the_mediator(
+    window: MainWindow, backend: FakePlaybackBackend
+) -> None:
+    """ダイアログの要求は調停サービス経由でControllerと可視化へ届く。"""
+    action_of(window, "openSettingsAction").trigger()
+    dialog = window.settings_dialog
+    assert dialog is not None
+
+    dialog.settings_requested.emit(AppSettings(1.25, False, waveform_visible=False))
+
+    assert backend.call_args("set_playback_rate") == [(1.25,)]
+    assert app_settings_of(window).settings.waveform_visible is False
+    assert not window.waveform_panel.isVisible()
+
+
+def test_main_window_does_not_touch_the_settings_file() -> None:
+    """MainWindowはJSON・schema version・保存タイマーを持たない。"""
+    for forbidden in (
+        "json",
+        "load_settings",
+        "save_settings",
+        "SettingsSession",
+        "SETTINGS_SCHEMA_VERSION",
+        "QTimer",
+    ):
+        assert not hasattr(main_window_module, forbidden), forbidden
+
+
+# -- 可視化の表示ON/OFF -----------------------------------------------------
+
+
+def test_visualization_settings_are_applied_before_show(
+    controller: PlaybackController,
+    playlist_model: PlaylistModel,
+    playlist_playback: PlaylistPlaybackController,
+    qtbot: QtBot,
+    tmp_path: Path,
+) -> None:
+    """復元済み設定は表示前に反映する（見えてから消えるフリッカーを避ける）。"""
+    waveform_analysis = WaveformAnalysisService(controller, tmp_path / "waveform-cache")
+    pcm_tap = PcmTap(controller)
+    app_settings = AppSettingsController(controller)
+    app_settings.apply(AppSettings(1.0, True, waveform_visible=False, spectrum_visible=False))
+
+    main = MainWindow(
+        controller,
+        playlist_model,
+        playlist_playback,
+        waveform_analysis,
+        pcm_tap,
+        app_settings,
+    )
+    qtbot.addWidget(main)
+
+    assert main.waveform_panel.isVisibleTo(main) is False
+    assert main.spectrum_panel.spectrum_widget.isVisibleTo(main.spectrum_panel) is False
+    assert main.spectrum_panel.level_meter_widget.isVisibleTo(main.spectrum_panel) is True
+    main.spectrum_panel.shutdown()
+    pcm_tap.shutdown()
+    waveform_analysis.shutdown()
+
+
+def test_toggling_settings_shows_and_hides_each_visualization(
+    window: MainWindow, qtbot: QtBot
+) -> None:
+    """3つの可視化を個別にON/OFFできる。"""
+    window.show()
+    qtbot.waitExposed(window)
+    app_settings = app_settings_of(window)
+    panel = window.spectrum_panel
+
+    app_settings.apply(
+        AppSettings(
+            1.0, True, waveform_visible=False, spectrum_visible=False, level_meter_visible=False
+        )
+    )
+
+    assert not window.waveform_panel.isVisible()
+    assert not panel.is_spectrum_visible
+    assert not panel.is_level_meter_visible
+    # プレイリストと再生操作は残る。
+    assert window.findChild(PlaylistView) is not None
+    assert window.findChild(PlayerControls) is not None
+
+    app_settings.apply(AppSettings(1.0, True))
+
+    assert window.waveform_panel.isVisible()
+    assert panel.is_spectrum_visible
+    assert panel.is_level_meter_visible
+
+
+def test_hidden_waveform_panel_stops_following_the_position(
+    window: MainWindow, controller: PlaybackController, audio_file: Path, qtbot: QtBot
+) -> None:
+    """非表示中は位置追従の描画更新を行わず、再表示で現在位置へ復帰する。"""
+    window.show()
+    qtbot.waitExposed(window)
+    controller.load(audio_file)
+    widget = window.waveform_panel.waveform_widget
+    app_settings_of(window).apply(AppSettings(1.0, True, waveform_visible=False))
+    before = widget.position_ms
+
+    controller.seek(12_000)
+
+    assert widget.position_ms == before
+
+    app_settings_of(window).apply(AppSettings(1.0, True, waveform_visible=True))
+
+    assert widget.position_ms == controller.position_ms

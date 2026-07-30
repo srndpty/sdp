@@ -1,5 +1,6 @@
-"""SettingsSessionのController適用・デバウンス・障害分離を検証する。"""
+"""AppSettingsControllerの適用調停と、SettingsSessionの復元・デバウンス・障害分離を検証する。"""
 
+import json
 import logging
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -13,6 +14,7 @@ from sdp.core.playback.controller import PlaybackController
 from sdp.services.settings import (
     RESTORE_FAILED_MESSAGE,
     AppSettings,
+    AppSettingsController,
     SettingsSession,
     load_settings,
     save_settings,
@@ -33,12 +35,17 @@ def controller(backend: FakePlaybackBackend) -> Iterator[PlaybackController]:
 
 
 def make_session(path: Path, controller: PlaybackController) -> SettingsSession:
+    """調停サービスごと組み立てる（sessionが調停サービスの寿命を保持する）。"""
     return SettingsSession(
         path,
-        controller,
+        AppSettingsController(controller),
         debounce_ms=DEBOUNCE_MS,
         retry_ms=DEBOUNCE_MS,
     )
+
+
+def make_app_settings(controller: PlaybackController) -> AppSettingsController:
+    return AppSettingsController(controller)
 
 
 def recording_save(saved: list[AppSettings]) -> Callable[[Path, AppSettings], None]:
@@ -268,3 +275,195 @@ def test_deleted_session_cancels_pending_timer(
 
     assert not isValid(timer)
     assert saved == []
+
+
+# -- AppSettingsController（適用の調停）-------------------------------------
+
+
+def test_initial_snapshot_comes_from_the_controller(controller: PlaybackController) -> None:
+    """初期snapshotはControllerの現在値と、可視化の既定（すべて表示）。"""
+    app_settings = make_app_settings(controller)
+
+    assert app_settings.settings == AppSettings(
+        playback_rate=controller.playback_rate,
+        pitch_compensation=controller.pitch_compensation,
+        waveform_visible=True,
+        spectrum_visible=True,
+        level_meter_visible=True,
+    )
+
+
+def test_apply_updates_the_controller_and_notifies_once(
+    controller: PlaybackController, backend: FakePlaybackBackend
+) -> None:
+    """applyは差分のある項目だけControllerへ適用し、1回だけ通知する。"""
+    app_settings = make_app_settings(controller)
+    notified: list[object] = []
+    app_settings.settings_changed.connect(notified.append)
+
+    app_settings.apply(AppSettings(1.25, False, waveform_visible=False))
+
+    assert controller.playback_rate == pytest.approx(1.25)
+    assert controller.pitch_compensation is False
+    assert backend.call_args("set_playback_rate") == [(1.25,)]
+    assert notified == [app_settings.settings]
+    assert app_settings.settings.waveform_visible is False
+
+
+def test_apply_of_the_same_settings_does_not_notify(
+    controller: PlaybackController, backend: FakePlaybackBackend
+) -> None:
+    """同値のapplyでは通知もController操作も行わない。"""
+    app_settings = make_app_settings(controller)
+    notified: list[object] = []
+    app_settings.settings_changed.connect(notified.append)
+
+    app_settings.apply(app_settings.settings)
+
+    assert notified == []
+    assert backend.call_names() == []
+
+
+def test_visualization_only_change_does_not_touch_the_controller(
+    controller: PlaybackController, backend: FakePlaybackBackend
+) -> None:
+    """表示ON/OFFだけの変更でControllerのsetterを呼ばない。"""
+    app_settings = make_app_settings(controller)
+
+    app_settings.apply(
+        AppSettings(
+            controller.playback_rate,
+            controller.pitch_compensation,
+            spectrum_visible=False,
+            level_meter_visible=False,
+        )
+    )
+
+    assert backend.call_names() == []
+    assert app_settings.settings.spectrum_visible is False
+    assert app_settings.settings.level_meter_visible is False
+
+
+def test_controller_changes_are_mirrored_into_the_snapshot(
+    controller: PlaybackController,
+) -> None:
+    """SpeedPanelやショートカット経由の変更もsnapshotへ追従する。"""
+    app_settings = make_app_settings(controller)
+    app_settings.apply(AppSettings(1.0, True, waveform_visible=False))
+    notified: list[object] = []
+    app_settings.settings_changed.connect(notified.append)
+
+    controller.set_playback_rate(1.5)
+    controller.set_pitch_compensation(False)
+
+    assert app_settings.settings.playback_rate == pytest.approx(1.5)
+    assert app_settings.settings.pitch_compensation is False
+    # 可視化設定は再生操作で失われない。
+    assert app_settings.settings.waveform_visible is False
+    assert len(notified) == 2
+
+
+def test_invalid_settings_are_rejected_without_applying(
+    controller: PlaybackController, backend: FakePlaybackBackend
+) -> None:
+    """不正値は適用せず、既存設定を保持する。"""
+    app_settings = make_app_settings(controller)
+    before = app_settings.settings
+
+    with pytest.raises(ValueError):
+        app_settings.apply(AppSettings(3.0, True))
+    with pytest.raises(ValueError):
+        app_settings.apply(AppSettings(1.0, True, spectrum_visible=1))  # type: ignore[arg-type]
+
+    assert app_settings.settings == before
+    assert backend.call_names() == []
+
+
+def test_shutdown_stops_mirroring(controller: PlaybackController) -> None:
+    """shutdown後はController変更を取り込まない（冪等）。"""
+    app_settings = make_app_settings(controller)
+
+    app_settings.shutdown()
+    app_settings.shutdown()
+    controller.set_playback_rate(1.75)
+
+    assert app_settings.settings.playback_rate == pytest.approx(1.0)
+
+
+def test_session_saves_visualization_changes(
+    tmp_path: Path, controller: PlaybackController, qtbot: QtBot
+) -> None:
+    """可視化設定の変更もデバウンス保存の対象になる。"""
+    path = tmp_path / "settings.json"
+    session = make_session(path, controller)
+    session.load()
+    session.start()
+    app_settings = session._app_settings  # pyright: ignore[reportPrivateUsage]
+
+    app_settings.apply(AppSettings(1.0, True, spectrum_visible=False))
+
+    qtbot.waitUntil(path.is_file, timeout=2_000)
+    restored = load_settings(path, AppSettings(1.0, True))
+    assert restored.spectrum_visible is False
+    assert restored.waveform_visible is True
+    session.stop()
+
+
+def test_load_applies_visualization_settings_before_start(
+    tmp_path: Path, controller: PlaybackController
+) -> None:
+    """復元した表示設定はstart前にsnapshotへ反映され、保存契機にはならない。"""
+    path = tmp_path / "settings.json"
+    save_settings(path, AppSettings(1.0, True, waveform_visible=False, level_meter_visible=False))
+    session = make_session(path, controller)
+
+    assert session.load() is None
+
+    app_settings = session._app_settings  # pyright: ignore[reportPrivateUsage]
+    assert app_settings.settings.waveform_visible is False
+    assert app_settings.settings.level_meter_visible is False
+    assert app_settings.settings.spectrum_visible is True
+    assert not session.is_running
+    assert not session._timer.isActive()  # pyright: ignore[reportPrivateUsage]
+
+
+def test_version_one_file_is_not_rewritten_on_startup(
+    tmp_path: Path, controller: PlaybackController
+) -> None:
+    """version 1の設定で起動しても、読み込みだけではファイルを書き換えない。"""
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"schema_version": 1, "playback_rate": 1.5, "pitch_compensation": false}\n',
+        encoding="utf-8",
+    )
+    original = path.read_bytes()
+    session = make_session(path, controller)
+
+    assert session.load() is None
+    session.start()
+
+    assert path.read_bytes() == original
+    assert controller.playback_rate == pytest.approx(1.5)
+    session.stop()
+
+
+def test_version_one_is_upgraded_on_the_next_change(
+    tmp_path: Path, controller: PlaybackController, qtbot: QtBot
+) -> None:
+    """次の変更で初めてversion 2として保存される。"""
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"schema_version": 1, "playback_rate": 1.5, "pitch_compensation": false}\n',
+        encoding="utf-8",
+    )
+    session = make_session(path, controller)
+    session.load()
+    session.start()
+
+    controller.set_playback_rate(1.25)
+
+    qtbot.waitUntil(lambda: json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 2)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    assert document["playback_rate"] == pytest.approx(1.25)
+    assert document["waveform_visible"] is True
+    session.stop()
