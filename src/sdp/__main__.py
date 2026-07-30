@@ -8,6 +8,7 @@ import sys
 
 from sdp import app
 from sdp.cli import CliMode, parse_cli_arguments
+from sdp.codec_test import run_codec_test
 from sdp.selftest import run_selftest
 from sdp.services import logging_setup
 
@@ -24,6 +25,8 @@ def main(argv: list[str] | None = None) -> int:
     command = parse_cli_arguments(raw_argv[1:] if raw_argv else ())
     if command.mode is CliMode.SELFTEST:
         return run_selftest(raw_argv)
+    if command.mode is CliMode.CODEC_TEST:
+        return run_codec_test(raw_argv, command.path_arguments)
     if command.mode is CliMode.INVALID:
         logging_setup.configure_logging()
         logging_setup.install_excepthook()
