@@ -12,9 +12,11 @@ import pytest
 from sdp.license_audit import (
     LICENSE_MANIFEST_SCHEMA_VERSION,
     ComponentStatus,
+    classify_runtime_files,
     find_missing_texts,
     load_license_manifest,
     summarize,
+    summarize_inventory,
     unresolved_components,
 )
 
@@ -184,3 +186,122 @@ def test_duplicate_component_ids_are_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="重複"):
         load_license_manifest(manifest)
+
+
+# -- runtime inventory（未宣言componentの検出）--------------------------------
+
+
+def _make_binaries(root: Path, relatives: list[str]) -> None:
+    """配布物を模したDLL・pydを作る。"""
+    for relative in relatives:
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"\0")
+
+
+def test_runtime_files_are_classified_by_patterns(tmp_path: Path) -> None:
+    """file_patternsに一致するDLL・pydを宣言コンポーネントへ割り当てる。"""
+    manifest = write_manifest(
+        tmp_path / "m.json",
+        [
+            component(id="python", file_patterns=["_internal/*.pyd"]),
+            component(id="qt", file_patterns=["_internal/Qt6*.dll"]),
+        ],
+    )
+    package = tmp_path / "package"
+    _make_binaries(package, ["_internal/_ssl.pyd", "_internal/Qt6Core.dll"])
+
+    inventory = classify_runtime_files(load_license_manifest(manifest), package)
+
+    assert inventory.classified == (
+        ("_internal/Qt6Core.dll", "qt"),
+        ("_internal/_ssl.pyd", "python"),
+    )
+    assert inventory.unclassified == ()
+
+
+def test_undeclared_runtime_files_are_reported(tmp_path: Path) -> None:
+    """どのコンポーネントにも属さないDLL・pydをunclassifiedとして洗い出す。"""
+    manifest = write_manifest(
+        tmp_path / "m.json",
+        [component(id="qt", file_patterns=["_internal/Qt6*.dll"])],
+    )
+    package = tmp_path / "package"
+    _make_binaries(package, ["_internal/Qt6Core.dll", "_internal/newplugin.dll"])
+
+    inventory = classify_runtime_files(load_license_manifest(manifest), package)
+
+    assert inventory.unclassified == ("_internal/newplugin.dll",)
+    assert inventory.classified == (("_internal/Qt6Core.dll", "qt"),)
+
+
+def test_classification_is_case_insensitive_and_ignores_non_binaries(tmp_path: Path) -> None:
+    """大文字小文字を区別せず、DLL・pyd以外は分類対象にしない。"""
+    manifest = write_manifest(
+        tmp_path / "m.json",
+        [component(id="msvc", file_patterns=["**/VCRUNTIME140*.dll"])],
+    )
+    package = tmp_path / "package"
+    _make_binaries(package, ["_internal/PySide6/vcruntime140.dll"])
+    (package / "LICENSE").write_text("MIT", encoding="utf-8")
+
+    inventory = classify_runtime_files(load_license_manifest(manifest), package)
+
+    assert inventory.classified == (("_internal/PySide6/vcruntime140.dll", "msvc"),)
+    assert inventory.unclassified == ()
+
+
+def test_most_specific_pattern_wins(tmp_path: Path) -> None:
+    """複数patternが一致する場合はより具体的なpatternのコンポーネントを採る。"""
+    manifest = write_manifest(
+        tmp_path / "m.json",
+        [
+            component(id="qt", file_patterns=["_internal/Qt6*.dll"]),
+            component(
+                id="qt-virtualkeyboard",
+                file_patterns=["_internal/Qt6VirtualKeyboard.dll"],
+            ),
+        ],
+    )
+    package = tmp_path / "package"
+    _make_binaries(package, ["_internal/Qt6VirtualKeyboard.dll"])
+
+    inventory = classify_runtime_files(load_license_manifest(manifest), package)
+
+    assert inventory.classified == (("_internal/Qt6VirtualKeyboard.dll", "qt-virtualkeyboard"),)
+
+
+def test_inventory_summary_counts_by_component(tmp_path: Path) -> None:
+    """inventory要約に分類済み・未分類の件数が入る。"""
+    manifest = write_manifest(
+        tmp_path / "m.json",
+        [component(id="qt", file_patterns=["_internal/Qt6*.dll"])],
+    )
+    package = tmp_path / "package"
+    _make_binaries(package, ["_internal/Qt6Core.dll", "_internal/orphan.dll"])
+
+    summary = summarize_inventory(classify_runtime_files(load_license_manifest(manifest), package))
+
+    assert "分類済み1件" in summary
+    assert "qt=1" in summary
+    assert "未分類1件" in summary
+
+
+def test_real_package_has_no_unexpected_unclassified_files() -> None:
+    """dist/sdpがある場合、未分類のruntimeファイルが既知の一覧に収まる。
+
+    ここに載っていないDLL・pydが増えたら（hook変更などで）テストが落ちて気づける。
+    以下は「同梱しているが未宣言」と分かっている将来課題であり、公開前に解消する。
+    """
+    package = REPO_ROOT / "dist" / "sdp"
+    if not package.exists():
+        pytest.skip("配布物未ビルド")
+
+    known_unclassified = {
+        "_internal/libffi-8.dll",
+        "_internal/PySide6/opengl32sw.dll",
+        "_internal/yaml/_yaml.cp313-win_amd64.pyd",
+    }
+    inventory = classify_runtime_files(load_license_manifest(MANIFEST_PATH), package)
+
+    assert set(inventory.unclassified) <= known_unclassified, set(inventory.unclassified)

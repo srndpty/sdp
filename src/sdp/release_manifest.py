@@ -99,6 +99,38 @@ def scan_package(directory: Path) -> PackageContents:
     )
 
 
+def compare_package_contents(
+    expected: PackageContents,
+    actual: PackageContents,
+    *,
+    expected_label: str = "expected",
+    actual_label: str = "actual",
+) -> tuple[str, ...]:
+    """2つの配布ディレクトリ走査結果が一致するか検査する。
+
+    release pipelineではZIP化前の ``dist/sdp`` と、ZIPを展開した ``sdp/`` を比べる。
+    file数・非圧縮サイズ・content hashを別々に報告することで、欠落と内容改変を
+    切り分けやすくする。
+    """
+    failures: list[str] = []
+    if expected.file_count != actual.file_count:
+        failures.append(
+            f"file_countが一致しません: {expected_label}={expected.file_count} "
+            f"{actual_label}={actual.file_count}"
+        )
+    if expected.uncompressed_size != actual.uncompressed_size:
+        failures.append(
+            f"uncompressed_sizeが一致しません: {expected_label}={expected.uncompressed_size} "
+            f"{actual_label}={actual.uncompressed_size}"
+        )
+    if expected.content_sha256 != actual.content_sha256:
+        failures.append(
+            f"content_sha256が一致しません: {expected_label}={expected.content_sha256} "
+            f"{actual_label}={actual.content_sha256}"
+        )
+    return tuple(failures)
+
+
 def collect_runtime_versions(qt_version: str | None = None) -> dict[str, str]:
     """build環境の実際のruntime versionを集める（取得できない場合は ``unknown``）。"""
     versions = {"python": platform.python_version()}

@@ -6,6 +6,7 @@ from enum import Enum, auto
 
 SELFTEST_OPTION = "--selftest"
 CODEC_TEST_OPTION = "--codec-test"
+OPTION_TERMINATOR = "--"
 
 
 class CliMode(Enum):
@@ -60,8 +61,16 @@ def parse_cli_arguments(arguments: Sequence[str]) -> CliCommand:
                 CliMode.INVALID,
                 error_message=f"{CODEC_TEST_OPTION}は最初に指定してください。",
             )
-        targets = values[1:]
-        unknown_options = tuple(value for value in targets if value.startswith("--"))
+        # `--` 以降は`--`始まりでも常にファイルpathとして扱う（option terminator）。
+        rest = values[1:]
+        if OPTION_TERMINATOR in rest:
+            separator = rest.index(OPTION_TERMINATOR)
+            before = rest[:separator]
+            targets = before + rest[separator + 1 :]
+        else:
+            before = rest
+            targets = rest
+        unknown_options = tuple(value for value in before if value.startswith("--"))
         if unknown_options:
             return CliCommand(
                 CliMode.INVALID,

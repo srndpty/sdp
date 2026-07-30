@@ -14,6 +14,7 @@ from sdp.release_manifest import (
     archive_name,
     build_manifest,
     collect_runtime_versions,
+    compare_package_contents,
     dump_manifest,
     file_sha256,
     find_local_paths,
@@ -128,6 +129,40 @@ def test_content_hash_changes_with_content(package: Path) -> None:
     (package / "sdp.exe").write_bytes(b"MZ\x00\x01")
 
     assert scan_package(package).content_sha256 != before
+
+
+def test_package_contents_comparison_accepts_identical_packages(
+    package: Path, tmp_path: Path
+) -> None:
+    """元packageと展開後packageが同じ内容なら差分なしとする。"""
+    extracted = tmp_path / "extracted"
+    for item in sorted(package.rglob("*")):
+        target = extracted / item.relative_to(package)
+        if item.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(item.read_bytes())
+
+    assert compare_package_contents(scan_package(package), scan_package(extracted)) == ()
+
+
+def test_package_contents_comparison_reports_content_mismatch(package: Path) -> None:
+    """ZIP内の1ファイル相当が変更されたらcontent hash不一致を報告する。"""
+    expected = scan_package(package)
+    (package / "sdp.exe").write_bytes(b"MZ changed")
+    failures = compare_package_contents(expected, scan_package(package))
+
+    assert any("content_sha256" in failure for failure in failures)
+
+
+def test_package_contents_comparison_reports_missing_file(package: Path) -> None:
+    """ZIPから1ファイル欠落したらfile count不一致を報告する。"""
+    expected = scan_package(package)
+    (package / "LICENSE").unlink()
+    failures = compare_package_contents(expected, scan_package(package))
+
+    assert any("file_count" in failure for failure in failures)
 
 
 def test_file_sha256_matches_hashlib(tmp_path: Path) -> None:

@@ -7,10 +7,13 @@
 #   2. 配布物のlayout検査
 #   3. リポジトリ外・制限PATHでのpackage smokeとライセンス資料検査
 #   4. ZIP作成（root directoryは sdp/）
-#   5. 別tempへ展開し、layout・selftest・codec testを再実行
-#   6. SHA-256とmanifestを生成
+#   5. 別tempへ展開し、layout・selftest・codec test（6形式必須）と
+#      展開前後のcontent hash一致を再検証
+#   6. SHA-256と、展開後の実内容から算出したmanifestを生成
+#   7. 全検証成功後に、同versionの3成果物だけをrelease/へ確定
 #
-# 失敗した場合、不完全な最終archiveをrelease/へ残さない。
+# staging はリポジトリ内 tmp/ に置く。途中失敗しても既存 release/ には触れず、
+# 前回の正常な成果物を壊さない。不完全な最終archiveも release/ へ残さない。
 
 [CmdletBinding()]
 param(
@@ -78,6 +81,7 @@ Assert-SafeReleaseTarget -Path $releasePath -Leaf 'release'
 
 $timer = [Diagnostics.Stopwatch]::StartNew()
 $temporaryRoot = $null
+$stagingRoot = $null
 $originalLocalAppData = $env:LOCALAPPDATA
 $originalPythonUtf8 = $env:PYTHONUTF8
 
@@ -122,12 +126,15 @@ print(archive_name(__version__, normalized_architecture()))
         Pop-Location
     }
 
-    if (Test-Path -LiteralPath $releasePath) {
-        Remove-Item -LiteralPath $releasePath -Recurse -Force
+    # stagingはrelease/の外（リポジトリ内のtmp/）へ置く。全検証が成功したときだけ
+    # 最終成果物をrelease/へ置換するため、途中失敗が前回の正常な成果物を壊さない。
+    $tmpRoot = Join-Path $repoRoot 'tmp'
+    if (-not (Test-Path -LiteralPath $tmpRoot -PathType Container)) {
+        New-Item -ItemType Directory -Path $tmpRoot | Out-Null
     }
-    New-Item -ItemType Directory -Path $releasePath | Out-Null
-
-    $stagingRoot = Join-Path $releasePath '.staging'
+    $stagingRoot = [IO.Path]::GetFullPath(
+        (Join-Path $tmpRoot ("release-staging-{0}" -f [Guid]::NewGuid()))
+    )
     New-Item -ItemType Directory -Path $stagingRoot | Out-Null
     $stagedArchive = Join-Path $stagingRoot $archiveName
 
@@ -171,22 +178,56 @@ print(archive_name(__version__, normalized_architecture()))
         -Label '展開後のselftest'
 
     Write-Host '5-3. 展開後のcodec test' -ForegroundColor Cyan
+    # releaseゲートは6形式すべての実decodeを担保する契約なので、fixture不足は
+    # 「未検証だがrelease成功」にせず失敗させる（部分検査は手動--codec-testで行う）。
     $fixtures = @()
+    $missingFixtures = @()
     foreach ($name in $codecFixtureNames) {
         $fixture = Join-Path $codecFixtureDirectory $name
         if (Test-Path -LiteralPath $fixture -PathType Leaf) {
             $fixtures += $fixture
         }
         else {
-            Write-Warning "codec test用の音源がありません（未検証として扱います）: $name"
+            $missingFixtures += $name
         }
     }
-    if ($fixtures.Count -eq 0) {
-        throw 'codec testに使える音源がありません'
+    if ($missingFixtures.Count -gt 0) {
+        throw "codec test用音源が不足しています: $($missingFixtures -join ', ')"
     }
     Invoke-PackagedExecutable -ExecutablePath $executable `
         -Arguments (@('--codec-test') + $fixtures) -Label '展開後のcodec test'
     $env:LOCALAPPDATA = $originalLocalAppData
+
+    Write-Host '=== 5-4. 展開前後のcontent hash一致検証 ===' -ForegroundColor Cyan
+    # ZIP化前のdist/sdpと、展開後のsdp/が同じ内容であることを確かめる。
+    # 将来ZIP作成や除外規則が変わってarchive内容と食い違っても、ここで検出できる。
+    Push-Location $repoRoot
+    try {
+        Invoke-Checked -Label 'content hash一致検証' -Command {
+            uv run python -c @'
+import sys
+from pathlib import Path
+
+from sdp.release_manifest import compare_package_contents, scan_package
+
+extracted = scan_package(Path(sys.argv[2]))
+failures = compare_package_contents(
+    scan_package(Path(sys.argv[1])),
+    extracted,
+    expected_label="dist/sdp",
+    actual_label="extracted/sdp",
+)
+if failures:
+    for failure in failures:
+        print(f"エラー: {failure}")
+    raise SystemExit(1)
+print(f"content hash一致: {extracted.content_sha256}")
+'@ $packagePath $extractedPackage
+        }
+    }
+    finally {
+        Pop-Location
+    }
 
     Write-Host '=== 6. SHA-256とmanifest ===' -ForegroundColor Cyan
     $hash = (Get-FileHash -LiteralPath $stagedArchive -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -198,19 +239,53 @@ print(archive_name(__version__, normalized_architecture()))
     $stagedManifest = Join-Path $stagingRoot $manifestName
     Push-Location $repoRoot
     try {
+        # manifestは最終配布物を記述するので、ZIPへ入った実内容（展開後）から算出する。
         Invoke-Checked -Label 'manifest生成' -Command {
-            uv run python tools/release_manifest.py $packagePath $stagedArchive $stagedManifest
+            uv run python tools/release_manifest.py $extractedPackage $stagedArchive $stagedManifest
         }
     }
     finally {
         Pop-Location
     }
 
-    # ここまで全部成功した場合だけ、最終成果物をrelease/へ移す。
-    foreach ($item in @($stagedArchive, $stagedHashFile, $stagedManifest)) {
-        Move-Item -LiteralPath $item -Destination $releasePath
+    Write-Host '=== 7. release/への確定 ===' -ForegroundColor Cyan
+    # ここまで全部成功したときだけ、同versionの3成果物だけを置換する。
+    # 既存release/はそのまま残し、別versionの正常な成果物を壊さない。
+    if (-not (Test-Path -LiteralPath $releasePath -PathType Container)) {
+        New-Item -ItemType Directory -Path $releasePath | Out-Null
     }
-    Remove-Item -LiteralPath $stagingRoot -Recurse -Force
+    $stagedItems = @($stagedArchive, $stagedHashFile, $stagedManifest)
+    $finalTargets = $stagedItems | ForEach-Object {
+        Join-Path $releasePath (Split-Path -Leaf $_)
+    }
+    # 同名の旧3成果物をbackupへ退避し、3ファイルの移動が全部成功した時点で確定する。
+    $backupRoot = Join-Path $stagingRoot 'previous'
+    New-Item -ItemType Directory -Path $backupRoot | Out-Null
+    $restorePairs = @()
+    try {
+        foreach ($target in $finalTargets) {
+            if (Test-Path -LiteralPath $target -PathType Leaf) {
+                $backup = Join-Path $backupRoot (Split-Path -Leaf $target)
+                Move-Item -LiteralPath $target -Destination $backup
+                $restorePairs += , @($backup, $target)
+            }
+        }
+        for ($index = 0; $index -lt $stagedItems.Count; $index++) {
+            Move-Item -LiteralPath $stagedItems[$index] -Destination $finalTargets[$index]
+        }
+    }
+    catch {
+        # 置換に失敗したら、今回の中途半端な成果物を消し、退避した旧3成果物を戻す。
+        foreach ($target in $finalTargets) {
+            if (Test-Path -LiteralPath $target -PathType Leaf) {
+                Remove-Item -LiteralPath $target -Force
+            }
+        }
+        foreach ($pair in $restorePairs) {
+            Move-Item -LiteralPath $pair[0] -Destination $pair[1]
+        }
+        throw
+    }
 
     $timer.Stop()
     $archivePath = Join-Path $releasePath $archiveName
@@ -222,10 +297,7 @@ print(archive_name(__version__, normalized_architecture()))
     Write-Host ("  所要時間: {0:N1}秒" -f $timer.Elapsed.TotalSeconds)
 }
 catch {
-    if (Test-Path -LiteralPath $releasePath) {
-        # 不完全なarchiveを配布物として残さない。
-        Remove-Item -LiteralPath $releasePath -Recurse -Force
-    }
+    # 失敗しても既存のrelease/へは触れない。今回作ったstagingはfinallyで片付ける。
     throw
 }
 finally {
@@ -233,5 +305,8 @@ finally {
     $env:PYTHONUTF8 = $originalPythonUtf8
     if ($null -ne $temporaryRoot -and (Test-Path -LiteralPath $temporaryRoot)) {
         Remove-Item -LiteralPath $temporaryRoot -Recurse -Force
+    }
+    if ($null -ne $stagingRoot -and (Test-Path -LiteralPath $stagingRoot)) {
+        Remove-Item -LiteralPath $stagingRoot -Recurse -Force
     }
 }

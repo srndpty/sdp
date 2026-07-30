@@ -9,7 +9,8 @@
       "shipped_texts": ["LICENSE", "_internal/LICENSE"],
       "linkage": "application",
       "status": "resolved",
-      "notes": "本アプリ本体。"
+      "notes": "本アプリ本体。",
+      "file_patterns": []
     },
     {
       "id": "python",
@@ -18,7 +19,8 @@
       "shipped_texts": ["_internal/licenses/Python/LICENSE.txt"],
       "linkage": "dynamic",
       "status": "resolved",
-      "notes": "python313.dll等をPyInstallerが同梱する。"
+      "notes": "python3.dll・python313.dllと、標準ライブラリのC拡張（_internal直下の.pyd）をPyInstallerが同梱する。",
+      "file_patterns": ["_internal/python3*.dll", "_internal/*.pyd"]
     },
     {
       "id": "pyside6",
@@ -27,7 +29,13 @@
       "shipped_texts": ["_internal/licenses/PySide6/LicenseRef-Qt-Commercial.txt"],
       "linkage": "dynamic",
       "status": "needs_text",
-      "notes": "wheelが同梱するのは商用ライセンス参照文のみで、LGPL-3.0原文が配布物に無い。LGPLで配布するならLGPL-3.0とGPL-3.0の原文、著作権表示、ソース入手方法の提示が必要。"
+      "notes": "wheelが同梱するのは商用ライセンス参照文のみで、LGPL-3.0原文が配布物に無い。LGPLで配布するならLGPL-3.0とGPL-3.0の原文、著作権表示、ソース入手方法の提示が必要。",
+      "file_patterns": [
+        "_internal/PySide6/pyside6.abi3.dll",
+        "_internal/PySide6/*.pyd",
+        "_internal/shiboken6/shiboken6.abi3.dll",
+        "_internal/shiboken6/*.pyd"
+      ]
     },
     {
       "id": "qt",
@@ -36,7 +44,8 @@
       "shipped_texts": [],
       "linkage": "dynamic",
       "status": "needs_decision",
-      "notes": "PySide6 wheel経由でQt DLLを同梱している。LGPL-3.0で配布する前提なら、原文・著作権表示・再リンク手段（DLL差し替え可能なonedirである点）・Qtソース入手方法の明示が必要。商用ライセンスを選ぶ場合は条件が変わる。"
+      "notes": "PySide6 wheel経由でQt DLLとpluginを同梱している。LGPL-3.0で配布する前提なら、原文・著作権表示・再リンク手段（DLL差し替え可能なonedirである点）・Qtソース入手方法の明示が必要。商用ライセンスを選ぶ場合は条件が変わる。",
+      "file_patterns": ["_internal/PySide6/Qt6*.dll", "_internal/PySide6/plugins/**/*.dll"]
     },
     {
       "id": "qt-virtualkeyboard",
@@ -45,7 +54,11 @@
       "shipped_texts": [],
       "linkage": "dynamic",
       "status": "needs_expert",
-      "notes": "sdpは使用していないがPySide6-Addons経由で同梱される。ライセンス面と配布サイズの両方の理由で、除外できるかをP7-C以降で検討する。"
+      "notes": "sdpは使用していないがPySide6-Addons経由で同梱される。ライセンス面と配布サイズの両方の理由で、除外できるかをP7-C以降で検討する。",
+      "file_patterns": [
+        "_internal/PySide6/Qt6VirtualKeyboard.dll",
+        "_internal/PySide6/plugins/platforminputcontexts/qtvirtualkeyboardplugin.dll"
+      ]
     },
     {
       "id": "ffmpeg",
@@ -55,7 +68,14 @@
       "linkage": "dynamic",
       "status": "needs_text",
       "notes": "configuration文字列: --prefix=/c/FFmpeg-n7.1.3/build/msvc/installed --disable-programs --disable-doc --disable-debug --enable-network --disable-lzma --enable-pic --disable-vulkan --disable-v4l2-m2m --disable-decoder=truemotion1 --enable-zlib --toolchain=msvc --enable-shared --disable-static。LGPL原文とソース入手方法の提示が必要。",
-      "verified_configuration": true
+      "verified_configuration": true,
+      "file_patterns": [
+        "_internal/PySide6/avcodec-*.dll",
+        "_internal/PySide6/avformat-*.dll",
+        "_internal/PySide6/avutil-*.dll",
+        "_internal/PySide6/swresample-*.dll",
+        "_internal/PySide6/swscale-*.dll"
+      ]
     },
     {
       "id": "openssl",
@@ -64,7 +84,8 @@
       "shipped_texts": [],
       "linkage": "dynamic",
       "status": "needs_text",
-      "notes": "Qt Networkのopensslバックエンド用にPySide6 wheelが同梱する。sdpはTLSを使わないため、除外できるかも検討する。"
+      "notes": "Qt Networkのopensslバックエンド用にPySide6 wheelが同梱する。sdpはTLSを使わないため、除外できるかも検討する。",
+      "file_patterns": ["_internal/libssl-*.dll", "_internal/libcrypto-*.dll"]
     },
     {
       "id": "numpy",
@@ -73,7 +94,11 @@
       "shipped_texts": ["_internal/licenses/numpy/LICENSE.txt"],
       "linkage": "dynamic",
       "status": "resolved",
-      "notes": "wheelのlicenses/以下を丸ごと同梱している。"
+      "notes": "wheelのlicenses/以下を丸ごと同梱している。C拡張とnumpy.libs（OpenBLAS等）を含む。",
+      "file_patterns": [
+        "_internal/numpy/**/*.pyd",
+        "_internal/numpy.libs/libscipy_openblas*.dll"
+      ]
     },
     {
       "id": "mutagen",
@@ -82,7 +107,8 @@
       "shipped_texts": ["_internal/licenses/mutagen/COPYING"],
       "linkage": "python-module",
       "status": "needs_expert",
-      "notes": "「version 2 or later」のため、配布物全体をGPL-3.0の条件で頒布する解釈が取り得る（MIT・LGPL・PSF・BSDはいずれもGPL-3.0互換）。ただしその場合、配布物全体のソース提供義務が生じるかの判断が要る。回避したい場合はメタデータ読み取りをGPLでない実装へ置き換える選択肢がある。"
+      "notes": "「version 2 or later」のため、配布物全体をGPL-3.0の条件で頒布する解釈が取り得る（MIT・LGPL・PSF・BSDはいずれもGPL-3.0互換）。ただしその場合、配布物全体のソース提供義務が生じるかの判断が要る。回避したい場合はメタデータ読み取りをGPLでない実装へ置き換える選択肢がある。純Pythonのため分類対象のDLL・pydは持たない。",
+      "file_patterns": []
     },
     {
       "id": "pyinstaller-bootloader",
@@ -91,7 +117,8 @@
       "shipped_texts": ["_internal/licenses/pyinstaller/COPYING.txt"],
       "linkage": "static-bootloader",
       "status": "resolved",
-      "notes": "bootloader例外により、生成した実行ファイルの配布条件は制約されない。"
+      "notes": "bootloader例外により、生成した実行ファイルの配布条件は制約されない。bootloaderはsdp.exeへ静的に組み込まれ、独立したDLL・pydは持たない。",
+      "file_patterns": []
     },
     {
       "id": "msvc-runtime",
@@ -100,7 +127,13 @@
       "shipped_texts": [],
       "linkage": "dynamic",
       "status": "needs_decision",
-      "notes": "Visual Studioの再頒布条件に従う。GPL系と組み合わせる場合はsystem library例外の該当性も要確認。"
+      "notes": "Visual Studioの再頒布条件に従う。GPL系と組み合わせる場合はsystem library例外の該当性も要確認。",
+      "file_patterns": [
+        "**/VCRUNTIME140*.dll",
+        "**/MSVCP140*.dll",
+        "_internal/ucrtbase.dll",
+        "_internal/api-ms-win-*.dll"
+      ]
     }
   ]
 }

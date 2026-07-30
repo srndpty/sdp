@@ -94,3 +94,39 @@ def test_unknown_option_after_codec_test_is_rejected() -> None:
 
     assert command.mode is CliMode.INVALID
     assert command.error_message == "未知のoptionです: --unknown"
+
+
+def test_option_terminator_allows_paths_that_look_like_options() -> None:
+    """`--`以降は`--`始まりでもファイルpathとして検査対象にする。"""
+    command = parse_cli_arguments(["--codec-test", "--", "--sample.wav"])
+
+    assert command == CliCommand(
+        CliMode.CODEC_TEST,
+        path_arguments=("--sample.wav",),
+    )
+
+
+def test_option_terminator_keeps_earlier_paths() -> None:
+    """`--`の前後のpathを両方とも検査対象にする。"""
+    command = parse_cli_arguments(["--codec-test", "a.wav", "--", "--b.wav"])
+
+    assert command == CliCommand(
+        CliMode.CODEC_TEST,
+        path_arguments=("a.wav", "--b.wav"),
+    )
+
+
+def test_unknown_option_before_terminator_is_still_rejected() -> None:
+    """`--`より前の未知optionは従来どおり拒否する。"""
+    command = parse_cli_arguments(["--codec-test", "--unknown", "--", "a.wav"])
+
+    assert command.mode is CliMode.INVALID
+    assert command.error_message == "未知のoptionです: --unknown"
+
+
+def test_option_terminator_without_paths_is_rejected() -> None:
+    """`--`だけでpathが無ければ従来どおり拒否する。"""
+    command = parse_cli_arguments(["--codec-test", "--"])
+
+    assert command.mode is CliMode.INVALID
+    assert command.error_message is not None
