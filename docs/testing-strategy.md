@@ -51,6 +51,7 @@
 | `services/save_status.py`（P6-C） | 復元失敗メッセージの1〜3カテゴリ整形、重複排除と順序の安定、ステータスバーに収まる長さ、生の例外文とパスを含めないこと、SaveCategory以外の拒否、保存失敗・復旧メッセージがカテゴリを区別できること、通知が**状態変化のときだけ**出ること（連続失敗で溢れない・失敗していないカテゴリの成功では黙る・カテゴリごとに独立）を検証する |
 | `playlist/persistence.py` | `playlist.json` の往復（順序・entry_id・日本語パス）、未作成時の空リスト、ファイル状態を保存しないこと、アトミック書き込みと失敗時の既存ファイル保持、保存前のID重複検証、schema version の厳密な整数判定、非UTF-8を含む破損データごとの明示的エラー、未知キーの無視（将来は M3U8 も） |
 | `services/playlist_session.py` | 復元失敗時の上書き防止、追加・削除・移動・全置換のデバウンス保存、停止後の監視解除、保存失敗と復旧を状態遷移時だけ通知すること、メタデータ・欠損表示だけの変更を保存契機にしないこと |
+| `services/launch_request.py` | 引数なし、絶対／相対path、起動時current directory基準、Unicode・空白、順序と重複、欠損pathと未知拡張子の受理、ディレクトリと解釈不能引数の部分的な無視、LaunchRequestの不変性と絶対path制約、Qt非依存を検証する |
 
 ## 3. Qt 統合テスト（pytest-qt、`QT_QPA_PLATFORM=offscreen`）
 
@@ -59,11 +60,12 @@
 | `PlaylistModel` | 全テストで `QAbstractItemModelTester`（Fatal）を取り付ける。一括追加・指定位置への挿入・削除・全消去・`moveRows`（前後・複数行・不正引数）、entry_id の索引追随、role ごとの `data` / `headerData` と安定した `roleNames`、外部URLと内部MIMEのCopyAction限定D&D、可否照会で警告しないこと、欠損の再確認と `dataChanged` の範囲、1000 件の一括追加が単一の `rowsInserted` 通知になること |
 | `PlaybackController` | **FakeBackend**（`IPlaybackBackend` のテストダブル）を使い、状態遷移・曲終了時の次曲送り・エラー時の方針を `qtbot.waitSignal` で検証 |
 | `QtMultimediaBackend` | Qt enum 写像の完全性（値が増えたら失敗する）、エラー変換、故障注入による変換失敗・再入ガード、状態通知の重複抑制、音を鳴らさない load・source差し替え・再ロード。所有する QMediaPlayer / QAudioOutput は `findChildren` で取得し、テストのために公開 API を増やさない |
-| `SingleInstanceService` | 同一プロセス内でサーバーとクライアントを往復させる |
+| `SingleInstanceService` | テストごとの固有server名を注入し、primary／別processのsecondary判定、1件・複数件の要求往復と受理確認、順序・重複・Unicode、header／payloadの分割受信、1socketの連続message、不正JSON、未知version、256KiB上限、stale endpoint回復、shutdown後の同名再起動を実`QLocalServer` / `QLocalSocket`で検証する。UI・playlist・playback・保存JSONに依存しないことも固定する |
 | `PlayerControls` | **FakeBackend + 実 PlaybackController** で、状態ごとのボタン活性、シーク（ドラッグ中の非同期更新の抑止、有効なpress/releaseでの1回だけのseek、source・duration変更による古い操作の取消）、音量・ミュートの往復とフィードバックループの不在を検証する。子ウィジェットは `objectName` で取得する |
 | `MainWindow`（UI状態） | captureがnormal geometryとSplitterサイズを返すこと、**最大化中でもnormal geometryを返すこと**、最小化状態を保存しないこと、restoreでgeometryと最大化を適用しnormal復元では既存の最大化／最小化を解除すること、画面外の保存値を画面内へ戻すこと、Splitterの往復と現在Window高さへの適応、可視化が全ON／全OFFのどちらでも保存比率を許容誤差内で復元すること、前回フォルダーを同期I/Oなしでファイルダイアログへ渡すこと、ファイル選択で親フォルダーを更新し**Cancelでは更新しないこと**、D&Dで更新しないこと、相対パスの無視、Unicodeパス、move／resizeの通知、**復元適用が通知しないこと**、JSON・schema version・保存先・保存タイマーを持たないことを検証する |
 | `MainWindow` | `QFileDialog.getOpenFileName` を差し替え、キャンセル / 選択、ファイル名とタイトルの更新、`MediaStatus` とエラー表示（具体的エラーの優先、`detail` を出さないこと）、source解除、終了アクションを検証する。**設定アクションでダイアログが開くこと、二重に開かないこと、閉じた後に再度開けること、開き直しで最新設定が入ること、ダイアログの要求が調停サービス経由でControllerと各Panelへ届くこと、JSON・schema version・保存タイマーを持たないこと、復元済み表示設定をWindow表示前に反映すること、3つの可視化を個別にON/OFFできること、波形非表示中は位置追従を止め再表示で現在位置へ復帰すること**を検証する |
 | `app.py` の配線（P6-C） | settings v1／v2／v3とui-state v1／v2の起動matrix、現在曲がWindow表示前に復元され**自動再生せず位置0のまま**であること、削除済みentry_idでも現在曲なしで起動し次の保存で取り除かれること、曲を選ぶとui-stateへ保存されること、**3ファイルの破損8通り**（健全なファイルだけ保存でき、破損ファイルのbytesが変わらず、再生・可視化が継続し、メッセージに生の例外もパスも出ないこと）、3カテゴリすべての保存失敗通知と抑制・復旧通知、保存失敗が再生と他ファイルを妨げないこと、終了処理が1カテゴリの**例外**で後続を飛ばさないこと、終了後にworkerとtimerが残らないこと、設定ダイアログを開いたままでも安全に終了できることを検証する |
+| `app.py` の配線（P7-A） | `QApplication`作成後・composition構築前の単一instance判定、secondaryがevent loopと`PlayerComposition`を作らず終了すること、転送失敗で二重起動しないこと、初回引数が復元済みplaylist末尾へ追加され自動再生しないこと、実行中の受信が同じWindow／PlaylistModelへ適用されること、最小化解除・最大化維持・前面化要求、IPCがshutdownの最初に解放されることを検証する。settings／playlist／ui-state schemaと`PlaybackBackend`の既存契約テスも変更しない |
 | `app.py` の配線（UI状態） | PlayerCompositionがUiStateSessionを保持しbuild時に監視しないこと、既定パスが`%LOCALAPPDATA%\sdp\ui-state.json`で設定ファイルと別であること、Window表示前にgeometryと前回フォルダーが復元されること、可視化の表示設定を適用したあとにSplitterが復元されること、復元だけではファイルを書き換えないこと、終了時flushで保存されること、破損時に既定位置で起動し元ファイルを上書きしないこと、ui-state／settings／playlistの障害と保存可否が互いに独立であること、3つのschemaが混ざらないこと、`run()`がstopより前にflushすること、UI層がui-stateのJSON I/Oを持たないことを検証する |
 | `app.py` の配線（設定） | AppSettingsControllerを保持しSettingsSessionと同じsnapshotを使うこと、保存済み表示設定をWindow表示前に反映すること、version 1設定から正常起動し起動だけでは書き換えないこと、初期読込で保存が走らないこと、設定ダイアログの変更がControllerと各Panelへ届くこと、終了時flushでversion 2として保存されること、設定保存失敗がプレイリスト保存と再生を妨げないこと、UI層が設定JSONを読み書きしないことを検証する |
 | `app.py` の配線 | Backend → Controller → PlaylistModel → 永続化サービス → MainWindow を組み立て、復元済みModelの前後曲可否をWindow構築時に反映できること。イベントループは起動しない。PcmTapを保持しBackendのQAudioBufferOutputへ接続されていること、SpectrumPanelが同じPcmTapを使うこと、**LevelMeterWidgetが1つでSpectrumPanel内にあり同じPcmTapを共有すること、mono／L／Rの3本が同じ固定容量であること、本番配線のPCM通知で3本が埋まること、MainWindowがLevelProcessorやリングバッファを持たないこと、UI層がQAudioBuffer系を参照しないこと**、SpectrumWidgetとWaveformWidgetが1つずつ共存すること、buildだけではタイマーを開始しないこと、source変更でPCMがclearされること、shutdownでタイマーとPCM受信が残らないこと、PlaybackBackend IF・FakeBackend・settings／playlist／波形cache schemaが不変であること |
@@ -448,6 +450,26 @@ RSSは60.9→65.5MBでt=30s以降横ばい、リングバッファ3本合計1,03
 - [ ] 設定ダイアログを開いたままウィンドウを閉じても安全に終了する
 - [ ] 100%／可能なら150%表示倍率でダイアログが崩れない
 - [ ] 10分程度の通常利用のあと終了し、プロセスが残らない
+
+## 6.15 P7-A 手動スモーク（起動引数と単一instance）
+
+Windows 11上の2つのPowerShellとタスクマネージャーで行う。
+QtのoffscreenテストではOSのforeground制約を完全に代替できないため、
+**リリース前ゲートとして残す**。
+
+- [ ] `uv run python -m sdp` を引数なしで起動できる
+- [ ] 1ファイル、複数ファイルが指定順でplaylist末尾へ追加される
+- [ ] 空白・日本語を含む絶対pathを引用符で囲んで追加できる
+- [ ] 相対pathが起動したPowerShellのcurrent directory基準で解決される
+- [ ] 起動済みの状態で別PowerShellから指定すると、同じWindowとplaylistへ追加される
+- [ ] 2つ目のsdp processが転送後に残らない
+- [ ] 最小化中に要求するとWindowが復帰し、前面化またはタスクバー通知される
+- [ ] 最大化中に要求しても最大化が解除されない
+- [ ] ディレクトリと有効なファイルを混在させると、前者だけが無視される
+- [ ] 欠損ファイルを渡しても既存の再生が停止しない
+- [ ] 別PowerShellから10回程度連続起動しても、要求が欠落せずprocessが増えない
+- [ ] primaryを正常終了した後、直ちに同じコマンドで再起動できる
+- [ ] Window終了後にタスクマネージャー上sdp／python processが残らない
 
 ## 7. 手動チェックリスト（リリース前）
 

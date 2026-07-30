@@ -1,0 +1,68 @@
+"""起動要求を既存compositionへ適用する小さなアダプター。"""
+
+import logging
+
+from PySide6.QtCore import QObject, Qt, Slot
+from PySide6.QtWidgets import QApplication
+
+from sdp.core.playlist.model import PlaylistModel
+from sdp.services.launch_request import LaunchRequest
+from sdp.ui.main_window import MainWindow
+
+_logger = logging.getLogger(__name__)
+
+
+class LaunchRequestHandler(QObject):
+    """起動要求をプレイリスト末尾へ追加し、既存Windowへ通知する。"""
+
+    def __init__(
+        self,
+        playlist: PlaylistModel,
+        window: MainWindow,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._playlist = playlist
+        self._window = window
+
+    def apply_initial(self, request: LaunchRequest) -> None:
+        """保存済みplaylist復元後の初回要求を適用する。前面化は行わない。"""
+        self._apply(request, activate=False)
+
+    @Slot(object)
+    def handle_received(self, value: object) -> None:
+        """実行中にIPCで届いた検証済み要求を適用する。"""
+        if not isinstance(value, LaunchRequest):
+            _logger.error("LaunchRequest以外の受信通知を拒否しました: %r", type(value))
+            return
+        self._apply(value, activate=True)
+
+    def _apply(self, request: LaunchRequest, *, activate: bool) -> None:
+        if request.ignored_arguments:
+            _logger.warning(
+                "起動引数のうち%d件を無視しました: %r",
+                len(request.ignored_arguments),
+                request.ignored_arguments,
+            )
+        if request.paths:
+            self._playlist.add_paths(request.paths)
+            message = f"{len(request.paths)}曲をプレイリストへ追加しました。"
+            if request.ignored_arguments:
+                message += f" {len(request.ignored_arguments)}件の引数を無視しました。"
+            self._window.show_status_message(message)
+            if activate:
+                self._activate_window()
+        elif request.ignored_arguments:
+            self._window.show_status_message("追加できるファイルがありませんでした。")
+
+    def _activate_window(self) -> None:
+        state = self._window.windowState()
+        if state & Qt.WindowState.WindowMinimized:
+            # WindowMaximizedは残し、最小化だけを解除する。
+            self._window.setWindowState(state & ~Qt.WindowState.WindowMinimized)
+            self._window.show()
+        self._window.raise_()
+        self._window.activateWindow()
+        if not self._window.isActiveWindow():
+            _logger.info("OSのforeground制約により前面化できないためalertを要求します")
+            QApplication.alert(self._window, 0)

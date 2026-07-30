@@ -32,8 +32,9 @@ sdp の設計文書。要件 ID（PLAY-xx、WAVE-xx 等）とマイルストー�
 sdp/
 ├── pyproject.toml            # uv 管理。ruff / pyright / pytest / coverage 設定を集約
 ├── src/sdp/
-│   ├── __main__.py           # エントリポイント（引数解析 → 単一インスタンス判定 → App 起動）
-│   ├── app.py                # QApplication の組み立てと依存の手動配線、日本語ロケール
+│   ├── __main__.py           # エントリポイント
+│   ├── app.py                # 起動順序と依存の手動配線、日本語ロケール
+│   ├── launch.py             # LaunchRequestを既存compositionへ適用するadapter
 │   ├── core/
 │   │   ├── playback/
 │   │   │   ├── types.py      # 再生状態・メディア状況・エラーの Qt 非依存型
@@ -53,6 +54,7 @@ sdp/
 │   │       ├── waveform_projection.py # 中央固定窓のpixel min/max投影と座標変換
 │   │       └── waveform_cache.py # npz キャッシュ、キー生成、LRU 容量管理
 │   ├── services/
+│   │   ├── launch_request.py # Qt非依存の起動要求とargv変換
 │   │   ├── pcm_tap.py        # QAudioBufferOutput → 正規化 → mono 化 → リングバッファ
 │   │   ├── waveform_analysis.py # QAudioDecoder workerと現在sourceの解析調停
 │   │   ├── settings.py       # 設定 dataclass と JSON 入出力、スキーマバージョン
@@ -1320,7 +1322,7 @@ objectNameは`settingsDialog`、各入力は`settingsPlaybackRateSpinBox`、
   変更がないApplyではファイルを書き換えない。
 - UI状態の監視は**Window表示後**に開始する（表示で生じるmove／resizeを
   ユーザー変更として保存しないため）。
-- 終了順は「SpectrumPanel → PcmTap → 波形解析 → MetadataReader → **UI状態flush** →
+- 終了順は「単一instance IPC → SpectrumPanel → PcmTap → 波形解析 → MetadataReader → **UI状態flush** →
   設定flush → プレイリスト保存 → 各session stop → AppSettingsController shutdown」。
   **Windowが破棄された後にgeometryを取得しない**（破棄済みならUI状態の保存を諦めて
   終了処理を止めない）。
@@ -1328,8 +1330,10 @@ objectNameは`settingsDialog`、各入力は`settingsPlaybackRateSpinBox`、
   後続を飛ばさない**（各段をtry/exceptで囲み、失敗はログへ残して次へ進む）。
   保存APIの`False`は「変更なし」と内部で記録済みの失敗を区別しないため、終了段階の
   失敗判定には使わない。大きなライフサイクル基盤は作らず、順序と例外分離だけをここで守る。
-- 起動時の現在曲復元は「設定適用 → プレイリスト復元 → MainWindow構築 → 可視化適用 →
-  UI状態復元（geometry・Splitter・前回フォルダー・現在曲）→ Window表示 → 監視開始」の
+- 起動時の現在曲復元は「QApplication作成 → 単一instance判定 → 設定適用 →
+  プレイリスト復元 → MainWindow構築 → 可視化適用 → UI状態復元
+  （geometry・Splitter・前回フォルダー・現在曲）→ 起動引数追加 → Window表示 →
+  IPC受信開始 → 状態監視開始」の
   順で行う。**復元しただけでは再生しない。**
 - 異常終了ではデバウンス済みの直近状態までが残る。crash handlerや強制終了時の
   完全な保証は行わない。
@@ -1345,14 +1349,46 @@ objectNameは`settingsDialog`、各入力は`settingsPlaybackRateSpinBox`、
 
 ## 10. 単一インスタンス
 
-- サーバー名は `sdp-<ユーザー名のハッシュ>`。
-- 起動時に `QLocalSocket` で接続を試み、成功した場合は引数の絶対パス群を JSON Lines で
-  送信して即座に終了する。失敗した場合は `QLocalServer.listen`
-  （残骸対策に `removeServer` を実行）し、`QLockFile` で競合を防ぐ。
-- 受信側はパス群をプレイリスト末尾へ追加し、最初に受信した曲を再生して
-  `activateWindow` と `raise_` を呼ぶ。Windows のフォアグラウンド制約で前面化できない場合は
-  `QApplication.alert` によるタスクバー点滅にフォールバックする
-  （発動条件をログへ残す。リスク R7）。
+### 10.1 起動要求
+
+`services.launch_request.LaunchRequest` はQt非依存のimmutableな値オブジェクトで、
+絶対パスのtupleと無視した引数を持つ。OSが分割済みの`argv`を受け取るため、
+引用符の再解釈は行わない。相対パスは`QApplication`構築前に取得した起動時の
+current directory基準で絶対化し、指定順と重複を保つ。
+
+既存の`PlaylistModel.add_paths()`契約と合わせ、欠損パスと未知拡張子は受理し、
+ディレクトリとPathに変換できない引数だけを無視する。そのため一部が無効でも、
+残りの要求はプレイリスト末尾へ追加できる。
+
+### 10.2 IPCと競合防止
+
+- `SingleInstanceService` は`QLocalServer` / `QLocalSocket` / `QLockFile`だけを使い、
+  QWidget、PlaylistModel、PlaybackController、保存JSONを参照しない。
+- server名はユーザー、home、Windows domain、session識別子をSHA-256で短縮した
+  `sdp-<24 hex>`。Qtの`UserAccessOption`も指定し、別ユーザーsessionや別アプリとの衝突を避ける。
+- wire formatは`4-byte big-endian payload length + UTF-8 JSON`。JSONは
+  `{"version": 1, "paths": [...], "ignored_arguments": [...]}`とする。payload上限は
+  **256KiB**で、受信側と送信側の両方で拒否する。受信bufferは部分受信を蓄積し、
+  1socket上の連続messageを個別に処理する。不正JSONと未知versionはログに残して無視する。
+- primaryが正当な要求をSignalへ発行した後に1-byteの受理確認を返す。
+  secondaryはこれを待ってから終了するため、単なるsocket接続を転送成功と誤判定しない。
+- 接続できなければ排他lockを試み、所有できたprocessだけがlistenする。
+  lock取得後に残っているendpoint、またはQtがPID消滅等でstaleと確認したlockだけを除去する。
+  既存instanceが疑われるのに転送できない場合は二重起動せず、終了コード2で終了する。
+
+### 10.3 起動・適用・終了順序
+
+1. 起動時current directoryを保持し、`argv`を`LaunchRequest`へ変換する。
+2. `QApplication`を作成し、`PlayerComposition`より先に単一instanceを判定する。
+3. secondaryは受理確認後にevent loopもcompositionも作らず終了する。
+4. primaryは設定と保存済みplaylistを復元し、初回起動引数をその末尾へ追加する。
+   追加だけで自動再生はしない。
+5. Windowを表示した後に受信Signalを`LaunchRequestHandler`へ接続し、pending接続も回収する。
+6. 転送要求は同じWindowとPlaylistModelの末尾へ追加する。有効なpathがあれば、
+   最小化flagだけを外し、`show()` / `raise_()` / `activateWindow()`を試みる。
+   最大化flagは維持し、OS制約でactiveにできなければ`QApplication.alert()`を要求する。
+7. shutdownの最初にSignalを切断し、socket、server endpoint、lockを解放する。
+   その失敗で他の保存・解放カテゴリを飛ばさない。
 
 ---
 

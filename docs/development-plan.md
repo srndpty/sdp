@@ -323,13 +323,18 @@ P6-C（UX仕上げと破損・失敗時の統合確認）**の3つへ分割す�
 - **テスト**: 設定の往復とschema version 1→2の移行、ダイアログのApply／OK／Cancel契約、
   可視化ON/OFFで解析回数が増えないことのQtテスト、復元シナリオのapp配線テスト。
 
-**P6完了時点を、パッケージング前の機能完成版とする。** 次はP7（Windows統合と配布準備）へ進む。
+**P6完了時点を、パッケージング前の機能完成版とする。**
+P7-A（起動引数と単一instance）は実装・自動テスト済みで、
+Windows上の手動受け入れを残している。P7-B（パッケージと関連付け）は未着手。
 
-### P7: Windows 統合と配布（PR#11: 単一インスタンスと引数、PR#12: パッケージングとインストーラー）
+### P7: Windows 統合と配布（P7-A: 単一instanceと引数、P7-B: パッケージとインストーラー）
 
 - **目的**: WIN-01〜05。
-- **変更ファイル**: `src/sdp/services/{single_instance,win_integration}.py`、
-  `src/sdp/__main__.py`（引数処理と `--selftest`）、
+- **P7-A進捗**: 実装・自動テスト済み、実Windowの手動受け入れ未完了。
+  `LaunchRequest`、version付き・256KiB上限のlocal IPC、primary／secondary／stale判定、
+  初回および実行中のplaylist末尾追加、前面化要求、終了時解放を実装した。
+- **P7-B変更候補**: `src/sdp/services/win_integration.py`、
+  `src/sdp/__main__.py`（`--selftest`）、
   `packaging/{sdp.spec,installer.iss}`、`docs/testing-strategy.md`（手動チェックリスト）
 - **受け入れ条件**: exe へ複数パスを渡して再生でき、二重起動でパスが既存プロセスへ転送され
   前面化（不可の場合はタスクバー点滅）する。インストーラー実行後に「プログラムから開く」へ
