@@ -37,6 +37,7 @@ _logger = logging.getLogger(__name__)
 
 DIALOG_TITLE = "設定"
 INVALID_MESSAGE = "設定値が正しくないため適用できません。"
+APPLY_FAILED_MESSAGE = "設定を適用できませんでした。"
 
 _PITCH_TOOLTIP = (
     "オン: 速度を変えても音高を維持します。\n"
@@ -63,6 +64,7 @@ class SettingsDialog(QDialog):
         self.setModal(False)
 
         self._applied = settings
+        self._request_succeeded = False
 
         self._rate_spin_box = QDoubleSpinBox(self)
         self._rate_spin_box.setObjectName("settingsPlaybackRateSpinBox")
@@ -139,7 +141,7 @@ class SettingsDialog(QDialog):
 
     @property
     def applied_settings(self) -> AppSettings:
-        """このダイアログが最後に適用要求した（＝開いた時点からの）設定。"""
+        """このダイアログが最後に適用成功通知を受けた設定。"""
         return self._applied
 
     @property
@@ -166,6 +168,16 @@ class SettingsDialog(QDialog):
             level_meter_visible=self._level_meter_check_box.isChecked(),
         )
 
+    def mark_applied(self, settings: AppSettings) -> None:
+        """調停サービスでの適用成功を反映する。"""
+        self._request_succeeded = True
+        self.set_settings(settings)
+
+    def show_apply_error(self, message: str = APPLY_FAILED_MESSAGE) -> None:
+        """調停サービスでの適用失敗を表示し、入力と適用済みsnapshotを維持する。"""
+        self._request_succeeded = False
+        self._show_error(message)
+
     def apply_settings(self) -> bool:
         """入力を検証して適用を要求する。成功したら ``True``。
 
@@ -181,9 +193,12 @@ class SettingsDialog(QDialog):
             self._show_error(INVALID_MESSAGE)
             return False
         self._clear_error()
-        # 同値でも適用済みsnapshotの更新として扱う（通知の抑制は調停側の責務）。
-        self._applied = settings
+        self._request_succeeded = False
         self.settings_requested.emit(settings)
+        if not self._request_succeeded:
+            if not self.error_text:
+                self._show_error(APPLY_FAILED_MESSAGE)
+            return False
         return True
 
     # -- 内部 ---------------------------------------------------------------

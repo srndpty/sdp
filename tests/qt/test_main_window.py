@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QDoubleSpinBox, QLabel, QTableView
+from PySide6.QtWidgets import QCheckBox, QDialogButtonBox, QDoubleSpinBox, QLabel, QTableView
 from pytestqt.qtbot import QtBot
 
 from fakes.fake_playback_backend import FakePlaybackBackend
@@ -458,6 +458,36 @@ def test_settings_dialog_is_not_opened_twice(window: MainWindow) -> None:
     assert len(window.findChildren(SettingsDialog)) == 1
 
 
+def test_reopening_an_open_dialog_keeps_unapplied_edits(window: MainWindow) -> None:
+    """開いているダイアログの再前面化では編集中の全入力を戻さない。"""
+    action = action_of(window, "openSettingsAction")
+    action.trigger()
+    dialog = window.settings_dialog
+    assert dialog is not None
+    rate = dialog.findChild(QDoubleSpinBox, "settingsPlaybackRateSpinBox")
+    waveform = dialog.findChild(QCheckBox, "settingsWaveformVisibleCheckBox")
+    spectrum = dialog.findChild(QCheckBox, "settingsSpectrumVisibleCheckBox")
+    level = dialog.findChild(QCheckBox, "settingsLevelMeterVisibleCheckBox")
+    pitch = dialog.findChild(QCheckBox, "settingsPitchCompensationCheckBox")
+    assert all(value is not None for value in (rate, waveform, spectrum, level, pitch))
+    assert rate is not None
+    assert waveform is not None
+    assert spectrum is not None
+    assert level is not None
+    assert pitch is not None
+    rate.setValue(1.75)
+    pitch.setChecked(False)
+    waveform.setChecked(False)
+    spectrum.setChecked(False)
+    level.setChecked(False)
+    edited = dialog.current_input()
+
+    action.trigger()
+
+    assert window.settings_dialog is dialog
+    assert dialog.current_input() == edited
+
+
 def test_settings_dialog_can_be_reopened_after_closing(window: MainWindow, qtbot: QtBot) -> None:
     """閉じたあとは再度開ける。"""
     action_of(window, "openSettingsAction").trigger()
@@ -498,6 +528,34 @@ def test_dialog_request_is_applied_through_the_mediator(
     assert backend.call_args("set_playback_rate") == [(1.25,)]
     assert app_settings_of(window).settings.waveform_visible is False
     assert not window.waveform_panel.isVisible()
+
+
+def test_failed_dialog_apply_keeps_the_dialog_open(
+    window: MainWindow, backend: FakePlaybackBackend
+) -> None:
+    """Controller適用失敗ではOKでも閉じず、入力と適用済みsnapshotを区別する。"""
+    action_of(window, "openSettingsAction").trigger()
+    dialog = window.settings_dialog
+    assert dialog is not None
+    before = dialog.applied_settings
+    rate = dialog.findChild(QDoubleSpinBox, "settingsPlaybackRateSpinBox")
+    pitch = dialog.findChild(QCheckBox, "settingsPitchCompensationCheckBox")
+    button_box = dialog.findChild(QDialogButtonBox, "settingsButtonBox")
+    assert rate is not None
+    assert pitch is not None
+    assert button_box is not None
+    ok_button = button_box.button(QDialogButtonBox.StandardButton.Ok)
+    assert ok_button is not None
+    rate.setValue(1.25)
+    pitch.setChecked(False)
+    backend.setter_errors["set_pitch_compensation"] = RuntimeError("故障注入")
+
+    ok_button.click()
+
+    assert dialog.isVisible()
+    assert dialog.applied_settings == before
+    assert dialog.current_input().playback_rate == pytest.approx(1.25)
+    assert dialog.error_text == "設定を適用できませんでした。"
 
 
 def test_main_window_does_not_touch_the_settings_file() -> None:

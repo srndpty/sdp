@@ -310,6 +310,68 @@ def test_apply_updates_the_controller_and_notifies_once(
     assert app_settings.settings.waveform_visible is False
 
 
+def test_settings_changed_observes_the_already_applied_controller_values(
+    controller: PlaybackController,
+) -> None:
+    """settings_changed受信時にはControllerとsnapshotが同じ実効値になっている。"""
+    app_settings = make_app_settings(controller)
+    observed: list[tuple[AppSettings, float, bool, AppSettings]] = []
+
+    def record(value: object) -> None:
+        assert isinstance(value, AppSettings)
+        observed.append(
+            (
+                value,
+                controller.playback_rate,
+                controller.pitch_compensation,
+                app_settings.settings,
+            )
+        )
+
+    app_settings.settings_changed.connect(record)
+
+    app_settings.apply(AppSettings(1.25, False, waveform_visible=False))
+
+    assert observed == [(app_settings.settings, 1.25, False, app_settings.settings)]
+
+
+def test_apply_uses_the_controller_effective_readback(
+    controller: PlaybackController, backend: FakePlaybackBackend
+) -> None:
+    """Backendが補正した実効値を、要求値ではなく最終snapshotへ採用する。"""
+    app_settings = make_app_settings(controller)
+    backend.effective_playback_rate = 1.4
+    notified: list[object] = []
+    app_settings.settings_changed.connect(notified.append)
+
+    app_settings.apply(AppSettings(1.5, True, spectrum_visible=False))
+
+    assert controller.playback_rate == pytest.approx(1.4)
+    assert app_settings.settings.playback_rate == pytest.approx(1.4)
+    assert app_settings.settings.spectrum_visible is False
+    assert notified == [app_settings.settings]
+
+
+def test_second_setter_failure_does_not_publish_or_keep_a_partial_apply(
+    controller: PlaybackController, backend: FakePlaybackBackend
+) -> None:
+    """pitch適用失敗時はrateを戻し、未適用snapshotを保存通知しない。"""
+    app_settings = make_app_settings(controller)
+    before = app_settings.settings
+    notified: list[object] = []
+    app_settings.settings_changed.connect(notified.append)
+    backend.setter_errors["set_pitch_compensation"] = RuntimeError("故障注入")
+
+    with pytest.raises(RuntimeError, match="故障注入"):
+        app_settings.apply(AppSettings(1.25, False, waveform_visible=False))
+
+    assert app_settings.settings == before
+    assert notified == []
+    assert controller.playback_rate == pytest.approx(1.0)
+    assert controller.pitch_compensation is True
+    assert backend.call_args("set_playback_rate") == [(1.25,), (1.0,)]
+
+
 def test_apply_of_the_same_settings_does_not_notify(
     controller: PlaybackController, backend: FakePlaybackBackend
 ) -> None:
@@ -388,6 +450,20 @@ def test_shutdown_stops_mirroring(controller: PlaybackController) -> None:
     controller.set_playback_rate(1.75)
 
     assert app_settings.settings.playback_rate == pytest.approx(1.0)
+
+
+def test_shutdown_rejects_apply(controller: PlaybackController) -> None:
+    """shutdown後はapplyも設定とControllerを変更できない。"""
+    app_settings = make_app_settings(controller)
+    before = app_settings.settings
+    app_settings.shutdown()
+
+    with pytest.raises(RuntimeError, match="shutdown後"):
+        app_settings.apply(AppSettings(1.5, False, waveform_visible=False))
+
+    assert app_settings.settings == before
+    assert controller.playback_rate == pytest.approx(1.0)
+    assert controller.pitch_compensation is True
 
 
 def test_session_saves_visualization_changes(

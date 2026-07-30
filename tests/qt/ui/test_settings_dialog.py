@@ -20,7 +20,7 @@ from shiboken6 import isValid
 
 from sdp.core.playback.preferences import MAX_PLAYBACK_RATE, MIN_PLAYBACK_RATE
 from sdp.services.settings import AppSettings
-from sdp.ui.settings_dialog import INVALID_MESSAGE, SettingsDialog
+from sdp.ui.settings_dialog import APPLY_FAILED_MESSAGE, INVALID_MESSAGE, SettingsDialog
 
 CURRENT = AppSettings(
     playback_rate=1.25,
@@ -60,7 +60,13 @@ def button(dialog: SettingsDialog, standard: QDialogButtonBox.StandardButton) ->
 
 def requests_of(dialog: SettingsDialog) -> list[object]:
     received: list[object] = []
-    dialog.settings_requested.connect(received.append)
+
+    def apply_successfully(value: object) -> None:
+        received.append(value)
+        if isinstance(value, AppSettings):
+            dialog.mark_applied(value)
+
+    dialog.settings_requested.connect(apply_successfully)
     return received
 
 
@@ -241,6 +247,20 @@ def test_applying_the_same_values_still_requests_once(dialog: SettingsDialog) ->
     assert received == [CURRENT]
 
 
+def test_failed_request_is_not_marked_as_applied(dialog: SettingsDialog) -> None:
+    """調停側が成功通知しなければ適用済みsnapshotを更新しない。"""
+    received: list[object] = []
+    dialog.settings_requested.connect(received.append)
+    spin_box(dialog).setValue(1.5)
+
+    assert dialog.apply_settings() is False
+
+    assert len(received) == 1
+    assert dialog.applied_settings == CURRENT
+    assert spin_box(dialog).value() == pytest.approx(1.5)
+    assert dialog.error_text == APPLY_FAILED_MESSAGE
+
+
 def test_set_settings_refreshes_the_inputs(dialog: SettingsDialog) -> None:
     """外部で設定が変わった場合も、開き直しで現在値へ揃う。"""
     dialog.set_settings(AppSettings(0.5, True, False, False, False))
@@ -300,6 +320,12 @@ def test_error_is_cleared_after_a_successful_apply(
     monkeypatch.setattr(dialog, "current_input", invalid_input)
     dialog.apply_settings()
     monkeypatch.undo()
+
+    def apply_successfully(value: object) -> None:
+        assert isinstance(value, AppSettings)
+        dialog.mark_applied(value)
+
+    dialog.settings_requested.connect(apply_successfully)
 
     assert dialog.apply_settings() is True
     assert dialog.error_text == ""

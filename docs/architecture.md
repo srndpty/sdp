@@ -1098,7 +1098,8 @@ Mutagen による非同期メタデータ取得と表示（P2-D）。
 ### 9.2 schema version 1 → 2 の移行
 
 - **version 1 と 2 の両方を有効な入力として読み込む。** version 1 には可視化設定が
-  ないため、3項目とも既定値（表示ON）で補う。
+  ないため、3項目とも既定値（表示ON）で補う。v1文書に同名のv2キーが混入していても
+  未知キーとして無視し、値の検証や復元には使わない。
 - **読み込みだけではファイルを書き換えない。** version 1 で起動しても、次に
   設定が変わって通常の保存契機が来たときに初めて version 2 として保存する。
 - 未知の将来versionは version 2 として上書きせず、復元エラーとして扱う
@@ -1108,11 +1109,15 @@ Mutagen による非同期メタデータ取得と表示（P2-D）。
 
 `services/settings.py`。適用済み設定のsnapshotを1か所で持つ小さなQObject。
 
-- `apply(settings)` は検証してから**差分のある項目だけ**適用し、同値なら通知しない。
+- `apply(settings)` は検証してから**差分のある項目だけ**Controllerへ適用する。適用中の
+  Controller echoは集約し、全setter成功後に実効値を読み戻してsnapshotを1回だけ公開する。
+  途中で失敗した場合はControllerを直前値へ可能な限り戻し、未適用snapshotを公開・保存しない。
+  同値なら通知しない。
 - 再生速度とピッチ補正は`PlaybackController`へ適用する。可視化の表示ON/OFFは
   `settings_changed` で公開するだけで、**どのWidgetをどう隠すかは知らない**。
 - SpeedPanelやショートカット経由でControllerが直接変更された場合もsnapshotへ
   追従させ、保存対象を1か所に保つ（可視化設定は再生操作で失われない）。
+- shutdownは終端操作とし、以後のController通知を無視して`apply()`も拒否する。
 - JSON読み書き、QDialog、Backend具体型、PCM解析、FFT／レベル計算、プレイリスト操作は
   持たない。`SettingsSession`はこのsnapshotだけを見て保存する。
 
@@ -1126,17 +1131,19 @@ objectNameは`settingsDialog`、各入力は`settingsPlaybackRateSpinBox`、
 | 操作 | 意味 |
 |---|---|
 | 開いた時点 | 現在の**適用済み設定snapshot**を各入力へ反映する |
-| Apply | 検証 → 適用要求 → 適用済みsnapshot更新。**閉じない** |
-| OK | Applyと同じ処理のあとに閉じる |
+| Apply | 検証 → 適用要求 → **成功通知後だけ**適用済みsnapshot更新。閉じない |
+| OK | Applyと同じ処理が成功した場合だけ閉じる。失敗時は入力を維持してエラー表示 |
 | Cancel / Esc | **Apply後の変更は戻さず**、未適用の編集だけを破棄して閉じる |
 
 - ダイアログは設定ファイルもschema versionもPlaybackControllerも知らない。
-  `settings_requested` で要求を出すだけで、適用は調停サービスが行う。
+  `settings_requested` で要求を出し、MainWindowから`mark_applied`／`show_apply_error`で
+  結果だけを受け取る。適用そのものは調停サービスが行う。
 - 通常操作ではWidget制約により不正値にならないが、プログラム経由で不正値が入った
   場合は適用せず、ダイアログ内へ短いエラーを表示する（例外を外へ漏らさない）。
   不正なままOKしても閉じない。
 - MainWindowはツールメニューの「設定...」でダイアログを開き、**同時に2つ開かない**
-  （開いていれば前面へ出す）。JSON処理、schema version分岐、保存タイマー、
+  （開いていれば入力を再設定せず前面へ出し、未適用編集を維持する）。開いている間の
+  外部設定変更は編集中入力へ自動反映しない。JSON処理、schema version分岐、保存タイマー、
   設定項目ごとの巨大な分岐はMainWindowへ持ち込まない。
 
 ### 9.5 可視化の表示ON/OFF（P6-A）

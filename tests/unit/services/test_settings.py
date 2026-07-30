@@ -149,6 +149,23 @@ def test_version_one_fills_visualization_defaults(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize("value", [False, 1])
+def test_version_one_ignores_version_two_visibility_keys(tmp_path: Path, value: object) -> None:
+    """v1ではv2キーを未知キーとして無視し、値の型にも影響されない。"""
+    path = tmp_path / "settings.json"
+    write_document(
+        path,
+        {
+            "schema_version": 1,
+            "playback_rate": 1.0,
+            "pitch_compensation": True,
+            "waveform_visible": value,
+        },
+    )
+
+    assert load_settings(path, DEFAULTS).waveform_visible is True
+
+
 def test_loading_version_one_does_not_rewrite_the_file(tmp_path: Path) -> None:
     """読み込みだけではversion 1のファイルを書き換えない。"""
     path = tmp_path / "settings.json"

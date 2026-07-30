@@ -86,10 +86,14 @@ def load_settings(file_path: Path, defaults: AppSettings) -> AppSettings:
     pitch = _bool_from_json(
         "pitch_compensation", document.get("pitch_compensation", defaults.pitch_compensation)
     )
-    visibility = {
-        name: _bool_from_json(name, document.get(name, getattr(defaults, name)))
-        for name in _VISIBILITY_FIELDS
-    }
+    if version == 1:
+        # v2のキーが未知キーとして混入していても、v1の意味へ影響させない。
+        visibility = {name: getattr(defaults, name) for name in _VISIBILITY_FIELDS}
+    else:
+        visibility = {
+            name: _bool_from_json(name, document.get(name, getattr(defaults, name)))
+            for name in _VISIBILITY_FIELDS
+        }
     return AppSettings(playback_rate=rate, pitch_compensation=pitch, **visibility)
 
 
@@ -170,6 +174,7 @@ class AppSettingsController(QObject):
         super().__init__(parent)
         self._playback = playback
         self._shutdown = False
+        self._applying = False
         self._settings = AppSettings(
             playback_rate=playback.playback_rate,
             pitch_compensation=playback.pitch_compensation,
@@ -183,16 +188,33 @@ class AppSettingsController(QObject):
         return self._settings
 
     def apply(self, settings: AppSettings) -> None:
-        """検証してから差分のある項目だけ適用する（同値なら通知もしない）。"""
+        """Controller適用成功後に実効値を1回だけ公開する（同値なら通知しない）。"""
+        if self._shutdown:
+            raise RuntimeError("shutdown後のAppSettingsControllerへ設定は適用できません")
         validate_settings(settings)
         if settings == self._settings:
             return
-        # 先にsnapshotを確定させ、Controllerからのechoで二重通知しない。
-        self._set_settings(settings)
-        if settings.playback_rate != self._playback.playback_rate:
-            self._playback.set_playback_rate(settings.playback_rate)
-        if settings.pitch_compensation != self._playback.pitch_compensation:
-            self._playback.set_pitch_compensation(settings.pitch_compensation)
+        previous_rate = self._playback.playback_rate
+        previous_pitch = self._playback.pitch_compensation
+        self._applying = True
+        try:
+            if settings.playback_rate != previous_rate:
+                self._playback.set_playback_rate(settings.playback_rate)
+            if settings.pitch_compensation != previous_pitch:
+                self._playback.set_pitch_compensation(settings.pitch_compensation)
+        except Exception:
+            # 2項目目の失敗で1項目目だけ残さない。rollback失敗は記録し、元の例外を再送出する。
+            self._restore_playback(previous_rate, previous_pitch)
+            raise
+        finally:
+            self._applying = False
+
+        applied = replace(
+            settings,
+            playback_rate=self._playback.playback_rate,
+            pitch_compensation=self._playback.pitch_compensation,
+        )
+        self._set_settings(applied)
 
     def shutdown(self) -> None:
         """Controller監視を解除する（冪等）。"""
@@ -210,11 +232,26 @@ class AppSettingsController(QObject):
 
     @Slot(float)
     def _on_playback_rate_changed(self, value: float) -> None:
+        if self._shutdown or self._applying:
+            return
         self._set_settings(replace(self._settings, playback_rate=float(value)))
 
     @Slot(bool)
     def _on_pitch_compensation_changed(self, value: bool) -> None:
+        if self._shutdown or self._applying:
+            return
         self._set_settings(replace(self._settings, pitch_compensation=bool(value)))
+
+    def _restore_playback(self, playback_rate: float, pitch_compensation: bool) -> None:
+        """適用途中の失敗後、Controllerを直前の値へ可能な限り戻す。"""
+        for name, restore in (
+            ("ピッチ補正", lambda: self._playback.set_pitch_compensation(pitch_compensation)),
+            ("再生速度", lambda: self._playback.set_playback_rate(playback_rate)),
+        ):
+            try:
+                restore()
+            except Exception:
+                _logger.exception("設定適用失敗後に%sを元へ戻せませんでした", name)
 
     def _set_settings(self, settings: AppSettings) -> None:
         if settings == self._settings:

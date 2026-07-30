@@ -210,7 +210,6 @@ class MainWindow(QMainWindow):
         """設定ダイアログを開く。既に開いていれば前面へ出す（二重に開かない）。"""
         dialog = self._settings_dialog
         if dialog is not None:
-            dialog.set_settings(self._app_settings.settings)
             dialog.show()
             dialog.raise_()
             dialog.activateWindow()
@@ -268,10 +267,17 @@ class MainWindow(QMainWindow):
             return
         try:
             self._app_settings.apply(settings)
-        except ValueError:
-            # ダイアログ側でも検証済み。ここへ来るのは想定外だが再生は止めない。
+        except Exception:
+            # Qt slot境界から例外を漏らさず、ダイアログを閉じない。
             _logger.exception("設定を適用できませんでした")
             self.show_status_message("設定を適用できませんでした。")
+            dialog = self._settings_dialog
+            if dialog is not None:
+                dialog.show_apply_error()
+            return
+        dialog = self._settings_dialog
+        if dialog is not None:
+            dialog.mark_applied(self._app_settings.settings)
 
     def _on_settings_dialog_finished(self, result: int) -> None:
         del result
