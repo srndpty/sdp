@@ -20,9 +20,12 @@ P6-A／P6-Bの実画面受け入れは完了しており、**P6-Cの実画面受
 
 P7-A（起動引数と単一instance）は実装・自動テスト済み。
 実際のPowerShell間転送とWindowsの前面化制約については手動受け入れが未完了。
-P7-B1（PyInstaller onedir配布ビルド）は実装・自動スモーク済み。
-配布版での実画面・実音、全対応形式、Windows Defenderによる手動受け入れと、
-Qtの外部配布ライセンス監査は未完了。インストーラーと関連付けはP7-B2で扱う。
+P7-B1（PyInstaller onedir配布ビルド）とP7-B2（配布版の実環境検証とZIPリリース生成）は
+実装・自動検証済み。配布版で6形式の実decode、ZIP展開後の起動、read-only配置、
+Defenderスキャンまで確認した。実音・実画面の受け入れ（可聴再生、150%DPI、SmartScreen、
+クリーン環境）と外部配布ライセンスの未解決事項は残っており、
+**外部公開可能な配布物とは扱わない**（[docs/distribution-licenses.md](./docs/distribution-licenses.md)）。
+インストーラーと関連付けはP7-Cで扱う。
 
 `uv run python -m sdp` でウィンドウが起動し、次の操作ができる。
 
@@ -302,9 +305,50 @@ dist\sdp\sdp.exe --selftest
 一時WAVも必ず削除する。終了コードは成功`0`、依存／書き込み失敗`1`、不正なCLI指定`2`である。
 ファイルpathとの併用は不正指定として扱う。
 
-配布物には`LICENSE`、`THIRD_PARTY_NOTICES.txt`、各wheelが提供するライセンス原文を
-`_internal\licenses`以下へ収録する。ただしP7-B1は開発・個人評価用であり、Qt/PySide6を外部配布する
-ためのライセンス条件確認は未完了である。外部へ公開する前に必ず監査すること。
+配布物ルート（`sdp.exe`と同じ階層）へ`LICENSE`と`THIRD_PARTY_NOTICES.txt`を置き、
+各wheelが提供するライセンス原文を`_internal\licenses`以下へ収録する。
+**外部配布のライセンス条件はまだ解決していない。** 何が揃っていて何が未解決かは
+[docs/distribution-licenses.md](./docs/distribution-licenses.md)にまとめ、
+`uv run python tools/license_audit.py dist\sdp`で機械的に検査できる。
+
+## ZIPリリースの作成（P7-B2）
+
+```powershell
+pwsh -File scripts/build-release.ps1
+```
+
+build → layout検査 → package smoke → ライセンス資料検査 → ZIP作成 →
+**別の一時ディレクトリへ展開して layout・selftest・codec test を再実行** →
+SHA-256とmanifest生成、までを1コマンドで行う。途中で失敗した場合、不完全なarchiveを
+`release\`へ残さない。生成物は次の3つ。
+
+```text
+release/
+├─ sdp-0.0.1-windows-x64.zip
+├─ sdp-0.0.1-windows-x64.zip.sha256
+└─ sdp-0.0.1-windows-x64.manifest.json
+```
+
+ZIPは`sdp/`という単一のフォルダーを含む。**フォルダーごと展開して使うこと**
+（`sdp.exe`だけを取り出すと`_internal`が無く起動しない）。manifestにはversion、
+architecture、ファイル数、内容のSHA-256、runtime version、同梱pluginを記録する。
+ユーザー名やビルド環境の絶対pathは含めない。
+
+## 配布版のdecode検査（--codec-test）
+
+```powershell
+dist\sdp\sdp.exe --codec-test "C:\path\song.wav" "C:\path\song.mp3"
+```
+
+指定した音源を実際に`QAudioDecoder`でPCMへ展開し、**bufferが1件以上・frame数・
+sample rate・channel数がすべて正**であることを確認する。metadataが読めただけでは
+成功にしない。Windowも音も出さず、単一instance IPCも設定ファイルも作らない。
+1件でも失敗すると終了コード`1`になり、一部が失敗しても残りは必ず検査する。
+検査用の音源は配布物へ同梱しないため、pathの指定は必須である。
+
+この環境（Windows 11 build 26200 / PySide6 6.10.3 / FFmpeg n7.1.3）では、配布版で
+**WAV・MP3・FLAC・Ogg Vorbis・Opus・M4A(AAC)の6形式すべてが実decodeに成功**した。
+可聴再生・音声デバイス依存の挙動は別途手動で確認する。
 
 PySide6 6.10.3の標準hookによる実測では、QtのFFmpeg backendとWindows Media Foundation
 backend、FFmpeg runtime DLLが配布物へ入る。Qt 6ではFFmpeg backendが既定で、Windows

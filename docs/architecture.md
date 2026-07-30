@@ -1446,11 +1446,64 @@ layout検査はFFmpeg／Windows media plugin、FFmpeg runtime DLL、VC Runtime�
 project／Python／PySide6／NumPy／Mutagen／PyInstallerのライセンス文書を必須にする。specも
 必須ライセンス原文をwheelから検出できない場合はbuildを失敗させ、欠落した配布物を作らない。
 
-### 12.2 P7-B2以降
+layout検査は、利用者がZIP展開直後に読める位置（`sdp.exe`と同じ階層）の`LICENSE`と
+`THIRD_PARTY_NOTICES.txt`も必須にする。specはCOLLECT後にこの2つを配布物ルートへ複製する
+（PyInstallerのdatasは`_internal`へ入るため）。原文一式は`_internal/licenses/`に残す。
 
-Inno Setupのper-user installer、ファイル関連付け、アプリアイコン、Windows version resource、
-コード署名はP7-B1に含めない。Qt/PySide6の外部配布条件と必要文書も、installer公開前に
-採用ライセンスに基づいて監査する。
+### 12.2 配布版のdecode検査（P7-B2）
+
+`--selftest`が「Qt依存と書き込み先が揃っているか」を見るのに対し、`--codec-test`は
+**指定された音源を実際にPCMへdecodeできるか**だけを見る。CLIは独立モードとし、
+`--selftest`との併用と、pathを伴わない指定を拒否する。
+
+- 成功条件: source設定成功、decoderのerrorなし、期間内のfinished、有効bufferが1件以上、
+  frame数・sample rate・channel数がいずれも正。**metadataが読めただけでは成功にしない。**
+- Windowを表示せず、音を鳴らさず、単一instance IPCを開始せず、settings／playlist／
+  ui-state／波形cacheを作らない。
+- 一部が失敗しても全件を試し、形式ごとの可否を1回で把握できるようにする。終了コードは
+  成功`0`、decode失敗`1`、CLI不正`2`。
+- **検査用の音源は製品配布物へ同梱しない。** 呼び出し側がpathを渡す
+  （`scripts/build-release.ps1`は`assets/test_audio`から渡し、無い形式は警告して
+  「未検証」と記録する）。
+
+### 12.3 ZIPリリースの生成（P7-B2）
+
+`scripts/build-release.ps1`が build → layout → package smoke → ライセンス資料検査 →
+ZIP → **展開後の layout・selftest・codec test** → SHA-256 → manifest を通しで行う。
+失敗時は`release/`へ不完全なarchiveを残さない。ZIPは`sdp/`単一rootで、
+展開直後にそのまま実行できる構成にする。
+
+`sdp/release_manifest.py`（Qt非依存）がmanifestを組み立てる。
+
+- key順を固定し、**timestampを持たない**（同一入力なら同一JSON）。
+- ファイル列挙はPOSIX相対path昇順でlocaleに依存させない。
+- `content_sha256`は「相対pathと中身」だけから決まるため、mtimeやZIPの圧縮方法に
+  左右されない。再現性の確認にはこれを使う。
+- username・home・repositoryの絶対pathを含めない（`find_local_paths`で機械検査する）。
+- pluginはload-bearingなもの（platform／multimedia）だけを記録し、DLLを全列挙しない。
+
+**再現性の範囲**: 同一commit・同一環境で2回buildすると、ファイル集合・ファイル数・
+合計サイズ・runtime version・plugin一覧・`_internal`配下の全ファイル内容は一致する。
+一方で`sdp.exe`と`_internal/base_library.zip`はPyInstallerが埋め込むbuild時刻等により
+bit単位では一致せず、その結果ZIP自体のSHA-256も一致しない。bit-for-bitの再現は
+P7-B2の要件にしない。
+
+### 12.4 ライセンス資料の検査（P7-B2）
+
+`packaging/licenses-manifest.json`へ「配布物に実際に含まれるコンポーネント」と
+「同梱している原文」を宣言し、`sdp/license_audit.py`が2種類を区別して報告する。
+
+- **error**: 宣言した原文が配布物に無い（機械的な不備。build-releaseを失敗させる）
+- **unresolved**: 原文追加や配布形態の判断が残っている（人が決める事項）
+
+未解決が残るあいだは「外部配布可能」と結論づけない。詳細と根拠は
+[distribution-licenses.md](./distribution-licenses.md)。
+
+### 12.5 P7-C以降
+
+Inno Setupのper-user installer、ファイル関連付け、スタートメニュー、アプリアイコン、
+Windows version resource、コード署名はP7-B2に含めない。**ライセンスの未解決事項が
+残っている間は、installerも技術検証用に留め、公開可能な配布物として扱わない。**
 
 ---
 

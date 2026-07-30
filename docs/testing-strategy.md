@@ -506,8 +506,78 @@ pluginとavcodec DLLを1件ずつ退避し、どちらもselftestが終了コー
 - [ ] Windows Defenderのスキャン結果と初回起動警告を記録する
 - [ ] `dist/sdp`をZIP化・展開してもselftestとGUI起動が成功する
 
-自動selftestは圧縮形式のdecodeと可聴音、Windows foreground制約、Defender、DPI、
+自動selftestは可聴音、Windows foreground制約、SmartScreen、DPI、
 外部配布ライセンス遵守を証明しない。これらはrelease前の独立した手動ゲートとする。
+圧縮形式のdecodeはP7-B2の`--codec-test`が配布版で検査する。
+
+## 6.17 P7-B2 配布版の実環境検証とZIPリリース
+
+自動検証は次を担保する。
+
+- **CLI**: `--codec-test`のpath必須・複数path・`--selftest`との排他・未知option・
+  通常player pathとの非混同・終了コード（成功0／decode失敗1／CLI不正2）。
+- **codec test**: 同梱テスト音源6形式（WAV／MP3／FLAC／Ogg Vorbis／Opus／M4A）の実decode、
+  buffer数・frame数・sample rate・channel countの検査、metadataだけの成功を認めないこと、
+  壊れたファイル・存在しないファイル・timeoutの失敗、一部失敗でも全件を試すこと、
+  Window・IPC・設定ファイル・一時ファイルを残さないこと。
+- **manifest**: schema version、version、architecture正規化、runtime version、plugin一覧、
+  絶対path・username非混入、key順の固定、mtimeに依存しない内容hash、JSON往復。
+- **archive**: archive名、ZIP内root、traversal拒否、必須ファイル、SHA-256、
+  展開後のlayout・selftest・codec test（`scripts/build-release.ps1`が実行）。
+- **ライセンス資料**: 実`packaging/licenses-manifest.json`が読めること、宣言した原文が
+  配布物に存在すること、未解決事項を解決済みと誤記していないこと。
+
+```powershell
+pwsh -File scripts/build-release.ps1
+uv run python tools/license_audit.py dist/sdp
+```
+
+### 実測（Windows 11 build 26200 / PySide6 6.10.3 / Qt 6.10.3 / FFmpeg n7.1.3）
+
+| 項目 | 結果 |
+|---|---|
+| 配布版codec test | WAV／MP3／FLAC／Ogg Vorbis／Opus／M4A の6形式すべて成功（exit 0） |
+| ZIP展開後のselftest／codec test | いずれも成功 |
+| read-only配置（Deny Write ACL） | selftest・codec testとも成功。配置先へ生成物なし |
+| ユーザーdata書き込み先 | `LOCALAPPDATA`配下のみ（`sdp/logs/sdp.log`、GUI起動時は`playlist.json`／`ui-state.json`） |
+| repository外からのGUI起動 | Window表示・正常終了・残プロセスなし |
+| Defender（engine 1.1.26060.3008 / signature 1.455.422.0 / 2026-07-30） | ZIPとdist/sdpのquick scanで検出0件、quarantineなし |
+| package | 330ファイル / 162.6 MiB（ZIP 67.7 MiB） |
+| build時間 | onedir build 約56〜68秒、release全体 約69〜97秒 |
+| 再現性 | 2回buildでファイル集合・数・サイズ・runtime・pluginが一致。`sdp.exe`と`base_library.zip`はbuild時刻埋め込みのため不一致で、ZIP hashも不一致 |
+
+### 手動ゲート（未完了）
+
+配布版で次を実画面・実音で確認する。**最初は音量を下げて始めること。**
+
+- [ ] repository外へZIPを展開して起動できる
+- [ ] WAV／MP3／FLAC／M4Aを可聴再生できる
+- [ ] pause／resume／seek／volume／mute
+- [ ] 0.5／1.0／2.0倍、pitch補正ON／OFF
+- [ ] Repeat ONE／ALL、Shuffle、曲終了時の次曲遷移
+- [ ] 出力デバイスを切断してもクラッシュしない
+- [ ] 波形解析が完了し、再生位置に追従する
+- [ ] Spectrumが実音に反応する
+- [ ] Peak／RMSが左右別に反応する
+- [ ] pauseで更新が止まり、source変更で旧表示が残らない
+- [ ] 可視化3つのON/OFFと、全OFF時のCPU低下、再表示での復帰
+- [ ] 10分再生後もメモリが増え続けず、終了後にprocessが残らない
+- [ ] 100%／150%（可能なら200%）DPIでMainWindow・SettingsDialog・playlist列・
+      波形・Spectrum・Level meter・Splitter復元・最小サイズ・status bar・
+      QFileDialog・最大化／最小化が破綻しない
+- [ ] 長い日本語タイトルでレイアウトが広がらない
+- [ ] 日本語ユーザー名・空白入りpath・長いpathで動作する
+- [ ] SmartScreenの表示有無（未署名のためMOTW付きでは警告が出る想定。実機で記録する）
+- [ ] Windows Sandbox／Python未導入VM／新規ユーザーのいずれかで起動・再生・保存・再起動
+      （**未実施。実施するまで「Python未導入環境対応済み」とは記載しない**）
+
+## 6.18 手動リリースゲート（ZIP配布）
+
+- [ ] `scripts/build-release.ps1`が成功する
+- [ ] SHA-256が`release/*.sha256`と一致する
+- [ ] manifestのversion・runtime・pluginが期待どおり
+- [ ] `docs/distribution-licenses.md`の未解決事項が更新されている
+- [ ] 未解決のライセンス事項がある間は外部公開しない
 
 ## 7. 手動チェックリスト（リリース前）
 
