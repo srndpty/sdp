@@ -332,7 +332,8 @@ Windows上の手動受け入れを残している。P7-B（パッケージと関
 - **目的**: WIN-01〜05。
 - **P7-A進捗**: 実装・自動テスト済み、実Windowの手動受け入れ未完了。
   `LaunchRequest`、version付き・256KiB上限のlocal IPC、primary／secondary／stale判定、
-  初回および実行中のplaylist末尾追加、前面化要求、終了時解放を実装した。
+  composition構築中の受理queue、初回および実行中のplaylist末尾追加、
+  引数なしを含む前面化要求、終了時解放を実装した。
 - **P7-B変更候補**: `src/sdp/services/win_integration.py`、
   `src/sdp/__main__.py`（`--selftest`）、
   `packaging/{sdp.spec,installer.iss}`、`docs/testing-strategy.md`（手動チェックリスト）

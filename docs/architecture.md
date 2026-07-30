@@ -1352,13 +1352,15 @@ objectNameは`settingsDialog`、各入力は`settingsPlaybackRateSpinBox`、
 ### 10.1 起動要求
 
 `services.launch_request.LaunchRequest` はQt非依存のimmutableな値オブジェクトで、
-絶対パスのtupleと無視した引数を持つ。OSが分割済みの`argv`を受け取るため、
+絶対パスのtuple、無視した引数、前面化意図の`activate_window`を持つ。
+OSが分割済みの`argv`を受け取るため、
 引用符の再解釈は行わない。相対パスは`QApplication`構築前に取得した起動時の
 current directory基準で絶対化し、指定順と重複を保つ。
 
-既存の`PlaylistModel.add_paths()`契約と合わせ、欠損パスと未知拡張子は受理し、
-ディレクトリとPathに変換できない引数だけを無視する。そのため一部が無効でも、
-残りの要求はプレイリスト末尾へ追加できる。
+起動引数解析で`resolve()`、`stat()`、`is_dir()`などのファイルシステムI/Oを行わない。
+既存の`PlaylistModel.add_paths()`契約と合わせ、欠損パス、未知拡張子、
+ディレクトリも受理する。ファイルでないpathはプレイリスト側で欠損として扱う。
+Pathに変換できない引数だけを無視する。
 
 ### 10.2 IPCと競合防止
 
@@ -1367,10 +1369,13 @@ current directory基準で絶対化し、指定順と重複を保つ。
 - server名はユーザー、home、Windows domain、session識別子をSHA-256で短縮した
   `sdp-<24 hex>`。Qtの`UserAccessOption`も指定し、別ユーザーsessionや別アプリとの衝突を避ける。
 - wire formatは`4-byte big-endian payload length + UTF-8 JSON`。JSONは
-  `{"version": 1, "paths": [...], "ignored_arguments": [...]}`とする。payload上限は
+  `{"version": 1, "paths": [...], "ignored_arguments": [...], "activate_window": true}`とする。payload上限は
   **256KiB**で、受信側と送信側の両方で拒否する。受信bufferは部分受信を蓄積し、
   1socket上の連続messageを個別に処理する。不正JSONと未知versionはログに残して無視する。
-- primaryが正当な要求をSignalへ発行した後に1-byteの受理確認を返す。
+- primaryは専用`QThread`でlistenとframe検証を開始し、composition構築中の要求も
+  内部queueへ受理する。Windowとhandlerの準備後に`start_delivery()`でGUI通知を開始する。
+- primaryが検証済み要求を内部queueへ追加した後に1-byteの受理確認を返す。
+  ACKが保証するのは**primary queueへの受理**であり、playlist適用やWindow前面化の成功ではない。
   secondaryはこれを待ってから終了するため、単なるsocket接続を転送成功と誤判定しない。
 - 接続できなければ排他lockを試み、所有できたprocessだけがlistenする。
   lock取得後に残っているendpoint、またはQtがPID消滅等でstaleと確認したlockだけを除去する。
@@ -1383,11 +1388,12 @@ current directory基準で絶対化し、指定順と重複を保つ。
 3. secondaryは受理確認後にevent loopもcompositionも作らず終了する。
 4. primaryは設定と保存済みplaylistを復元し、初回起動引数をその末尾へ追加する。
    追加だけで自動再生はしない。
-5. Windowを表示した後に受信Signalを`LaunchRequestHandler`へ接続し、pending接続も回収する。
-6. 転送要求は同じWindowとPlaylistModelの末尾へ追加する。有効なpathがあれば、
+5. primaryのIPC threadはlisten直後から要求をqueueへ受理し、composition構築中でもACKを返す。
+6. Window表示後に受信Signalを`LaunchRequestHandler`へ接続し、`start_delivery()`でqueueを1回だけ適用する。
+7. 転送要求は同じWindowとPlaylistModelの末尾へ追加する。`activate_window=True`ならpathの有無にかかわらず、
    最小化flagだけを外し、`show()` / `raise_()` / `activateWindow()`を試みる。
    最大化flagは維持し、OS制約でactiveにできなければ`QApplication.alert()`を要求する。
-7. shutdownの最初にSignalを切断し、socket、server endpoint、lockを解放する。
+8. shutdownの最初にSignalを切断し、socket、server thread、endpoint、lockを解放する。
    その失敗で他の保存・解放カテゴリを飛ばさない。
 
 ---

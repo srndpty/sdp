@@ -27,7 +27,7 @@ class LaunchRequestHandler(QObject):
 
     def apply_initial(self, request: LaunchRequest) -> None:
         """保存済みplaylist復元後の初回要求を適用する。前面化は行わない。"""
-        self._apply(request, activate=False)
+        self._apply(request, initial=True)
 
     @Slot(object)
     def handle_received(self, value: object) -> None:
@@ -35,9 +35,9 @@ class LaunchRequestHandler(QObject):
         if not isinstance(value, LaunchRequest):
             _logger.error("LaunchRequest以外の受信通知を拒否しました: %r", type(value))
             return
-        self._apply(value, activate=True)
+        self._apply(value, initial=False)
 
-    def _apply(self, request: LaunchRequest, *, activate: bool) -> None:
+    def _apply(self, request: LaunchRequest, *, initial: bool) -> None:
         if request.ignored_arguments:
             _logger.warning(
                 "起動引数のうち%d件を無視しました: %r",
@@ -50,10 +50,10 @@ class LaunchRequestHandler(QObject):
             if request.ignored_arguments:
                 message += f" {len(request.ignored_arguments)}件の引数を無視しました。"
             self._window.show_status_message(message)
-            if activate:
-                self._activate_window()
         elif request.ignored_arguments:
             self._window.show_status_message("追加できるファイルがありませんでした。")
+        if not initial and request.activate_window:
+            self._activate_window()
 
     def _activate_window(self) -> None:
         state = self._window.windowState()

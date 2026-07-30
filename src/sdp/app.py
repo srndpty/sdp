@@ -244,7 +244,7 @@ def run(argv: list[str] | None = None, *, server_name: str | None = None) -> int
     composition.window.show()
     # Window表示後からIPC要求を同じcompositionへ適用する。
     single_instance.request_received.connect(composition.launch_handler.handle_received)
-    single_instance.start_accepting()
+    single_instance.start_delivery()
     # 表示で生じるmove／resizeを「ユーザー変更」として保存しないよう、show後に監視を始める。
     composition.ui_state_session.start()
     exit_code = app.exec()

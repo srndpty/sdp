@@ -22,6 +22,13 @@ def test_request_rejects_relative_paths() -> None:
         LaunchRequest((Path("relative.wav"),))
 
 
+@pytest.mark.parametrize("value", [0, 1, None, "true"])
+def test_request_requires_strict_activate_window_bool(value: object) -> None:
+    """Window前面化意図はbool相当値を暗黙に受理しない。"""
+    with pytest.raises(TypeError, match="activate_window"):
+        LaunchRequest(activate_window=value)  # type: ignore[arg-type]
+
+
 def test_no_arguments_is_a_normal_empty_request(tmp_path: Path) -> None:
     """引数なしはエラーではなく空要求になる。"""
     assert parse_launch_request([], tmp_path) == LaunchRequest()
@@ -74,16 +81,30 @@ def test_unknown_extension_is_not_rejected(tmp_path: Path) -> None:
     assert parse_launch_request([str(path)], tmp_path).paths == (path,)
 
 
-def test_directory_is_ignored_without_rejecting_valid_files(tmp_path: Path) -> None:
-    """ディレクトリだけを除外し、同じ要求の有効パスは残す。"""
+def test_directory_is_left_to_existing_playlist_validation(tmp_path: Path) -> None:
+    """CLIでI/Oせず、ディレクトリ判定はPlaylistModelの追加経路に任せる。"""
     directory = tmp_path / "folder"
     directory.mkdir()
     path = (tmp_path / "valid.m4a").resolve()
 
     request = parse_launch_request([str(directory), str(path)], tmp_path)
 
-    assert request.paths == (path,)
-    assert request.ignored_arguments == (str(directory),)
+    assert request.paths == (directory.resolve(), path)
+    assert request.ignored_arguments == ()
+
+
+def test_parser_does_not_check_filesystem(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """応答しないnetwork pathを想定し、起動引数解析でis_dirを呼ばない。"""
+
+    def fail_if_checked(path: Path) -> bool:
+        del path
+        raise AssertionError("起動引数解析でPath.is_dir()を呼んではいけません")
+
+    monkeypatch.setattr(Path, "is_dir", fail_if_checked)
+
+    request = parse_launch_request([r"\\offline-server\music\track.wav"], tmp_path)
+
+    assert request.paths == (Path(r"\\offline-server\music\track.wav"),)
 
 
 def test_unrepresentable_path_is_ignored(tmp_path: Path) -> None:

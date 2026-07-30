@@ -53,13 +53,23 @@ from sdp.services.single_instance import SingleInstanceService
 application = QCoreApplication([])
 request = LaunchRequest(
     tuple(Path(value) for value in json.loads(sys.argv[2])),
+    tuple(json.loads(sys.argv[3])),
+    json.loads(sys.argv[4]),
 )
 service = SingleInstanceService(sys.argv[1], connect_timeout_ms=2_000)
 print(service.start_or_forward(request).name, flush=True)
 service.shutdown()
 """
     return subprocess.Popen(
-        [sys.executable, "-c", code, name, json.dumps([str(path) for path in request.paths])],
+        [
+            sys.executable,
+            "-c",
+            code,
+            name,
+            json.dumps([str(path) for path in request.paths]),
+            json.dumps(request.ignored_arguments),
+            json.dumps(request.activate_window),
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -74,7 +84,7 @@ def test_primary_and_secondary_transfer_one_request(tmp_path: Path, qtbot: QtBot
     received: list[LaunchRequest] = []
     primary.request_received.connect(received.append)
     assert primary.start_or_forward(LaunchRequest()) is InstanceOutcome.PRIMARY
-    primary.start_accepting()
+    primary.start_delivery()
     request = LaunchRequest(((tmp_path / "曲.wav").resolve(),))
     process = forward_in_process(name, request)
     qtbot.waitUntil(lambda: process.poll() is not None, timeout=5_000)
@@ -86,6 +96,34 @@ def test_primary_and_secondary_transfer_one_request(tmp_path: Path, qtbot: QtBot
     primary.shutdown()
 
 
+def test_request_is_acknowledged_and_queued_before_delivery_starts(
+    tmp_path: Path, qtbot: QtBot
+) -> None:
+    """composition構築中でも受理ACKを返し、handler準備後に1回だけ通知する。"""
+    name = unique_server_name()
+    primary = SingleInstanceService(name, startup_timeout_ms=1_000)
+    received: list[LaunchRequest] = []
+    primary.request_received.connect(received.append)
+    assert primary.start_or_forward(LaunchRequest()) is InstanceOutcome.PRIMARY
+    request = LaunchRequest(((tmp_path / "startup.wav").resolve(),))
+
+    process = forward_in_process(name, request)
+    qtbot.waitUntil(lambda: process.poll() is not None, timeout=3_000)
+    stdout, stderr = process.communicate(timeout=1)
+
+    assert process.returncode == 0, stderr
+    assert stdout.strip() == InstanceOutcome.FORWARDED.name
+    assert received == []
+
+    primary.start_delivery()
+    qtbot.waitUntil(lambda: received == [request], timeout=2_000)
+    primary.start_delivery()
+    qtbot.wait(10)
+
+    assert received == [request]
+    primary.shutdown()
+
+
 def test_multiple_paths_keep_order_duplicates_and_unicode(tmp_path: Path, qtbot: QtBot) -> None:
     """複数pathの順序・重複・UnicodeをIPC往復で維持する。"""
     name = unique_server_name()
@@ -93,10 +131,30 @@ def test_multiple_paths_keep_order_duplicates_and_unicode(tmp_path: Path, qtbot:
     received: list[LaunchRequest] = []
     primary.request_received.connect(received.append)
     assert primary.start_or_forward(LaunchRequest()) is InstanceOutcome.PRIMARY
-    primary.start_accepting()
+    primary.start_delivery()
     first = (tmp_path / "日本語 曲.wav").resolve()
     second = (tmp_path / "second.mp3").resolve()
     request = LaunchRequest((first, second, first))
+    process = forward_in_process(name, request)
+    qtbot.waitUntil(lambda: process.poll() is not None, timeout=5_000)
+    stdout, stderr = process.communicate(timeout=1)
+
+    assert process.returncode == 0, stderr
+    assert stdout.strip() == InstanceOutcome.FORWARDED.name
+    assert received == [request]
+    primary.shutdown()
+
+
+def test_activate_window_flag_round_trips(tmp_path: Path, qtbot: QtBot) -> None:
+    """Window前面化意図をIPC往復で厳密に保つ。"""
+    name = unique_server_name()
+    primary = SingleInstanceService(name)
+    received: list[LaunchRequest] = []
+    primary.request_received.connect(received.append)
+    assert primary.start_or_forward(LaunchRequest()) is InstanceOutcome.PRIMARY
+    primary.start_delivery()
+    request = LaunchRequest(((tmp_path / "quiet.wav").resolve(),), (), False)
+
     process = forward_in_process(name, request)
     qtbot.waitUntil(lambda: process.poll() is not None, timeout=5_000)
     stdout, stderr = process.communicate(timeout=1)
@@ -114,7 +172,7 @@ def test_partial_frame_is_not_published_until_complete(tmp_path: Path, qtbot: Qt
     received: list[LaunchRequest] = []
     primary.request_received.connect(received.append)
     assert primary.start_or_forward(LaunchRequest()) is InstanceOutcome.PRIMARY
-    primary.start_accepting()
+    primary.start_delivery()
     socket = connect_socket(name, qtbot)
     frame = _encode_frame(LaunchRequest(((tmp_path / "partial.wav").resolve(),)))
 
@@ -137,7 +195,7 @@ def test_continuous_frames_are_both_published(tmp_path: Path, qtbot: QtBot) -> N
     received: list[LaunchRequest] = []
     primary.request_received.connect(received.append)
     assert primary.start_or_forward(LaunchRequest()) is InstanceOutcome.PRIMARY
-    primary.start_accepting()
+    primary.start_delivery()
     socket = connect_socket(name, qtbot)
     requests = [
         LaunchRequest(((tmp_path / "one.wav").resolve(),)),
@@ -154,19 +212,30 @@ def test_continuous_frames_are_both_published(tmp_path: Path, qtbot: QtBot) -> N
 
 
 def test_invalid_json_and_unknown_version_do_not_stop_primary(tmp_path: Path, qtbot: QtBot) -> None:
-    """不正JSONと未知versionを無視したあとも同じprimaryが有効要求を処理する。"""
+    """不正JSON・version・前面化意図を無視後もprimaryが有効要求を処理する。"""
     name = unique_server_name()
     primary = SingleInstanceService(name)
     received: list[LaunchRequest] = []
     primary.request_received.connect(received.append)
     assert primary.start_or_forward(LaunchRequest()) is InstanceOutcome.PRIMARY
-    primary.start_accepting()
+    primary.start_delivery()
     socket = connect_socket(name, qtbot)
     invalid_json = struct.pack(">I", 1) + b"{"
     unknown = raw_frame({"version": IPC_VERSION + 1, "paths": []})
+    missing_activation = raw_frame({"version": IPC_VERSION, "paths": [], "ignored_arguments": []})
+    invalid_activation = raw_frame(
+        {
+            "version": IPC_VERSION,
+            "paths": [],
+            "ignored_arguments": [],
+            "activate_window": 1,
+        }
+    )
     valid = LaunchRequest(((tmp_path / "valid.flac").resolve(),))
 
-    socket.write(invalid_json + unknown + _encode_frame(valid))
+    socket.write(
+        invalid_json + unknown + missing_activation + invalid_activation + _encode_frame(valid)
+    )
     socket.flush()
     qtbot.waitUntil(lambda: len(received) == 1, timeout=2_000)
 
@@ -181,7 +250,7 @@ def test_oversized_message_is_rejected_and_primary_remains_available(qtbot: QtBo
     name = unique_server_name()
     primary = SingleInstanceService(name)
     assert primary.start_or_forward(LaunchRequest()) is InstanceOutcome.PRIMARY
-    primary.start_accepting()
+    primary.start_delivery()
     socket = connect_socket(name, qtbot)
 
     socket.write(struct.pack(">I", MAX_MESSAGE_SIZE + 1))

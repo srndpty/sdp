@@ -37,6 +37,7 @@ from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.persistence import load_playlist, save_playlist
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.core.playlist.types import RepeatMode
+from sdp.launch import LaunchRequestHandler
 from sdp.services import settings as app_settings_module
 from sdp.services.launch_request import LaunchRequest
 from sdp.services.pcm_tap import PcmTap
@@ -597,6 +598,68 @@ def test_received_launch_uses_existing_window_and_model_and_requests_foreground(
     assert restored_state & Qt.WindowState.WindowMaximized
     assert not restored_state & Qt.WindowState.WindowMinimized
     assert calls[1:] == ["show", "raise", "activate", "alert"]
+
+
+def test_empty_received_launch_requests_foreground(
+    composition: app_module.PlayerComposition,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """引数なしsecondaryはplaylistを変更せず、既存Windowの表示を要求する。"""
+    activations: list[int] = []
+
+    def record_activation(handler: LaunchRequestHandler) -> None:
+        del handler
+        activations.append(1)
+
+    monkeypatch.setattr(LaunchRequestHandler, "_activate_window", record_activation)
+
+    composition.launch_handler.handle_received(LaunchRequest())
+
+    assert composition.playlist_model.rowCount() == 0
+    assert activations == [1]
+
+
+def test_invalid_only_received_launch_still_requests_foreground(
+    composition: app_module.PlayerComposition,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """無視引数だけでも、二回目の起動意図としてWindowを前面化する。"""
+    activations: list[int] = []
+
+    def record_activation(handler: LaunchRequestHandler) -> None:
+        del handler
+        activations.append(1)
+
+    monkeypatch.setattr(LaunchRequestHandler, "_activate_window", record_activation)
+
+    composition.launch_handler.handle_received(LaunchRequest(ignored_arguments=("bad\0path",)))
+
+    assert (
+        composition.window.statusBar().currentMessage() == "追加できるファイルがありませんでした。"
+    )
+    assert activations == [1]
+
+
+def test_activate_window_false_adds_without_foreground_request(
+    composition: app_module.PlayerComposition,
+    audio_files: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """activate_window=Falseはpath追加だけを行い、Window操作をしない。"""
+
+    def fail_activation(handler: LaunchRequestHandler) -> None:
+        del handler
+        raise AssertionError("activate_window=FalseでWindowを前面化してはいけません")
+
+    monkeypatch.setattr(LaunchRequestHandler, "_activate_window", fail_activation)
+
+    composition.launch_handler.handle_received(
+        LaunchRequest((audio_files[0].resolve(),), activate_window=False)
+    )
+
+    assert [entry.path for entry in composition.playlist_model.entries()] == [
+        audio_files[0].resolve()
+    ]
 
 
 # -- 終了時保存 -------------------------------------------------------------
