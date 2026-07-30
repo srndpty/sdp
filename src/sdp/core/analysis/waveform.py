@@ -82,6 +82,43 @@ def pcm_bytes_to_mono(
     channels: int,
 ) -> NDArray[np.float32]:
     """interleaved PCMを[-1, 1]のmono float32へベクトル変換する。"""
+    frames = _normalized_frames(data, sample_format, channels)
+    return _mono_of(frames)
+
+
+def pcm_bytes_to_channels(
+    data: bytes,
+    sample_format: PcmSampleFormat,
+    channels: int,
+) -> tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.float32]]:
+    """interleaved PCMから ``(mono, left, right)`` を1回の変換で派生させる。
+
+    レベルメーターがL／Rを個別に必要とするため、bytesの再変換をせず、
+    同じ正規化済みframe配列（frame × channel）から3本の1次元配列を作る。
+
+    - ``mono`` は従来どおり全channelの平均。
+    - 2ch以上では ``left`` が channel 0、``right`` が channel 1。
+      3ch以上の先頭2ch以外はL／Rには使わない（mono側だけが全channelを含む）。
+    - mono入力では ``left`` と ``right`` を ``mono`` と同値へ複製する。
+
+    いずれも呼び出し元のbytesとメモリを共有しない独立した配列を返す。
+    """
+    frames = _normalized_frames(data, sample_format, channels)
+    mono = _mono_of(frames)
+    left = _sanitized(frames[:, 0].copy())
+    right = _sanitized(frames[:, 1].copy()) if channels >= 2 else left.copy()
+    return mono, left, right
+
+
+def _normalized_frames(
+    data: bytes,
+    sample_format: PcmSampleFormat,
+    channels: int,
+) -> NDArray[np.float32]:
+    """interleaved PCMを ``(frame数, channel数)`` の float32 配列へ正規化する。
+
+    非有限値と範囲外値はここでは寄せない（mono平均と各channelで個別に扱う）。
+    """
     if type(channels) is not int or channels < 1:
         raise ValueError("channelsは1以上である必要があります")
     dtype: np.dtype[np.generic]
@@ -107,17 +144,26 @@ def pcm_bytes_to_mono(
     if len(data) % frame_bytes != 0:
         raise ValueError("PCM bytesがframe境界で終わっていません")
     if not data:
-        return np.empty(0, dtype=np.float32)
+        return np.zeros((0, channels), dtype=np.float32)
 
     raw = np.frombuffer(data, dtype=dtype).reshape(-1, channels)
     frames = raw.astype(np.float32)
     if scale is not None:
         frames = (frames - offset) / scale
-    mono = frames.mean(axis=1, dtype=np.float32)
-    # 壊れたfloat PCMの非有限値を波形へ残さない。
-    np.nan_to_num(mono, copy=False, nan=0.0, posinf=1.0, neginf=-1.0)
-    np.clip(mono, -1.0, 1.0, out=mono)
-    return mono.astype(np.float32, copy=False)
+    return frames
+
+
+def _mono_of(frames: NDArray[np.float32]) -> NDArray[np.float32]:
+    if frames.shape[0] == 0:
+        return np.empty(0, dtype=np.float32)
+    return _sanitized(frames.mean(axis=1, dtype=np.float32))
+
+
+def _sanitized(samples: NDArray[np.float32]) -> NDArray[np.float32]:
+    """壊れたfloat PCMの非有限値と範囲外値を残さない（引数を書き換える）。"""
+    np.nan_to_num(samples, copy=False, nan=0.0, posinf=1.0, neginf=-1.0)
+    np.clip(samples, -1.0, 1.0, out=samples)
+    return samples
 
 
 class WaveformReducer:

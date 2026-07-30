@@ -215,8 +215,13 @@ def test_db_floor_can_be_configured(widget: SpectrumWidget) -> None:
     widget.set_db_floor(-60.0)
 
     assert widget.db_floor == -60.0
+
+
+@pytest.mark.parametrize("value", [0.0, 1.0, float("nan"), float("inf"), True, False])
+def test_invalid_db_floor_is_rejected(widget: SpectrumWidget, value: float | bool) -> None:
+    """0以上・非有限値・boolの下限は受け付けない。"""
     with pytest.raises(ValueError, match="db_floor"):
-        widget.set_db_floor(0.0)
+        widget.set_db_floor(value)
 
 
 # -- マウスとフォーカス -----------------------------------------------------

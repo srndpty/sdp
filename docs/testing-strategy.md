@@ -30,6 +30,8 @@
 | `analysis/spectrum.py` | SpectrumFrameの不変性／shape一致／dtype／周波数の昇順と非負／dBの有限性と0dB以下、左0 paddingとFFT_SIZE超過時の最新sample採用、Hann窓によるリーク抑制、rFFT周波数軸、100Hz／1kHz／10kHzの正弦波ピークバンド（許容幅付き）、0dBFSが約0dB・振幅0.5が約-6dBになる振幅補正、無音とDCのfloor収束、clipping入力の0dB clamp、epsilonによるlog(0)防御、96band・対数境界・幾何平均の代表周波数、無bin bandの補間（ピークを複製しない）、30Hz未満と20kHz超の除外、Nyquist制限、低sample rate、有効帯域なしの空フレーム、attack／releaseの係数検証とreset、sample rate変更でのreset、入力配列を変更しないこと |
 | `analysis/ring_buffer.py` | capacity検証、空snapshot、capacity未満／ちょうど／超過、1回のappendがcapacity超過、wrap前／後／複数wrap、最新N sample、Nが保持量超過、N=0、clear、set_capacityでの作り直し、dtype float32と1次元の検証、NaN／inf防御、snapshotのread-only性と非共有性、旧snapshotの不変性、大量appendでの容量固定、sample単位ループやconcatenateを使わない構造、barrierで開始を揃えたthread競合（固定sleepを使わない） |
 | `analysis/pcm.py` | QAudioBufferからのUInt8／Int16／Int32／Float、mono／stereo／3ch、無音、clipping、NaN／inf、空PCM、frame境界不正、sample rate／channel count不正、未対応format、`constData()` が None、byteCount不一致。handler内でbytesへコピーし、QAudioBufferのviewを保持しないこと。Qtが不正なQAudioFormatをリセットしてしまう条件はstub bufferで検証する |
+| `analysis/pcm.py` の `PcmChunk`（P5-B） | mono入力で`left == right == mono`、stereoでch0／ch1、3ch以上でleft=ch0・right=ch1・mono=全ch平均、4形式すべてでのL／R取り出し、3配列のread-only性・float32・1次元・長さ一致、buffer破棄後も読めること（非共有）、sample rate／channel countの公開、空PCM、frame境界不正、channelごとのNaN／inf／範囲外の寄せ、長さ違い・非有限・範囲外・不正formatの拒否、呼び出し側配列のコピー、既存`audio_buffer_to_mono`との一致（互換wrapper） |
+| `analysis/level.py`（P5-B） | StereoLevelFrameの不変性／bool拒否／有限性／floor〜0dB／`RMS ≦ Peak ≦ Peak hold`、無音・空入力・定値1.0（0dB）・定値0.5（約-6.02dB）・正弦波1.0のPeak約0dBとRMS約-3.01dB・正弦波0.5のRMS約-9.03dB、絶対値によるPeak、clipping入力の0dB clamp、floor clamp、epsilonによるlog(0)防御、RMS≦Peak、200万sampleでの精度（float64昇格）、入力配列を変更しないこと、NaN／inf／dtype／次元の拒否。Peak holdは即時上昇・保持時間中の維持・保持後の減衰・elapsedへの比例（tick数に依存しない）・現在Peak未満へ落ちないこと・floor未満へ落ちないこと・左右独立・process未呼出時の不変・reset・負／非有限／boolのelapsed拒否・不正な設定値の拒否 |
 | `analysis/waveform.py` | WaveformDataのread-only／shape／dtype／有限性／範囲検証、UInt8／Int16／Int32／Float正規化、stereo mono化、frame境界、無音／正弦波／clipping、増分chunk境界、端数bucket、1sample追加、旧snapshot不変、60分相当18万bucket |
 | `analysis/waveform_cache.py` | path／size／mtime／analysis version／bucket／format versionのkey無効化matrix、SHA-256名、日本語path、float32往復、必須field／dtype／shape／NaN／inf／min>max／duration／completeの破損matrix、allow_pickle=False、write／fsync／replace失敗、temp回収、hit時刻、決定的500MB LRU、個別削除失敗継続 |
 | `metadata/reader.py` の純粋読取 | タグあり（MP3 / FLAC）・タグなし・壊れたファイル・未対応形式・欠損・ディレクトリ。日本語と空白、複数アーティストの結合、空文字の `None` 化、長さの丸めと NaN / inf / 負値の防御、長さ不明でもタグを捨てないこと、既知の解析・I/O失敗だけを`MetadataReadError`へ正規化し、属性取得などの予期しない例外は変換せず伝播すること、読み取りで元ファイルを書き換えないこと。タグ付きファイルはテスト音源を tmp_path へ複製して Mutagen 自身で書き込む（外部プロセスを起動しない） |
@@ -56,7 +58,7 @@
 | `SingleInstanceService` | 同一プロセス内でサーバーとクライアントを往復させる |
 | `PlayerControls` | **FakeBackend + 実 PlaybackController** で、状態ごとのボタン活性、シーク（ドラッグ中の非同期更新の抑止、有効なpress/releaseでの1回だけのseek、source・duration変更による古い操作の取消）、音量・ミュートの往復とフィードバックループの不在を検証する。子ウィジェットは `objectName` で取得する |
 | `MainWindow` | `QFileDialog.getOpenFileName` を差し替え、キャンセル / 選択、ファイル名とタイトルの更新、`MediaStatus` とエラー表示（具体的エラーの優先、`detail` を出さないこと）、source解除、終了アクションを検証する |
-| `app.py` の配線 | Backend → Controller → PlaylistModel → 永続化サービス → MainWindow を組み立て、復元済みModelの前後曲可否をWindow構築時に反映できること。イベントループは起動しない。PcmTapを保持しBackendのQAudioBufferOutputへ接続されていること、SpectrumPanelが同じPcmTapを使うこと、SpectrumWidgetとWaveformWidgetが1つずつ共存すること、buildだけではタイマーを開始しないこと、source変更でPCMがclearされること、shutdownでタイマーとPCM受信が残らないこと、PlaybackBackend IF・FakeBackend・settings／playlist／波形cache schemaが不変であること |
+| `app.py` の配線 | Backend → Controller → PlaylistModel → 永続化サービス → MainWindow を組み立て、復元済みModelの前後曲可否をWindow構築時に反映できること。イベントループは起動しない。PcmTapを保持しBackendのQAudioBufferOutputへ接続されていること、SpectrumPanelが同じPcmTapを使うこと、**LevelMeterWidgetが1つでSpectrumPanel内にあり同じPcmTapを共有すること、mono／L／Rの3本が同じ固定容量であること、本番配線のPCM通知で3本が埋まること、MainWindowがLevelProcessorやリングバッファを持たないこと、UI層がQAudioBuffer系を参照しないこと**、SpectrumWidgetとWaveformWidgetが1つずつ共存すること、buildだけではタイマーを開始しないこと、source変更でPCMがclearされること、shutdownでタイマーとPCM受信が残らないこと、PlaybackBackend IF・FakeBackend・settings／playlist／波形cache schemaが不変であること |
 | `ShortcutManager` | 実QTestキー入力で全割当、auto repeat設定、相対値の境界、sourceなし、入力Widget・ボタンSpace・modalでの抑止、管理外のCtrl+O／Ctrl+Shift+O／Ctrl+C／Ctrl+Vの通過、QObject削除後の安全性を検証する |
 | `SettingsSession` | MainWindow構築前のController適用、build時未開始、start冪等、1.5秒相当のデバウンス、連続変更の最終snapshot、終了時flush、一時失敗後の1回自動再試行、破損時保存無効化、QObject削除時timer停止を検証する |
 | プレイリストの永続化ライフサイクル | 保存先の決定、ファイル未作成での空起動、順序・entry_id・重複行・日本語パス・欠損行の復元、並べ替え / 削除 / 全消去後の保存、読み書き I/O エラーのログ記録。**破損ファイルではクラッシュせず空で起動し、その起動の保存を無効化して既存ファイルを上書きしないこと** |
@@ -68,10 +70,11 @@
 | `WaveformWidget` | QPainter描画、palette変更、resizeと投影cache、線数がpixel幅以下、source／durationなし、左右クリック、中央・端・音源端のclamp、drag move中の非通知、固定中心のpreview、release時1回、clear／source変更／hide／disableでの取消をQTestで検証する |
 | `WaveformPanel` | sourceなし、started／partial／finished／cache hit／failed／cleared、状態文言がWidget内の1か所だけであること、path・token不一致の無視、生error非表示、position追従、Controller duration優先とcomplete fallback、partial duration非採用、解析中・失敗後のseek、source切替中のdrag取消をFakeBackendで検証する。さらに実Serviceをstartし、Controller→request→worker→公開Signal→Panel→Widgetの正常decode、cache hit、事前確認失敗、decode失敗、A→B切替を統合テストする |
 | 波形描画性能 | 180,000 bucketを800／1,920／3,840pxへ投影し、出力・描画線が幅以下であること、QTimerによる100回のposition更新と別QTimerのGUI heartbeatが通常event loop上で共に進むことを厳格な時間上限なしで確認する |
-| `PcmTap` | sourceなし、有効buffer受信、sample rate公開と重複通知の抑制、リングバッファへのappendとmono化、sample rate変更でのclearと容量再構築、source変更／stopでのclear、pauseでの保持、無効buffer（終端の空buffer）の破棄と件数計上、未対応formatの無視、通常失敗と予期しない例外のログ間引き、コールバックから例外を漏らさないこと、PlaybackControllerを操作しないこと、FFT・QWidget・PlaylistModelを参照しないこと、QAudioBufferを保持しないこと、コールバック実行threadの記録、実QAudioBufferOutputでの接続／二重接続／切断、shutdownの冪等性と終端性（queue済み／直接入力の無視、再接続拒否）、破棄後のシグナルで落ちないこと。PCMは公開スロット `handle_audio_buffer` から注入する |
-| `SpectrumWidget` | objectName／accessibleName／minimumHeight／sizePolicy、初期プレースホルダー、empty／silence／96bandフレームの描画、resizeと幅0、bar数がband数とpixel幅以下であること、band毎の子Widgetを作らないこと、palette変更での再描画、clear_frameでの旧フレーム破棄、pause相当の再描画でのフレーム保持、マウス操作とフォーカスを持たないこと、破棄後の安全性。pixel完全一致は検証しない |
-| `SpectrumPanel` | ControllerとPcmTapだけを受け取ること、Widgetが1つ、sourceなし／load直後／PAUSED／STOPPED／NO_MEDIAでタイマー停止、PLAYINGで開始、pausedでの最終フレーム保持とFFT停止、stop／PLAYINGを維持したsource変更でのフレーム即時reset、sample rate変更でのprocessor reset、1tickでsnapshot1回・FFT最大1回、Widgetのフレーム更新、PCM到着前はFFTしないこと、hidden／最小化でWidget固有タイマーを止めつつ共有PCM受信は継続すること、再表示／復帰での再開、再入防止、停止後の古いtimeoutの安全性、shutdown後はSignal・表示イベントでも再開・変更しない終端性、FFT失敗で再生を変更せずControllerへ何も要求しないこと、失敗後もsource変更で復帰できること、波形解析・PlaylistModel・cacheを参照しないこと。固定sleepを使わず状態変化とqtbotの待機で判定する |
-| スペクトラム性能 | 音声コールバック内でFFTを呼ばないこと、コールバックがリングバッファ追記だけで容量を増やさないこと、タイマー1tickでFFTが1回を超えないこと、連続更新中も別QTimerのGUI heartbeatが進むこと、幅を変えてもbar数が有界であること、コールバックとFFT＋band集約の所要時間の記録（**CIへ厳格な時間上限は設けない**） |
+| `PcmTap` | sourceなし、有効buffer受信、sample rate公開と重複通知の抑制、リングバッファへのappendとmono化、**mono／L／R 3本への原子的append・format＋3配列を同一世代で返す統合snapshot・writer threadのformat切替途中を観測しないこと・`snapshot_mono`／`snapshot_stereo`・左右が混ざらないこと・mono入力の左右複製・channel count公開と重複通知の抑制・channel count変更での3本再構築・sample rate変更での3本再構築・source／stopでの3本clear・pauseでの3本保持・大量append後も3本の容量が固定・コールバック内でPeak／RMSを呼ばないこと**、sample rate変更でのclearと容量再構築、source変更／stopでのclear、pauseでの保持、無効buffer（終端の空buffer）の破棄と件数計上、未対応formatの無視、通常失敗と予期しない例外のログ間引き、コールバックから例外を漏らさないこと、PlaybackControllerを操作しないこと、FFT・QWidget・PlaylistModelを参照しないこと、QAudioBufferを保持しないこと、コールバック実行threadの記録、実QAudioBufferOutputでの接続／二重接続／切断、shutdownの冪等性と終端性（queue済み／直接入力の無視、再接続拒否）、破棄後のシグナルで落ちないこと。PCMは公開スロット `handle_audio_buffer` から注入する |
+| `SpectrumWidget` | objectName／accessibleName／minimumHeight／sizePolicy、初期プレースホルダー、empty／silence／96bandフレームの描画、resizeと幅0、bar数がband数とpixel幅以下であること、band毎の子Widgetを作らないこと、palette変更での再描画、db_floorの0以上／NaN／inf／bool拒否、clear_frameでの旧フレーム破棄、pause相当の再描画でのフレーム保持、マウス操作とフォーカスを持たないこと、破棄後の安全性。pixel完全一致は検証しない |
+| `LevelMeterWidget` | objectName／accessibleName／minimumHeight（70〜100px）／sizePolicy／NoFocus、初期プレースホルダー、状態文字がWidget内の1か所だけであること、無音フレーム・左右で異なるフレームの描画、RMSバー／Peak線／Peak hold線の本数、floor以下を描かないこと、LevelProcessor出力の描画、極端な幅・高さでのresize、palette変更での再描画、db_floorの変更と0以上／NaN／inf／boolの拒否、clear_frameでの旧レベル破棄、pause相当の再描画でのフレーム保持、チャンネルごとの子Widgetを作らないこと、マウス操作とフォーカスを持たないこと、破棄後の安全性。pixel完全一致は検証しない |
+| `SpectrumPanel` | ControllerとPcmTapだけを受け取ること、SpectrumWidgetとLevelMeterWidgetが1つずつ同一Panel内で共存すること、1tickで統合snapshot 1回・FFTとLevelが各最大1回、PLAYINGで両方更新（L／R一致・RMS≦Peak≦hold）、左右非対称PCMでのレベル差、PAUSEDで両方静止（Level計算も止まる）、STOPPED／source変更で両方即時clear、sample rate／channel count変更で両Processor reset（Peak hold破棄）、PCM到着前は両方プレースホルダー、hidden／最小化でFFTとLevelが止まり共有PCM受信は継続、**FFT失敗でもLevelが継続すること・Level失敗でもSpectrumが継続すること・両方失敗でだけタイマーが止まること・共通snapshot失敗で両方止まること・いずれもControllerへ何も要求せず再生を止めないこと**、Widgetが1つ、sourceなし／load直後／PAUSED／STOPPED／NO_MEDIAでタイマー停止、PLAYINGで開始、pausedでの最終フレーム保持とFFT停止、stop／PLAYINGを維持したsource変更でのフレーム即時reset、sample rate変更でのprocessor reset、1tickでsnapshot1回・FFT最大1回、Widgetのフレーム更新、PCM到着前はFFTしないこと、hidden／最小化でWidget固有タイマーを止めつつ共有PCM受信は継続すること、再表示／復帰での再開、再入防止、停止後の古いtimeoutの安全性、shutdown後はSignal・表示イベントでも再開・変更しない終端性、FFT失敗で再生を変更せずControllerへ何も要求しないこと、失敗後もsource変更で復帰できること、波形解析・PlaylistModel・cacheを参照しないこと。固定sleepを使わず状態変化とqtbotの待機で判定する |
+| スペクトラム・レベル性能 | 音声コールバック内でFFTもPeak／RMSも呼ばないこと、コールバックがリングバッファ追記だけで3本の容量を増やさないこと、リングバッファ合計メモリが固定であること、タイマー1tickで統合snapshot・FFT・Level計算が各1回を超えないこと、Peak＋RMSの所要時間の記録、連続更新中も別QTimerのGUI heartbeatが進むこと、幅を変えてもbar数が有界であること、コールバックとFFT＋band集約の所要時間の記録（**CIへ厳格な時間上限は設けない**） |
 | 可視化ウィジェットのライフサイクル | 表示 ON/OFF と最小化でWidget固有タイマーが停止し、共有PCMタップは固定容量で受信を継続すること（SPEC-04） |
 
 ## 4. 実音再生テスト（`audio` マーカー。ローカル手動実行のみ）
@@ -96,6 +99,13 @@
   playbackRate 0.75 / 1.5 と pitch 補正 ON/OFF での format 不変、
   stop・曲切替・終端での PCM clear、SpectrumPanel が実再生に追従して pause で静止すること、
   再生中 shutdown の安全性。環境依存の skip は入れず、通常の `audio` マーカーで実行する
+- **実音での L / R レベル**（P5-B、同じファイル）: WAV と MP3 での L / R Peak / RMS 取得、
+  左右同振幅のスイープ音源で L と R がおおむね一致すること、`sine440`（L=0.5 / R=0.25）で
+  **L > R** となり Peak が約 -6.02dB / -12.04dB になること、正弦波の RMS が Peak - 約 3.01dB に
+  なること、**音量 0.0 とミュート中でもメーターが振れること**（出力音量計ではないため）、
+  playbackRate 0.75 / 2.0 でも更新が続くこと、stop で 3 本の buffer が空になること、
+  Panel がスペクトラムとレベルの両方で実再生へ追従し pause で静止・stop で消えること、
+  曲切替で前曲の Peak hold を引き継がないこと
 
 形式ごとの対応可否は P0-A で 6 形式すべて実測済みのため、ここでは全形式を再検証せず、
 WAV と代表的な圧縮形式 1 つに留める。
@@ -305,6 +315,49 @@ P4-Aには表示Widgetがないため、ログと`%LOCALAPPDATA%\sdp\cache\wavef
 プロセス CPU 8.6%、RSS は 113MB で横ばい、PCM 破棄 0 件、リングバッファ 345KB 固定）。
 上記は「実際に目と耳で確認する」項目として残す。
 
+## 6.11 P5-B 手動スモーク（Peak／RMSレベルメーター）
+
+実画面・実音で行う。自動テストでは代替できないため**リリース前ゲートとして残す**。
+
+表示:
+
+- [ ] sourceなしでプレースホルダーが出る
+- [ ] 再生でL／Rのバーが動く
+- [ ] Peakが瞬時に反応する
+- [ ] RMSがPeakより低く、動きが滑らか
+- [ ] Peak holdが約1秒残り、その後自然に下がる
+- [ ] pauseで静止する（Peak holdも下がらない）
+- [ ] stopで消える（プレースホルダーへ戻る）
+- [ ] 曲切替で前曲のPeak holdが残らない
+- [ ] mono音源でL／Rが同じ振れ方になる
+- [ ] stereo音源（`sine440`はL=0.5 / R=0.25）で左右差が見える
+- [ ] RMS・Peak・Peak holdが色だけでなく形（塗り／細線／太線）で区別できる
+
+信号位置（出力音量計ではないこと）:
+
+- [ ] 音量0でもメーターが振れる
+- [ ] ミュート中でもメーターが振れる
+- [ ] varispeed（pitch補正OFF）でも取得PCM自体の振幅を表示する
+- [ ] READMEの説明と画面の挙動が一致する
+
+レイアウト:
+
+- [ ] 波形・スペクトラム・レベルメーター・プレイリストが同時に見える
+- [ ] プレイリストが極端に狭くならない
+- [ ] 100%と（可能なら）150%表示倍率で崩れない
+
+長時間・負荷:
+
+- [ ] 10分以上の連続再生でCPUが暴走しない
+- [ ] メモリが増加し続けない
+- [ ] 最小化でタイマーが止まり、復帰で再開する
+- [ ] source連続切替、Repeat ONE／ALL、shuffle、0.5／1.0／2.0倍、pitch ON／OFFでクラッシュしない
+
+なお、可聴音を伴わない範囲での実測は済んでいる（30FPSを60秒継続して実測30.2〜30.3FPS、
+PCMコールバック平均0.372ms／最大1.571ms、Peak＋RMS平均0.040ms、プロセスCPU 5.8%、
+RSSは60.9→65.5MBでt=30s以降横ばい、リングバッファ3本合計1,034KB固定、PCM破棄0件）。
+上記は「実際に目と耳で確認する」項目として残す。
+
 ## 7. 手動チェックリスト（リリース前）
 
 - [ ] ファイルの D&D 追加で順序が維持される
@@ -325,11 +378,21 @@ P4-Aには表示Widgetがないため、ログと`%LOCALAPPDATA%\sdp\cache\wavef
 - `audioBufferReceived` の処理時間
 - 波形解析のスループット（音源の分数 / 実時間秒）
 
-P5-A のローカル実測（PySide6 6.10.3 / Windows 11。CI では上限を課さない）:
+P5-A / P5-B のローカル実測（PySide6 6.10.3 / Windows 11。CI では上限を課さない）:
 
 | 項目 | 実測 |
 |---|---|
-| PCM コールバック 1 回 | 平均 0.056ms / 最大 0.374ms |
+| PCM コールバック 1 回（P5-A: mono 1 本） | 平均 0.056ms / 最大 0.374ms |
+| PCM コールバック 1 回（P5-B: mono + L / R 3 本、単体計測） | 平均 0.122ms / 最大 0.435ms |
+| PCM コールバック 1 回（P5-B: 30FPS 更新と同時に 60 秒） | 平均 0.372ms / 最大 1.571ms（33msのフレーム予算を十分下回る） |
+| Peak + RMS（L / R 各 4096 sample）+ Peak hold | 平均 0.040ms / 最大 0.165ms |
+| 1 tick 合計（FFT + Level） | 約 0.17ms（33ms を十分下回る） |
+| 30FPS を 60 秒継続（P5-B） | 実測 30.2〜30.3FPS（FFT 1,815 回 = Level 1,815 回 = snapshot 回数） |
+| PCM 通知頻度（P5-B、1.0 倍） | 10.6 件/秒 / 破棄 0 件 |
+| プロセス CPU（P5-B、offscreen 60 秒） | 3.5s / 60.0s = 5.8% |
+| RSS（P5-B、60 秒） | 60.9MB → 65.5MB（t=30s 以降は増加なし） |
+| GUI heartbeat（別 QTimer、33ms 指定） | 21.3 回/秒で進み続ける（CoarseTimer のため 30 は超えない） |
+| リングバッファ 3 本合計 | 48kHz で 96,000 sample × 3 = 1,125KB / 44.1kHz で 1,034KB 固定 |
 | 4096 点 FFT + 96band 集約 | 平均 0.114ms / 最大 0.441ms |
 | 30FPS を 50 秒継続 | 実測 30.3FPS（FFT 1,514 回 = snapshot 回数と一致） |
 | PCM 通知頻度（1.0 倍） | 10.8 件/秒（P0-C の 11.2 件/秒と整合） |
