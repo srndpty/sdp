@@ -141,7 +141,7 @@ def test_round_trip_keeps_every_field(tmp_path: Path) -> None:
 
     assert load_ui_state(path) == expected
     document = json.loads(path.read_text(encoding="utf-8"))
-    assert document["schema_version"] == UI_STATE_SCHEMA_VERSION == 1
+    assert document["schema_version"] == UI_STATE_SCHEMA_VERSION == 2
     assert set(document) == {"schema_version", "window", "main_splitter", "last_open_directory"}
 
 
@@ -151,7 +151,7 @@ def test_empty_state_saves_only_the_schema_version(tmp_path: Path) -> None:
 
     save_ui_state(path, UiState())
 
-    assert json.loads(path.read_text(encoding="utf-8")) == {"schema_version": 1}
+    assert json.loads(path.read_text(encoding="utf-8")) == {"schema_version": 2}
     assert load_ui_state(path) == UiState()
 
 
@@ -177,9 +177,9 @@ def test_unknown_keys_are_ignored(tmp_path: Path) -> None:
     assert state.main_splitter == SPLITTER
 
 
-@pytest.mark.parametrize("version", [None, True, 1.0, "1", 0, 2])
-def test_schema_version_requires_exact_integer_one(tmp_path: Path, version: object) -> None:
-    """versionはbool・float・文字列・欠落・未知値を拒否する。"""
+@pytest.mark.parametrize("version", [None, True, 1.0, "1", 0, 3, 99])
+def test_schema_version_requires_a_supported_integer(tmp_path: Path, version: object) -> None:
+    """versionはbool・float・文字列・欠落・未知値を拒否する（1と2だけ許可）。"""
     path = tmp_path / "ui-state.json"
     document = document_of()
     if version is None:
@@ -540,3 +540,107 @@ def test_splitter_minimum_shrinks_with_a_small_total() -> None:
 def test_splitter_without_a_total_keeps_the_saved_sizes() -> None:
     """レイアウト未確定（総量0）では保存値をそのまま返す。"""
     assert distribute_splitter_sizes(SPLITTER, 0) == (400, 300)
+
+
+# -- schema version 2（現在曲のentry_id）-------------------------------------
+
+
+def test_version_two_round_trips_the_current_entry(tmp_path: Path) -> None:
+    """現在曲のentry_idを往復する（行番号でもパスでもない）。"""
+    path = tmp_path / "ui-state.json"
+    expected = UiState(window=WINDOW, current_playlist_entry_id="entry-1234")
+
+    save_ui_state(path, expected)
+
+    assert load_ui_state(path) == expected
+    document = json.loads(path.read_text(encoding="utf-8"))
+    assert document["schema_version"] == 2
+    assert document["current_playlist_entry_id"] == "entry-1234"
+
+
+def test_version_one_has_no_current_entry(tmp_path: Path) -> None:
+    """v1には現在曲が無いためNoneで補う。"""
+    path = tmp_path / "ui-state.json"
+    write_document(path, document_of())
+
+    assert load_ui_state(path).current_playlist_entry_id is None
+
+
+def test_version_one_ignores_the_version_two_key(tmp_path: Path) -> None:
+    """v1にv2のキーが混入していても未知キーとして無視する。"""
+    path = tmp_path / "ui-state.json"
+    write_document(path, document_of(current_playlist_entry_id="entry-1234"))
+
+    assert load_ui_state(path).current_playlist_entry_id is None
+
+
+def test_missing_current_entry_is_none(tmp_path: Path) -> None:
+    """v2でキーが無ければ「未保存」として扱う。"""
+    path = tmp_path / "ui-state.json"
+    write_document(path, document_of(schema_version=2))
+
+    assert load_ui_state(path).current_playlist_entry_id is None
+
+
+def test_empty_current_entry_is_normalized_to_none(tmp_path: Path) -> None:
+    """空文字は None へ統一する（空IDで照合しない）。"""
+    path = tmp_path / "ui-state.json"
+    write_document(path, document_of(schema_version=2, current_playlist_entry_id=""))
+
+    assert load_ui_state(path).current_playlist_entry_id is None
+
+
+@pytest.mark.parametrize("value", [123, True, ["a"], {"id": "a"}, 1.5])
+def test_non_string_current_entry_is_rejected(tmp_path: Path, value: object) -> None:
+    """文字列以外のentry_idは復元失敗にする。"""
+    path = tmp_path / "ui-state.json"
+    write_document(path, document_of(schema_version=2, current_playlist_entry_id=value))
+
+    with pytest.raises(UiStateFileError, match="current_playlist_entry_id"):
+        load_ui_state(path)
+
+
+def test_unicode_current_entry_round_trips(tmp_path: Path) -> None:
+    """日本語・記号を含むentry_idも保持できる。"""
+    path = tmp_path / "ui-state.json"
+    expected = UiState(current_playlist_entry_id="曲 001-テスト")
+
+    save_ui_state(path, expected)
+
+    assert load_ui_state(path).current_playlist_entry_id == "曲 001-テスト"
+
+
+def test_current_entry_must_not_be_empty_in_the_value_object() -> None:
+    """値オブジェクトでも空文字を受け付けない。"""
+    with pytest.raises(ValueError, match="current_playlist_entry_id"):
+        UiState(current_playlist_entry_id="")
+
+
+def test_playback_position_is_never_saved(tmp_path: Path) -> None:
+    """再生位置・再生状態・選択行はui-state.jsonへ保存しない。
+
+    数秒の曲やSEでは復元価値が低く、突然の再開は予測しにくい。まずは現在曲の
+    選択復元だけでUXを評価する（[architecture.md](../../../docs/architecture.md) §9.6）。
+    """
+    path = tmp_path / "ui-state.json"
+
+    save_ui_state(
+        path,
+        UiState(
+            window=WINDOW,
+            main_splitter=SPLITTER,
+            last_open_directory=Path("C:\\Music"),
+            current_playlist_entry_id="entry-1",
+        ),
+    )
+
+    document = json.loads(path.read_text(encoding="utf-8"))
+    assert set(document) == {
+        "schema_version",
+        "window",
+        "main_splitter",
+        "last_open_directory",
+        "current_playlist_entry_id",
+    }
+    for forbidden in ("position_ms", "position", "playing", "state", "selected_row", "volume"):
+        assert forbidden not in document

@@ -7,7 +7,8 @@
 import json
 import logging
 import struct
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -29,15 +30,20 @@ from sdp.core.metadata.types import MetadataStatus, TrackMetadata
 from sdp.core.playback.backend import PlaybackBackend
 from sdp.core.playback.controller import PlaybackController
 from sdp.core.playback.qt_backend import QtMultimediaBackend
-from sdp.core.playlist.entry import create_entry
+from sdp.core.playback.types import PlaybackState
+from sdp.core.playlist.entry import PlaylistEntry, create_entry
 from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.persistence import load_playlist, save_playlist
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.core.playlist.types import RepeatMode
+from sdp.services import settings as app_settings_module
 from sdp.services.pcm_tap import PcmTap
-from sdp.services.playlist_session import RESTORE_FAILED_MESSAGE, PlaylistSession
-from sdp.services.settings import (
-    RESTORE_FAILED_MESSAGE as SETTINGS_RESTORE_FAILED_MESSAGE,
+from sdp.services.playlist_session import PlaylistSession
+from sdp.services.save_status import (
+    SaveCategory,
+    restore_failure_message,
+    save_failure_message,
+    save_recovered_message,
 )
 from sdp.services.settings import (
     AppSettings,
@@ -53,9 +59,6 @@ from sdp.services.ui_state import (
     WindowState,
     load_ui_state,
     save_ui_state,
-)
-from sdp.services.ui_state import (
-    RESTORE_FAILED_MESSAGE as UI_STATE_RESTORE_FAILED_MESSAGE,
 )
 from sdp.services.ui_state_session import UiStateSession
 from sdp.services.user_paths import (
@@ -137,6 +140,20 @@ def audio_files(tmp_path: Path) -> list[Path]:
         path.write_bytes(b"x")
         paths.append(path)
     return paths
+
+
+SETTINGS_KEYS = {
+    "schema_version",
+    "playback_rate",
+    "pitch_compensation",
+    "waveform_visible",
+    "spectrum_visible",
+    "level_meter_visible",
+    "volume",
+    "muted",
+    "repeat_mode",
+    "shuffle_enabled",
+}
 
 
 def int16_stereo_buffer(value: int = 16_384) -> QAudioBuffer:
@@ -230,10 +247,13 @@ def test_build_player_restores_settings_before_building_speed_panel(
     assert composition.settings_session.is_running is False
 
 
-def test_settings_round_trip_does_not_restore_unscoped_playback_state(
+def test_settings_round_trip_restores_playback_state(
     playlist_file: Path, settings_file: Path, qtbot: QtBot
 ) -> None:
-    """速度・ピッチ以外の音量、mute、repeat、shuffle、現在曲は復元しない。"""
+    """速度・ピッチに加えて音量・mute・repeat・shuffleも復元する（P6-C）。
+
+    再生位置と再生中かどうかは保存しない。
+    """
     composition = app_module.build_player(playlist_file, settings_file)
     qtbot.addWidget(composition.window)
     composition.settings_session.start()
@@ -251,11 +271,13 @@ def test_settings_round_trip_does_not_restore_unscoped_playback_state(
 
     assert restored.controller.playback_rate == pytest.approx(1.4)
     assert restored.controller.pitch_compensation is False
-    assert restored.controller.volume == pytest.approx(1.0)
-    assert restored.controller.muted is False
-    assert restored.playlist_playback.repeat_mode is RepeatMode.OFF
-    assert restored.playlist_playback.shuffle_enabled is False
+    assert restored.controller.volume == pytest.approx(0.2)
+    assert restored.controller.muted is True
+    assert restored.playlist_playback.repeat_mode is RepeatMode.ALL
+    assert restored.playlist_playback.shuffle_enabled is True
+    # 現在曲はui-state.json側の責務で、settings.jsonには入らない。
     assert restored.playlist_playback.current_entry_id is None
+    assert restored.controller.position_ms == 0
 
 
 def test_composition_does_not_let_the_window_own_the_backend(
@@ -301,6 +323,9 @@ def test_run_starts_and_stops_background_services_in_order(
     original_start = SettingsSession.start
     original_flush = SettingsSession.flush
     original_stop = SettingsSession.stop
+    original_playlist_start = PlaylistSession.start
+    original_playlist_flush = PlaylistSession.flush
+    original_playlist_stop = PlaylistSession.stop
     original_waveform_start = WaveformAnalysisService.start
     original_waveform_shutdown = WaveformAnalysisService.shutdown
 
@@ -315,6 +340,18 @@ def test_run_starts_and_stops_background_services_in_order(
     def record_stop(session: SettingsSession) -> None:
         events.append("settings_stop")
         original_stop(session)
+
+    def record_playlist_start(session: PlaylistSession, model: PlaylistModel | None = None) -> None:
+        events.append("playlist_start")
+        original_playlist_start(session, model)
+
+    def record_playlist_flush(session: PlaylistSession) -> bool:
+        events.append("playlist_flush")
+        return original_playlist_flush(session)
+
+    def record_playlist_stop(session: PlaylistSession) -> None:
+        events.append("playlist_stop")
+        original_playlist_stop(session)
 
     def record_waveform_start(service: WaveformAnalysisService) -> None:
         events.append("waveform_start")
@@ -345,6 +382,9 @@ def test_run_starts_and_stops_background_services_in_order(
     monkeypatch.setattr(SettingsSession, "start", record_start)
     monkeypatch.setattr(SettingsSession, "flush", record_flush)
     monkeypatch.setattr(SettingsSession, "stop", record_stop)
+    monkeypatch.setattr(PlaylistSession, "start", record_playlist_start)
+    monkeypatch.setattr(PlaylistSession, "flush", record_playlist_flush)
+    monkeypatch.setattr(PlaylistSession, "stop", record_playlist_stop)
     monkeypatch.setattr(WaveformAnalysisService, "start", record_waveform_start)
     monkeypatch.setattr(WaveformAnalysisService, "shutdown", record_waveform_shutdown)
     monkeypatch.setattr(app_module, "default_playlist_path", injected_playlist_path)
@@ -357,10 +397,13 @@ def test_run_starts_and_stops_background_services_in_order(
     assert app_module.run([]) == 0
     assert events == [
         "settings_start",
+        "playlist_start",
         "waveform_start",
         "exec",
         "waveform_shutdown",
         "settings_flush",
+        "playlist_flush",
+        "playlist_stop",
         "settings_stop",
     ]
 
@@ -468,7 +511,9 @@ def test_corrupted_settings_uses_defaults_and_is_not_overwritten(
 
     assert composition.controller.playback_rate == pytest.approx(1.0)
     assert composition.controller.pitch_compensation is True
-    assert composition.window.statusBar().currentMessage() == SETTINGS_RESTORE_FAILED_MESSAGE
+    assert composition.window.statusBar().currentMessage() == restore_failure_message(
+        [SaveCategory.SETTINGS]
+    )
     assert composition.settings_session.is_save_enabled is False
     composition.settings_session.start()
     composition.controller.set_playback_rate(1.25)
@@ -487,7 +532,8 @@ def test_corrupted_settings_does_not_disable_playlist_saving(
     # fixture構築後なので、破損状態を独立したsessionへ読み込ませる。
     settings_file.write_text("{壊れた", encoding="utf-8")
     failed_session = SettingsSession(settings_file, composition.app_settings)
-    assert failed_session.load() == SETTINGS_RESTORE_FAILED_MESSAGE
+    assert failed_session.load() is not None
+    assert failed_session.is_save_enabled is False
 
     composition.playlist_model.add_paths(audio_files)
     assert composition.playlist_session.save_from(composition.playlist_model) is True
@@ -508,14 +554,11 @@ def test_corrupted_playlist_does_not_disable_settings_saving(
 
     assert composition.playlist_session.is_save_enabled is False
     assert composition.settings_session.flush() is True
-    assert json.loads(settings_file.read_text(encoding="utf-8")) == {
-        "schema_version": 2,
-        "playback_rate": 1.2,
-        "pitch_compensation": False,
-        "waveform_visible": True,
-        "spectrum_visible": True,
-        "level_meter_visible": True,
-    }
+    document = json.loads(settings_file.read_text(encoding="utf-8"))
+    assert set(document) == SETTINGS_KEYS
+    assert document["schema_version"] == 3
+    assert document["playback_rate"] == pytest.approx(1.2)
+    assert document["pitch_compensation"] is False
 
 
 def test_both_corrupted_files_report_and_preserve_both_failures(
@@ -552,7 +595,9 @@ def test_corrupted_playlist_does_not_crash_startup(
     qtbot.addWidget(composition.window)
 
     assert composition.playlist_model.rowCount() == 0
-    assert composition.window.statusBar().currentMessage() == RESTORE_FAILED_MESSAGE
+    assert composition.window.statusBar().currentMessage() == restore_failure_message(
+        [SaveCategory.PLAYLIST]
+    )
     assert "復元に失敗" in caplog.text
 
 
@@ -581,7 +626,9 @@ def test_non_utf8_playlist_does_not_crash_or_get_overwritten(
     qtbot.addWidget(composition.window)
 
     assert composition.playlist_model.rowCount() == 0
-    assert composition.window.statusBar().currentMessage() == RESTORE_FAILED_MESSAGE
+    assert composition.window.statusBar().currentMessage() == restore_failure_message(
+        [SaveCategory.PLAYLIST]
+    )
     assert not composition.playlist_session.is_save_enabled
     assert composition.playlist_session.save_from(composition.playlist_model) is False
     assert playlist_file.read_bytes() == original
@@ -1032,14 +1079,7 @@ def test_visualization_schemas_are_unchanged(
     assert set(playlist_document) == {"schema_version", "entries"}
     # 可視化の表示ON/OFFはP6-Aで設定schemaへ追加した。色・バンド数・FPS・
     # Peak hold時間は追加していない。
-    assert set(settings_document) == {
-        "schema_version",
-        "playback_rate",
-        "pitch_compensation",
-        "waveform_visible",
-        "spectrum_visible",
-        "level_meter_visible",
-    }
+    assert set(settings_document) == SETTINGS_KEYS
 
     from sdp.core.analysis import waveform_cache
 
@@ -1150,7 +1190,7 @@ def test_settings_changes_are_flushed_on_shutdown(
     assert composition.settings_session.flush() is True
 
     document = json.loads(settings_file.read_text(encoding="utf-8"))
-    assert document["schema_version"] == 2
+    assert document["schema_version"] == 3
     assert document["spectrum_visible"] is False
     assert document["playback_rate"] == pytest.approx(1.25)
 
@@ -1323,7 +1363,9 @@ def test_corrupted_ui_state_starts_with_defaults_and_is_not_overwritten(
     assert composition.ui_state_session.is_save_enabled is False
     assert composition.ui_state_session.flush() is False
     assert ui_state_file.read_text(encoding="utf-8") == original
-    assert UI_STATE_RESTORE_FAILED_MESSAGE in composition.window.statusBar().currentMessage()
+    assert composition.window.statusBar().currentMessage() == restore_failure_message(
+        [SaveCategory.UI_STATE]
+    )
 
 
 def test_corrupted_ui_state_does_not_disable_settings_or_playlist_saving(
@@ -1388,22 +1430,22 @@ def test_ui_state_schema_does_not_touch_the_other_schemas(
     ui_state_document = json.loads(ui_state_file.read_text(encoding="utf-8"))
 
     assert set(playlist_document) == {"schema_version", "entries"}
-    assert set(settings_document) == {
-        "schema_version",
-        "playback_rate",
-        "pitch_compensation",
-        "waveform_visible",
-        "spectrum_visible",
-        "level_meter_visible",
-    }
-    assert settings_document["schema_version"] == 2
-    assert ui_state_document["schema_version"] == 1
+    assert set(settings_document) == SETTINGS_KEYS
+    assert settings_document["schema_version"] == 3
+    assert ui_state_document["schema_version"] == 2
     assert set(ui_state_document) <= {
         "schema_version",
         "window",
         "main_splitter",
         "last_open_directory",
+        "current_playlist_entry_id",
     }
+    # 音量やRepeatはsettings.json側、現在曲はui-state.json側だけに置く。
+    assert "volume" not in ui_state_document
+    assert "current_playlist_entry_id" not in settings_document
+    # 再生位置は保存しない。
+    assert "position_ms" not in ui_state_document
+    assert "position_ms" not in settings_document
 
 
 def test_run_saves_ui_state_before_stopping_sessions(
@@ -1465,3 +1507,468 @@ def test_ui_layer_does_not_perform_ui_state_json_io() -> None:
     for module in (main_window_module, settings_dialog_module):
         for forbidden in ("load_ui_state", "save_ui_state", "UiStateSession", "json"):
             assert not hasattr(module, forbidden), f"{module.__name__}: {forbidden}"
+
+
+# -- 起動時の復元（P6-C）----------------------------------------------------
+
+
+def build(
+    playlist_file: Path, settings_file: Path, ui_state_file: Path
+) -> app_module.PlayerComposition:
+    return app_module.build_player(playlist_file, settings_file, ui_state_file=ui_state_file)
+
+
+@pytest.mark.parametrize("version", [1, 2, 3])
+def test_every_settings_version_starts(
+    playlist_file: Path, settings_file: Path, ui_state_file: Path, qtbot: QtBot, version: int
+) -> None:
+    """settings v1／v2／v3のいずれでも起動でき、既知の値だけを適用する。"""
+    document: dict[str, object] = {
+        "schema_version": version,
+        "playback_rate": 1.25,
+        "pitch_compensation": False,
+    }
+    if version >= 2:
+        document["waveform_visible"] = False
+    if version >= 3:
+        document.update({"volume": 0.3, "muted": True, "repeat_mode": "one"})
+    settings_file.write_text(json.dumps(document), encoding="utf-8")
+
+    composition = build(playlist_file, settings_file, ui_state_file)
+    qtbot.addWidget(composition.window)
+
+    assert composition.controller.playback_rate == pytest.approx(1.25)
+    assert composition.settings_session.is_save_enabled is True
+    assert composition.window.waveform_panel.isVisibleTo(composition.window) is (version < 2)
+    expected_volume = 0.3 if version >= 3 else 1.0
+    assert composition.controller.volume == pytest.approx(expected_volume)
+    assert composition.controller.muted is (version >= 3)
+    assert composition.playlist_playback.repeat_mode is (
+        RepeatMode.ONE if version >= 3 else RepeatMode.OFF
+    )
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_every_ui_state_version_starts(
+    playlist_file: Path,
+    settings_file: Path,
+    ui_state_file: Path,
+    audio_files: list[Path],
+    qtbot: QtBot,
+    version: int,
+) -> None:
+    """ui-state v1／v2のいずれでも起動でき、v1では現在曲を復元しない。"""
+    save_playlist(playlist_file, [create_entry(path) for path in audio_files])
+    entry_id = load_playlist(playlist_file)[1].entry_id
+    document: dict[str, object] = {
+        "schema_version": version,
+        "window": {"x": 120, "y": 90, "width": 1100, "height": 720, "maximized": False},
+    }
+    if version >= 2:
+        document["current_playlist_entry_id"] = entry_id
+    ui_state_file.write_text(json.dumps(document), encoding="utf-8")
+
+    composition = build(playlist_file, settings_file, ui_state_file)
+    qtbot.addWidget(composition.window)
+
+    assert composition.ui_state_session.is_save_enabled is True
+    # geometryそのものは実行環境の画面サイズへ補正されるため、ここでは
+    # 「両versionとも起動でき、v1では現在曲を復元しない」ことだけを確認する
+    # （補正の詳細は画面矩形を注入するMainWindowテストで検証済み）。
+    expected = entry_id if version >= 2 else None
+    assert composition.playlist_playback.current_entry_id == expected
+
+
+def test_current_entry_is_restored_before_show_without_playing(
+    playlist_file: Path,
+    settings_file: Path,
+    ui_state_file: Path,
+    audio_files: list[Path],
+    qtbot: QtBot,
+) -> None:
+    """現在曲は表示前に選ばれ、自動再生せず位置も0のまま。"""
+    save_playlist(playlist_file, [create_entry(path) for path in audio_files])
+    entry_id = load_playlist(playlist_file)[2].entry_id
+    save_ui_state(ui_state_file, UiState(current_playlist_entry_id=entry_id))
+
+    composition = build(playlist_file, settings_file, ui_state_file)
+    qtbot.addWidget(composition.window)
+
+    assert not composition.window.isVisible()
+    assert composition.playlist_playback.current_entry_id == entry_id
+    assert composition.controller.source == audio_files[2].resolve()
+    assert composition.controller.state is not PlaybackState.PLAYING
+    assert composition.controller.position_ms == 0
+    assert composition.playlist_playback.can_play_previous is True
+
+
+def test_missing_current_entry_starts_without_a_current_song(
+    playlist_file: Path,
+    settings_file: Path,
+    ui_state_file: Path,
+    audio_files: list[Path],
+    qtbot: QtBot,
+) -> None:
+    """削除済みentry_idでもエラーにせず、現在曲なしで起動する。"""
+    save_playlist(playlist_file, [create_entry(path) for path in audio_files])
+    save_ui_state(ui_state_file, UiState(current_playlist_entry_id="消えたID"))
+
+    composition = build(playlist_file, settings_file, ui_state_file)
+    qtbot.addWidget(composition.window)
+
+    assert composition.playlist_playback.current_entry_id is None
+    assert composition.playlist_model.rowCount() == len(audio_files)
+    assert composition.ui_state_session.is_save_enabled is True
+    assert composition.window.statusBar().currentMessage() != ""
+
+
+def test_stale_current_entry_is_dropped_on_the_next_save(
+    playlist_file: Path,
+    settings_file: Path,
+    ui_state_file: Path,
+    audio_files: list[Path],
+    qtbot: QtBot,
+) -> None:
+    """存在しないentry_idは次回保存で取り除かれる。"""
+    save_playlist(playlist_file, [create_entry(path) for path in audio_files])
+    save_ui_state(ui_state_file, UiState(current_playlist_entry_id="消えたID"))
+    composition = build(playlist_file, settings_file, ui_state_file)
+    qtbot.addWidget(composition.window)
+    composition.window.set_last_open_directory(Path("C:\\Music"))
+
+    assert composition.ui_state_session.flush() is True
+
+    assert load_ui_state(ui_state_file).current_playlist_entry_id is None
+
+
+def test_current_entry_is_saved_when_the_song_changes(
+    composition: app_module.PlayerComposition,
+    ui_state_file: Path,
+    audio_files: list[Path],
+) -> None:
+    """曲を選ぶとUI状態の保存対象になる（settings.jsonへは入らない）。"""
+    entry_ids = composition.playlist_model.add_paths(audio_files)
+    composition.ui_state_session.start()
+
+    composition.playlist_playback.select_entry_by_id(entry_ids[1])
+
+    assert composition.ui_state_session.flush() is True
+    assert load_ui_state(ui_state_file).current_playlist_entry_id == entry_ids[1]
+
+
+# -- 3保存ファイルの障害matrix ----------------------------------------------
+
+
+CORRUPTED = "{壊れた"
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        (),
+        ("settings",),
+        ("playlist",),
+        ("ui_state",),
+        ("settings", "playlist"),
+        ("settings", "ui_state"),
+        ("playlist", "ui_state"),
+        ("settings", "playlist", "ui_state"),
+    ],
+)
+def test_corruption_matrix_keeps_healthy_files_working(
+    playlist_file: Path,
+    settings_file: Path,
+    ui_state_file: Path,
+    audio_files: list[Path],
+    qtbot: QtBot,
+    broken: tuple[str, ...],
+) -> None:
+    """破損の組合せに関係なく起動でき、健全なファイルは保存できる。"""
+    files = {"settings": settings_file, "playlist": playlist_file, "ui_state": ui_state_file}
+    for name in broken:
+        files[name].write_text(CORRUPTED, encoding="utf-8")
+
+    composition = build(playlist_file, settings_file, ui_state_file)
+    qtbot.addWidget(composition.window)
+    window = composition.window
+    window.show()
+    qtbot.waitExposed(window)
+    composition.settings_session.start()
+    composition.ui_state_session.start()
+
+    sessions = {
+        "settings": composition.settings_session.is_save_enabled,
+        "playlist": composition.playlist_session.is_save_enabled,
+        "ui_state": composition.ui_state_session.is_save_enabled,
+    }
+    for name, enabled in sessions.items():
+        assert enabled is (name not in broken), name
+
+    # 健全なカテゴリは実際に保存できる。
+    composition.app_settings.apply(replace(composition.app_settings.settings, volume=0.5))
+    window.set_last_open_directory(Path("C:\\Music"))
+    composition.playlist_model.add_paths(audio_files)
+    assert composition.settings_session.flush() is ("settings" not in broken)
+    assert composition.ui_state_session.flush() is ("ui_state" not in broken)
+    assert composition.playlist_session.save_from(composition.playlist_model) is (
+        "playlist" not in broken
+    )
+
+    # 破損ファイルは元のbytesのまま。
+    for name in broken:
+        assert files[name].read_text(encoding="utf-8") == CORRUPTED
+
+    # 再生操作と可視化は続けられる。
+    composition.controller.set_playback_rate(1.5)
+    assert composition.controller.playback_rate == pytest.approx(1.5)
+    assert window.spectrum_panel.is_spectrum_visible is True
+
+    # メッセージは1文へまとまり、生の例外もパスも出さない。
+    message = window.statusBar().currentMessage()
+    if broken:
+        for token in ("Error", "Traceback", str(settings_file)):
+            assert token not in message
+    window.spectrum_panel.shutdown()
+
+
+@pytest.mark.parametrize(
+    "failing",
+    [
+        ("settings",),
+        ("playlist",),
+        ("ui_state",),
+        ("settings", "playlist", "ui_state"),
+    ],
+)
+def test_save_failures_are_reported_per_category(
+    composition: app_module.PlayerComposition,
+    audio_files: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot: QtBot,
+    failing: tuple[str, ...],
+) -> None:
+    """保存失敗はカテゴリごとに区別して1回だけ通知する。"""
+    window = composition.window
+    window.show()
+    qtbot.waitExposed(window)
+    messages: list[str] = []
+    composition.save_status.message_requested.connect(messages.append)
+    composition.settings_session.start()
+    composition.playlist_session.start()
+    composition.ui_state_session.start()
+
+    def failing_save(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise OSError("保存失敗")
+
+    if "settings" in failing:
+        monkeypatch.setattr("sdp.services.settings.save_settings", failing_save)
+    if "playlist" in failing:
+        monkeypatch.setattr("sdp.services.playlist_session.save_playlist", failing_save)
+    if "ui_state" in failing:
+        monkeypatch.setattr("sdp.services.ui_state_session.save_ui_state", failing_save)
+
+    composition.app_settings.apply(replace(composition.app_settings.settings, volume=0.5))
+    composition.playlist_model.add_paths(audio_files[:1])
+    window.set_last_open_directory(Path("C:\\Music"))
+    composition.settings_session.flush()
+    composition.playlist_session.flush()
+    composition.ui_state_session.flush()
+    # 同じ失敗を繰り返しても通知は増えない。
+    composition.app_settings.apply(replace(composition.app_settings.settings, volume=0.6))
+    composition.playlist_model.add_paths(audio_files[1:2])
+    window.set_last_open_directory(Path("C:\\音楽"))
+    composition.settings_session.flush()
+    composition.playlist_session.flush()
+    composition.ui_state_session.flush()
+
+    expected = {
+        save_failure_message(SaveCategory.SETTINGS) if "settings" in failing else None,
+        save_failure_message(SaveCategory.PLAYLIST) if "playlist" in failing else None,
+        save_failure_message(SaveCategory.UI_STATE) if "ui_state" in failing else None,
+    } - {None}
+    assert set(messages) == expected
+    assert len(messages) == len(expected)
+    assert window.statusBar().currentMessage() in messages
+    window.spectrum_panel.shutdown()
+
+
+def test_recovered_save_is_reported_once(
+    composition: app_module.PlayerComposition,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot: QtBot,
+) -> None:
+    """一時失敗のあと保存できたら、短い復旧通知を1回だけ出す。"""
+    window = composition.window
+    window.show()
+    qtbot.waitExposed(window)
+    messages: list[str] = []
+    composition.save_status.message_requested.connect(messages.append)
+    composition.settings_session.start()
+
+    calls: list[int] = []
+    original = app_settings_module.save_settings
+
+    def flaky_save(path: Path, settings: AppSettings) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("一時的な共有違反")
+        original(path, settings)
+
+    monkeypatch.setattr("sdp.services.settings.save_settings", flaky_save)
+    composition.app_settings.apply(replace(composition.app_settings.settings, volume=0.5))
+    composition.settings_session.flush()
+    composition.app_settings.apply(replace(composition.app_settings.settings, volume=0.6))
+    composition.settings_session.flush()
+
+    assert messages == [
+        save_failure_message(SaveCategory.SETTINGS),
+        save_recovered_message(SaveCategory.SETTINGS),
+    ]
+    window.spectrum_panel.shutdown()
+
+
+def test_recovered_playlist_save_is_reported_once(
+    composition: app_module.PlayerComposition,
+    audio_files: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """プレイリストの一時失敗と復旧も本番通知経路へ1回ずつ流す。"""
+    messages: list[str] = []
+    composition.save_status.message_requested.connect(messages.append)
+    composition.playlist_session.start()
+    calls: list[int] = []
+    original = save_playlist
+
+    def flaky_save(path: Path, entries: Sequence[PlaylistEntry]) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("一時的な共有違反")
+        original(path, entries)
+
+    monkeypatch.setattr("sdp.services.playlist_session.save_playlist", flaky_save)
+    composition.playlist_model.add_paths(audio_files[:1])
+    composition.playlist_session.flush()
+    composition.playlist_model.add_paths(audio_files[1:2])
+    composition.playlist_session.flush()
+
+    assert messages == [
+        save_failure_message(SaveCategory.PLAYLIST),
+        save_recovered_message(SaveCategory.PLAYLIST),
+    ]
+
+
+@pytest.mark.parametrize("failing", ["settings", "playlist", "ui_state"])
+def test_save_failure_does_not_block_playback_or_other_files(
+    composition: app_module.PlayerComposition,
+    playlist_file: Path,
+    audio_files: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+    failing: str,
+) -> None:
+    """1カテゴリの保存失敗でも再生と他ファイルの保存は続く。"""
+
+    def failing_save(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise OSError("保存失敗")
+
+    save_targets = {
+        "settings": "sdp.services.settings.save_settings",
+        "playlist": "sdp.services.playlist_session.save_playlist",
+        "ui_state": "sdp.services.ui_state_session.save_ui_state",
+    }
+    monkeypatch.setattr(save_targets[failing], failing_save)
+    composition.settings_session.start()
+    composition.playlist_session.start()
+    composition.ui_state_session.start()
+    composition.app_settings.apply(replace(composition.app_settings.settings, volume=0.5))
+    composition.playlist_model.add_paths(audio_files)
+    composition.window.set_last_open_directory(Path("C:\\Music"))
+
+    assert composition.settings_session.flush() is (failing != "settings")
+    assert composition.playlist_session.flush() is (failing != "playlist")
+    assert composition.ui_state_session.flush() is (failing != "ui_state")
+    composition.controller.set_playback_rate(1.25)
+    assert composition.controller.playback_rate == pytest.approx(1.25)
+    if failing != "playlist":
+        assert len(load_playlist(playlist_file)) == len(audio_files)
+
+
+# -- 終了処理 ---------------------------------------------------------------
+
+
+def test_shutdown_continues_after_a_raising_step(
+    composition: app_module.PlayerComposition,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """1カテゴリで例外が出ても、後続の終了処理を飛ばさない。"""
+    performed: list[str] = []
+
+    def explode() -> None:
+        performed.append("waveform")
+        raise RuntimeError("停止に失敗")
+
+    def record_flush() -> bool:
+        performed.append("ui_state_flush")
+        return False
+
+    def record_settings_flush() -> bool:
+        performed.append("settings_flush")
+        return False
+
+    def record_stop() -> None:
+        performed.append("app_settings_shutdown")
+
+    monkeypatch.setattr(composition.waveform_analysis, "shutdown", explode)
+    monkeypatch.setattr(composition.ui_state_session, "flush", record_flush)
+    monkeypatch.setattr(composition.settings_session, "flush", record_settings_flush)
+    monkeypatch.setattr(composition.app_settings, "shutdown", record_stop)
+
+    with caplog.at_level(logging.ERROR):
+        app_module.shutdown(composition)
+
+    assert performed == [
+        "waveform",
+        "ui_state_flush",
+        "settings_flush",
+        "app_settings_shutdown",
+    ]
+    assert "終了処理" in caplog.text
+
+
+def test_shutdown_stops_every_worker_and_timer(
+    composition: app_module.PlayerComposition, qtbot: QtBot
+) -> None:
+    """終了処理でworkerとtimerが残らない。"""
+    window = composition.window
+    window.show()
+    qtbot.waitExposed(window)
+    composition.settings_session.start()
+    composition.playlist_session.start()
+    composition.ui_state_session.start()
+
+    app_module.shutdown(composition)
+
+    assert composition.settings_session.is_running is False
+    assert composition.playlist_session.is_running is False
+    assert composition.ui_state_session.is_running is False
+    assert composition.window.spectrum_panel.is_timer_active is False
+    assert composition.waveform_analysis.is_running is False
+    assert composition.metadata_reader.is_running is False
+
+
+def test_shutdown_is_safe_with_the_settings_dialog_open(
+    composition: app_module.PlayerComposition, qtbot: QtBot
+) -> None:
+    """設定ダイアログを開いたまま終了しても安全。"""
+    window = composition.window
+    window.show()
+    qtbot.waitExposed(window)
+    window.open_settings()
+    assert window.settings_dialog is not None
+
+    app_module.shutdown(composition)
+    window.close()
+
+    assert composition.settings_session.is_running is False

@@ -6,7 +6,9 @@ UI は PlaybackController しか知らない。
 依存方向: MainWindow / PlayerControls → PlaybackController → PlaybackBackend
 """
 
+import logging
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,8 +22,9 @@ from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.services import logging_setup
 from sdp.services.pcm_tap import PcmTap
 from sdp.services.playlist_session import PlaylistSession, default_playlist_path
+from sdp.services.save_status import SaveCategory, SaveStatusReporter, restore_failure_message
 from sdp.services.settings import AppSettingsController, SettingsSession
-from sdp.services.ui_state_session import UiStateSession
+from sdp.services.ui_state_session import PlaylistUiStateSource, UiStateSession
 from sdp.services.user_paths import (
     default_settings_path,
     default_ui_state_path,
@@ -29,6 +32,8 @@ from sdp.services.user_paths import (
 )
 from sdp.services.waveform_analysis import WaveformAnalysisService
 from sdp.ui.main_window import MainWindow
+
+_logger = logging.getLogger(__name__)
 
 APPLICATION_NAME = "sdp"
 ORGANIZATION_NAME = "sdp"
@@ -55,6 +60,7 @@ class PlayerComposition:
     pcm_tap: PcmTap
     app_settings: AppSettingsController
     ui_state_session: UiStateSession
+    save_status: SaveStatusReporter
     window: MainWindow
 
 
@@ -80,18 +86,20 @@ def build_player(
     """
     backend = QtMultimediaBackend()
     controller = PlaybackController(backend)
-    # 設定の適用先はControllerと可視化の2系統。調停はAppSettingsControllerが持ち、
-    # SettingsSessionはファイル復元とデバウンス保存だけを担う。
-    app_settings = AppSettingsController(controller)
+    playlist_model = PlaylistModel()
+    playlist_playback = PlaylistPlaybackController(controller, playlist_model)
+    # 設定の適用先は PlaybackController（速度・ピッチ・音量・ミュート）、
+    # PlaylistPlaybackController（Repeat・Shuffle）、可視化の3系統。
+    # 調停はAppSettingsControllerが持ち、SettingsSessionはファイル復元と
+    # デバウンス保存だけを担う。
+    app_settings = AppSettingsController(controller, playlist_playback)
     settings_session = SettingsSession(
         default_settings_path() if settings_file is None else settings_file,
         app_settings,
     )
-    settings_restore_message = settings_session.load()
-    playlist_model = PlaylistModel()
-    playlist_playback = PlaylistPlaybackController(controller, playlist_model)
+    settings_session.load()
     session = PlaylistSession(default_playlist_path() if playlist_file is None else playlist_file)
-    restore_message = session.load_into(playlist_model)
+    playlist_restore_message = session.load_into(playlist_model)
     # 生成だけで読み取りは始めない（start() は run() が呼ぶ）。
     metadata_reader = MetadataReader(playlist_model)
     waveform_analysis = WaveformAnalysisService(
@@ -114,18 +122,39 @@ def build_player(
         app_settings,
     )
     # 可視化の表示設定（AppSettings）を適用済みのWindowへ、UI状態を重ねて復元する。
+    # 現在曲の復元はentry_idの照合が要るため、Windowではなくこのアダプターが担う。
+    ui_state_source = PlaylistUiStateSource(window, playlist_playback)
     ui_state_session = UiStateSession(
         default_ui_state_path() if ui_state_file is None else ui_state_file,
-        window,
+        ui_state_source,
     )
-    ui_state_restore_message = ui_state_session.load_into_window()
-    restore_messages = [
-        message
-        for message in (restore_message, settings_restore_message, ui_state_restore_message)
-        if message is not None
+    ui_state_session.load_into_window()
+    # 復元に失敗したカテゴリだけをまとめて1文にする（生の例外もパスも見せない）。
+    failed = [
+        category
+        for category, enabled in (
+            (SaveCategory.SETTINGS, settings_session.is_save_enabled),
+            (SaveCategory.PLAYLIST, session.is_save_enabled),
+            (SaveCategory.UI_STATE, ui_state_session.is_save_enabled),
+        )
+        if not enabled
     ]
-    if restore_messages:
-        window.show_status_message(" ".join(restore_messages))
+    restore_message = restore_failure_message(failed)
+    if restore_message is not None:
+        window.show_status_message(restore_message)
+    elif playlist_restore_message is not None:
+        window.show_status_message(playlist_restore_message)
+
+    # 保存失敗は操作中でも短く伝える（同じ失敗を出し続けない）。
+    save_status = SaveStatusReporter()
+    save_status.watch(
+        SaveCategory.SETTINGS, settings_session.save_failed, settings_session.save_recovered
+    )
+    save_status.watch(SaveCategory.PLAYLIST, session.save_failed, session.save_recovered)
+    save_status.watch(
+        SaveCategory.UI_STATE, ui_state_session.save_failed, ui_state_session.save_recovered
+    )
+    save_status.message_requested.connect(window.show_status_message)
     return PlayerComposition(
         backend=backend,
         controller=controller,
@@ -138,6 +167,7 @@ def build_player(
         pcm_tap=pcm_tap,
         app_settings=app_settings,
         ui_state_session=ui_state_session,
+        save_status=save_status,
         window=window,
     )
 
@@ -169,6 +199,7 @@ def run(argv: list[str] | None = None) -> int:
     composition = build_player()
     # 復元完了後から変更監視を始める（load中のSignalを自動保存扱いしない）。
     composition.settings_session.start()
+    composition.playlist_session.start()
     # メタデータの読み取りはここで開始する（GUI スレッドはブロックしない）。
     composition.metadata_reader.start()
     composition.waveform_analysis.start()
@@ -176,18 +207,36 @@ def run(argv: list[str] | None = None) -> int:
     # 表示で生じるmove／resizeを「ユーザー変更」として保存しないよう、show後に監視を始める。
     composition.ui_state_session.start()
     exit_code = app.exec()
-    # 可視化を先に止め、破棄済みQObjectへシグナルが飛ばないようにする。
-    composition.window.spectrum_panel.shutdown()
-    composition.pcm_tap.shutdown()
-    # ワーカーを止めてから保存する。保存の失敗はログへ残すだけにする
-    # （ウィンドウが閉じた後でユーザーへ提示できないため）。
-    composition.waveform_analysis.shutdown()
-    composition.metadata_reader.shutdown()
-    # Windowが生きているあいだにUI状態を確定させる（破棄後はgeometryを取得できない）。
-    composition.ui_state_session.flush()
-    composition.settings_session.flush()
-    composition.playlist_session.save_from(composition.playlist_model)
-    composition.ui_state_session.stop()
-    composition.settings_session.stop()
-    composition.app_settings.shutdown()
+    shutdown(composition)
     return exit_code
+
+
+def shutdown(composition: PlayerComposition) -> None:
+    """終了処理をカテゴリごとに分離して実行する。
+
+    1カテゴリの例外で後続を飛ばさないよう、各段を独立して実行する
+    （大きなライフサイクル基盤は作らず、順序と分離だけをここで守る）。
+    保存APIの ``False`` は「変更なし」と「内部で記録済みの失敗」の両方を表すため、
+    ここでは失敗判定に使わない。例外だけを段階の失敗として記録し、保存失敗の詳細は
+    各Sessionのログへ任せる（ウィンドウが閉じた後は提示できないため）。
+    """
+    steps: list[tuple[str, Callable[[], object]]] = [
+        # 可視化を先に止め、破棄済みQObjectへシグナルが飛ばないようにする。
+        ("可視化の停止", composition.window.spectrum_panel.shutdown),
+        ("PCMタップの停止", composition.pcm_tap.shutdown),
+        ("波形解析の停止", composition.waveform_analysis.shutdown),
+        ("メタデータ読み取りの停止", composition.metadata_reader.shutdown),
+        # Windowが生きているあいだにUI状態を確定させる（破棄後はgeometryを取得できない）。
+        ("ウィンドウ状態の保存", composition.ui_state_session.flush),
+        ("設定の保存", composition.settings_session.flush),
+        ("プレイリストの保存", composition.playlist_session.flush),
+        ("プレイリスト監視の停止", composition.playlist_session.stop),
+        ("ウィンドウ状態監視の停止", composition.ui_state_session.stop),
+        ("設定監視の停止", composition.settings_session.stop),
+        ("設定調停の停止", composition.app_settings.shutdown),
+    ]
+    for name, step in steps:
+        try:
+            step()
+        except Exception:
+            _logger.exception("終了処理の%sに失敗しました", name)

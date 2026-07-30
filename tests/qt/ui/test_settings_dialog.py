@@ -4,6 +4,7 @@
 """
 
 from collections.abc import Iterator
+from dataclasses import replace
 
 import pytest
 from PySide6.QtCore import Qt
@@ -11,15 +12,20 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QAbstractButton,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QLabel,
+    QSlider,
+    QSpinBox,
+    QWidget,
 )
 from pytestqt.qtbot import QtBot
 from shiboken6 import isValid
 
 from sdp.core.playback.preferences import MAX_PLAYBACK_RATE, MIN_PLAYBACK_RATE
-from sdp.services.settings import AppSettings
+from sdp.services.settings import AppSettings, RepeatModeSetting
 from sdp.ui.settings_dialog import APPLY_FAILED_MESSAGE, INVALID_MESSAGE, SettingsDialog
 
 CURRENT = AppSettings(
@@ -28,6 +34,10 @@ CURRENT = AppSettings(
     waveform_visible=True,
     spectrum_visible=False,
     level_meter_visible=True,
+    volume=0.4,
+    muted=True,
+    repeat_mode=RepeatModeSetting.ALL,
+    shuffle_enabled=True,
 )
 
 
@@ -162,15 +172,7 @@ def test_apply_requests_without_closing(dialog: SettingsDialog, qtbot: QtBot) ->
     apply_button = button(dialog, QDialogButtonBox.StandardButton.Apply)
     apply_button.click()
 
-    assert received == [
-        AppSettings(
-            playback_rate=1.5,
-            pitch_compensation=False,
-            waveform_visible=True,
-            spectrum_visible=True,
-            level_meter_visible=True,
-        )
-    ]
+    assert received == [replace(CURRENT, playback_rate=1.5, spectrum_visible=True)]
     assert dialog.isVisible()
     assert dialog.applied_settings.playback_rate == pytest.approx(1.5)
 
@@ -344,3 +346,181 @@ def test_deleted_dialog_leaves_no_callback(qtbot: QtBot) -> None:
     qtbot.waitUntil(lambda: not isValid(instance))
 
     assert received == []
+
+
+# -- 再生設定の追加項目（P6-C）----------------------------------------------
+
+
+def slider(dialog: SettingsDialog) -> QSlider:
+    widget = dialog.findChild(QSlider, "settingsVolumeSlider")
+    assert widget is not None
+    return widget
+
+
+def volume_spin_box(dialog: SettingsDialog) -> QSpinBox:
+    widget = dialog.findChild(QSpinBox, "settingsVolumeSpinBox")
+    assert widget is not None
+    return widget
+
+
+def repeat_combo_box(dialog: SettingsDialog) -> QComboBox:
+    widget = dialog.findChild(QComboBox, "settingsRepeatModeComboBox")
+    assert widget is not None
+    return widget
+
+
+def test_playback_state_inputs_show_the_applied_values(dialog: SettingsDialog) -> None:
+    """音量・ミュート・Repeat・Shuffleの初期値を表示する。"""
+    assert slider(dialog).value() == 40
+    assert volume_spin_box(dialog).value() == 40
+    assert check_box(dialog, "settingsMutedCheckBox").isChecked() is True
+    assert repeat_combo_box(dialog).currentData() is RepeatModeSetting.ALL
+    assert check_box(dialog, "settingsShuffleCheckBox").isChecked() is True
+
+
+def test_volume_unit_is_visible(dialog: SettingsDialog) -> None:
+    """音量の単位（％）を明示する。"""
+    assert volume_spin_box(dialog).suffix() == "％"
+    assert volume_spin_box(dialog).minimum() == 0
+    assert volume_spin_box(dialog).maximum() == 100
+
+
+def test_volume_slider_and_spin_box_stay_in_sync(dialog: SettingsDialog) -> None:
+    """スライダーと数値入力が双方向に同期し、再帰しない。"""
+    slider(dialog).setValue(75)
+    assert volume_spin_box(dialog).value() == 75
+
+    volume_spin_box(dialog).setValue(20)
+    assert slider(dialog).value() == 20
+    assert dialog.current_input().volume == pytest.approx(0.2)
+
+
+def test_repeat_combo_box_shows_japanese_labels(dialog: SettingsDialog) -> None:
+    """Repeatの選択肢は日本語で、保存用の文字列を見せない。"""
+    combo = repeat_combo_box(dialog)
+    labels = [combo.itemText(index) for index in range(combo.count())]
+
+    assert labels == ["オフ", "全曲", "1曲"]
+    for label in labels:
+        assert label not in {"off", "all", "one"}
+
+
+@pytest.mark.parametrize(
+    ("index", "expected"),
+    [(0, RepeatModeSetting.OFF), (1, RepeatModeSetting.ALL), (2, RepeatModeSetting.ONE)],
+)
+def test_every_repeat_choice_can_be_requested(
+    dialog: SettingsDialog, index: int, expected: RepeatModeSetting
+) -> None:
+    """Repeatの全項目を適用要求へ載せられる。"""
+    received = requests_of(dialog)
+    repeat_combo_box(dialog).setCurrentIndex(index)
+
+    assert dialog.apply_settings() is True
+
+    assert len(received) == 1
+    assert isinstance(received[0], AppSettings)
+    assert received[0].repeat_mode is expected
+
+
+def test_applying_playback_state_requests_every_field(dialog: SettingsDialog) -> None:
+    """音量・ミュート・Shuffleの変更が1回の要求へまとまる。"""
+    received = requests_of(dialog)
+    volume_spin_box(dialog).setValue(10)
+    check_box(dialog, "settingsMutedCheckBox").setChecked(False)
+    check_box(dialog, "settingsShuffleCheckBox").setChecked(False)
+
+    assert dialog.apply_settings() is True
+
+    assert len(received) == 1
+    requested = received[0]
+    assert isinstance(requested, AppSettings)
+    assert requested.volume == pytest.approx(0.1)
+    assert requested.muted is False
+    assert requested.shuffle_enabled is False
+
+
+def test_cancel_restores_the_playback_state_inputs(dialog: SettingsDialog, qtbot: QtBot) -> None:
+    """Cancelで未適用の音量・Repeat編集を破棄する。"""
+    dialog.show()
+    qtbot.waitExposed(dialog)
+    volume_spin_box(dialog).setValue(5)
+    repeat_combo_box(dialog).setCurrentIndex(2)
+
+    dialog.reject()
+
+    assert volume_spin_box(dialog).value() == 40
+    assert repeat_combo_box(dialog).currentData() is RepeatModeSetting.ALL
+
+
+def test_external_change_is_taken_when_unedited(dialog: SettingsDialog) -> None:
+    """編集していなければ、PlayerControls等の変更を取り込む。"""
+    updated = replace(CURRENT, volume=0.9, muted=False)
+
+    assert dialog.refresh_if_unedited(updated) is True
+
+    assert volume_spin_box(dialog).value() == 90
+    assert check_box(dialog, "settingsMutedCheckBox").isChecked() is False
+    assert dialog.applied_settings == updated
+
+
+def test_external_change_does_not_overwrite_unapplied_edits(dialog: SettingsDialog) -> None:
+    """編集中は入力も比較基準も書き換えず、同じsnapshot世代を維持する。"""
+    volume_spin_box(dialog).setValue(15)
+
+    assert dialog.has_unapplied_edits() is True
+    assert dialog.refresh_if_unedited(replace(CURRENT, volume=0.9)) is False
+
+    assert volume_spin_box(dialog).value() == 15
+    assert dialog.applied_settings == CURRENT
+
+
+def test_apply_after_external_change_uses_the_opened_snapshot(dialog: SettingsDialog) -> None:
+    """編集中の外部変更後も、Applyはダイアログを開いた時点のsnapshot全体を使う。"""
+    requested = requests_of(dialog)
+    check_box(dialog, "settingsWaveformVisibleCheckBox").setChecked(False)
+
+    assert dialog.refresh_if_unedited(replace(CURRENT, volume=0.8)) is False
+    assert dialog.apply_settings() is True
+
+    assert requested == [replace(CURRENT, waveform_visible=False)]
+
+
+def test_tab_order_follows_the_visual_order(dialog: SettingsDialog, qtbot: QtBot) -> None:
+    """Tabで速度→ピッチ→音量→ミュートの順に移動できる。"""
+    dialog.show()
+    qtbot.waitExposed(dialog)
+    spin_box(dialog).setFocus()
+
+    order: list[str] = []
+    for _ in range(4):
+        # PySideのstubはNoneを含めないが、実際はフォーカスが無いことがある。
+        focused: QWidget | None = dialog.focusWidget()
+        order.append("" if focused is None else focused.objectName())  # pyright: ignore[reportUnnecessaryComparison]
+        QTest.keyClick(dialog, Qt.Key.Key_Tab)
+
+    assert order[0] == "settingsPlaybackRateSpinBox"
+    assert "settingsPitchCompensationCheckBox" in order
+    assert "settingsVolumeSlider" in order
+
+
+def test_labels_have_buddies(dialog: SettingsDialog) -> None:
+    """ラベルと入力をbuddyで関連付ける（ニーモニックと読み上げ）。"""
+    buddies: set[str] = set()
+    for label in dialog.findChildren(QLabel):
+        # buddyが無いラベル（エラー表示など）はstub上Noneにならないが実際はある。
+        buddy: QWidget | None = label.buddy()
+        if buddy is not None:  # pyright: ignore[reportUnnecessaryComparison]
+            buddies.add(buddy.objectName())
+
+    assert "settingsPlaybackRateSpinBox" in buddies
+    assert "settingsVolumeSlider" in buddies
+    assert "settingsRepeatModeComboBox" in buddies
+
+
+def test_minimum_size_hint_stays_reasonable(dialog: SettingsDialog) -> None:
+    """150%相当のスケールでも収まるよう、最小サイズを小さく保つ。"""
+    hint = dialog.minimumSizeHint()
+
+    assert hint.width() <= 640
+    assert hint.height() <= 640

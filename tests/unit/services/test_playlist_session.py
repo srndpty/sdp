@@ -1,13 +1,13 @@
 """プレイリストの復元・保存ライフサイクルを検証する。"""
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import pytest
 from pytestqt.qtbot import QtBot
 
-from sdp.core.playlist.entry import create_entry
+from sdp.core.playlist.entry import PlaylistEntry, create_entry
 from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.persistence import load_playlist, save_playlist
 from sdp.services.playlist_session import (
@@ -258,3 +258,98 @@ def test_save_error_is_logged_without_raising(
         assert session.save_from(model) is False
 
     assert "保存に失敗" in caplog.text
+
+
+def test_save_failure_and_recovery_are_reported_only_on_transitions(
+    tmp_path: Path,
+    model: PlaylistModel,
+    audio_files: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """連続失敗と連続成功では通知を増やさず、状態遷移だけを通知する。"""
+    model.add_paths(audio_files)
+    session = PlaylistSession(tmp_path / "playlist.json")
+    failures: list[int] = []
+    recoveries: list[int] = []
+    session.save_failed.connect(lambda: failures.append(1))
+    session.save_recovered.connect(lambda: recoveries.append(1))
+    should_fail = True
+    original = save_playlist
+
+    def conditional_save(path: Path, entries: Sequence[PlaylistEntry]) -> None:
+        if should_fail:
+            raise OSError("一時的な保存失敗")
+        original(path, entries)
+
+    monkeypatch.setattr("sdp.services.playlist_session.save_playlist", conditional_save)
+
+    assert session.save_from(model) is False
+    assert session.save_from(model) is False
+    assert failures == [1]
+    assert recoveries == []
+
+    should_fail = False
+    assert session.save_from(model) is True
+    assert session.save_from(model) is True
+    assert failures == [1]
+    assert recoveries == [1]
+
+
+def test_model_structure_changes_are_saved_after_debounce(
+    tmp_path: Path,
+    model: PlaylistModel,
+    audio_files: list[Path],
+    qtbot: QtBot,
+) -> None:
+    """追加・移動・削除をまとめ、操作中に最終的な並びを保存する。"""
+    file_path = tmp_path / "playlist.json"
+    session = PlaylistSession(file_path, debounce_ms=10)
+    session.start(model)
+
+    model.add_paths(audio_files)
+    model.moveRows(model.index(0, 0).parent(), 0, 1, model.index(0, 0).parent(), 3)
+    model.removeRows(0, 1)
+
+    qtbot.waitUntil(file_path.exists, timeout=2_000)
+    assert [entry.entry_id for entry in load_playlist(file_path)] == [
+        entry.entry_id for entry in model.entries()
+    ]
+    session.stop()
+
+
+def test_stop_disconnects_model_and_cancels_pending_save(
+    tmp_path: Path,
+    model: PlaylistModel,
+    audio_files: list[Path],
+    qtbot: QtBot,
+) -> None:
+    """停止後のModel変更では保存タイマーを再開しない。"""
+    file_path = tmp_path / "playlist.json"
+    session = PlaylistSession(file_path, debounce_ms=10)
+    session.start(model)
+    session.stop()
+
+    model.add_paths(audio_files)
+    qtbot.wait(30)
+
+    assert session.is_running is False
+    assert not file_path.exists()
+
+
+def test_metadata_change_is_not_a_playlist_save_trigger(
+    tmp_path: Path,
+    model: PlaylistModel,
+    audio_files: list[Path],
+    qtbot: QtBot,
+) -> None:
+    """永続化内容を変えないmetadataのdataChangedでは保存しない。"""
+    file_path = tmp_path / "playlist.json"
+    model.add_paths(audio_files[:1])
+    session = PlaylistSession(file_path, debounce_ms=10)
+    session.start(model)
+
+    assert model.mark_metadata_loading(model.entry_at(0).entry_id) is True
+    qtbot.wait(30)
+
+    assert not file_path.exists()
+    session.stop()

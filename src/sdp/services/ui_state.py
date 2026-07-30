@@ -21,7 +21,18 @@ from typing import Any, cast
 
 _logger = logging.getLogger(__name__)
 
-UI_STATE_SCHEMA_VERSION = 1
+UI_STATE_SCHEMA_VERSION = 2
+"""現在のschema version。
+
+- version 1: window / main_splitter / last_open_directory
+- version 2: current_playlist_entry_id を追加
+
+再生位置と再生中かどうかは**保存しない**（[architecture.md](../../../docs/architecture.md) §9.6）。
+"""
+
+SUPPORTED_UI_STATE_SCHEMA_VERSIONS = (1, 2)
+"""読み込みを許可するschema version。未知のversionは既定値へ丸めず失敗させる。"""
+
 RESTORE_FAILED_MESSAGE = "ウィンドウ状態の復元に失敗しました。既定の位置で起動します。"
 
 MINIMUM_VISIBLE_WIDTH = 80
@@ -123,11 +134,18 @@ class SplitterState:
 
 @dataclass(frozen=True, slots=True)
 class UiState:
-    """保存するUI状態一式。未保存の項目は ``None``。"""
+    """保存するUI状態一式。未保存の項目は ``None``。
+
+    ``current_playlist_entry_id`` は「前回終了時に選ばれていた曲」の entry_id。
+    行番号やパスではなく entry_id で保存するため、並べ替えても重複曲があっても
+    同じ entry へ戻れる。**このモジュールは PlaylistModel を参照しない**ので、
+    実在するかどうかの照合は composition／プレイリスト調停層が行う。
+    """
 
     window: WindowState | None = None
     main_splitter: SplitterState | None = None
     last_open_directory: Path | None = None
+    current_playlist_entry_id: str | None = None
 
     def __post_init__(self) -> None:
         # 型注釈はあるが、呼び出し側の実行時の誤りも表面化させる。
@@ -135,6 +153,14 @@ class UiState:
             value: object = getattr(self, name)
             if value is not None and not isinstance(value, expected):
                 raise TypeError(f"{name}は{expected.__name__}である必要があります: {value!r}")
+        entry_id: object = self.current_playlist_entry_id
+        if entry_id is not None:
+            if not isinstance(entry_id, str):  # pyright: ignore[reportUnnecessaryIsInstance]
+                raise TypeError(
+                    f"current_playlist_entry_idは文字列である必要があります: {entry_id!r}"
+                )
+            if not entry_id:
+                raise ValueError("current_playlist_entry_idに空文字は使えません")
         directory: object = self.last_open_directory
         if directory is not None:
             if not isinstance(directory, Path):  # pyright: ignore[reportUnnecessaryIsInstance]
@@ -166,14 +192,19 @@ def load_ui_state(file_path: Path) -> UiState:
     document = cast("dict[str, object]", parsed)
 
     version = document.get("schema_version")
-    if type(version) is not int or version != UI_STATE_SCHEMA_VERSION:
+    if type(version) is not int or version not in SUPPORTED_UI_STATE_SCHEMA_VERSIONS:
         raise UiStateFileError(
-            f"未対応のUI状態schema_versionです（期待 {UI_STATE_SCHEMA_VERSION}、実際 {version!r}）"
+            "未対応のUI状態schema_versionです"
+            f"（対応 {list(SUPPORTED_UI_STATE_SCHEMA_VERSIONS)}、実際 {version!r}）"
         )
     return UiState(
         window=_window_from_json(document.get("window")),
         main_splitter=_splitter_from_json(document.get("main_splitter")),
         last_open_directory=_directory_from_json(document.get("last_open_directory")),
+        # v1には現在曲が無い。v2のキーが混入していてもv1の意味へ影響させない。
+        current_playlist_entry_id=(
+            _entry_id_from_json(document.get("current_playlist_entry_id")) if version >= 2 else None
+        ),
     )
 
 
@@ -197,6 +228,8 @@ def save_ui_state(file_path: Path, state: UiState) -> None:
         }
     if state.last_open_directory is not None:
         document["last_open_directory"] = str(state.last_open_directory)
+    if state.current_playlist_entry_id is not None:
+        document["current_playlist_entry_id"] = state.current_playlist_entry_id
 
     # 検証に成功するまでディレクトリも一時ファイルも作らない。
     file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -422,6 +455,15 @@ def _directory_from_json(value: object) -> Path | None:
     if not _is_absolute_path(directory):
         raise UiStateFileError(f"last_open_directoryが絶対パスではありません: {value!r}")
     return directory
+
+
+def _entry_id_from_json(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise UiStateFileError(f"current_playlist_entry_idが文字列ではありません: {value!r}")
+    # 空文字は「未保存」へ統一する（空のIDで照合しない）。
+    return value or None
 
 
 def _is_absolute_path(path: Path) -> bool:
