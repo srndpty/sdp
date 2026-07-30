@@ -474,8 +474,14 @@ class MainWindow(QMainWindow):
             dialog.deleteLater()
 
     def _on_settings_changed(self, settings: object) -> None:
-        if isinstance(settings, AppSettings):
-            self._apply_visualization_settings(settings)
+        if not isinstance(settings, AppSettings):
+            return
+        self._apply_visualization_settings(settings)
+        dialog = self._settings_dialog
+        if dialog is not None:
+            # PlayerControlsやショートカットからの変更は、ダイアログを編集中でなければ
+            # 取り込む。編集中は入力を勝手に書き換えない（未適用編集を失わせない）。
+            dialog.refresh_if_unedited(settings)
 
     def _apply_visualization_settings(self, settings: AppSettings) -> None:
         """可視化の表示ON/OFFを各Panelへ配る（解析停止は各Panelの責務）。"""

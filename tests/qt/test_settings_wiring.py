@@ -3,6 +3,7 @@
 import json
 import logging
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -11,10 +12,15 @@ from shiboken6 import isValid
 
 from fakes.fake_playback_backend import FakePlaybackBackend
 from sdp.core.playback.controller import PlaybackController
+from sdp.core.playlist.model import PlaylistModel
+from sdp.core.playlist.playback_controller import PlaylistPlaybackController
+from sdp.core.playlist.types import RepeatMode
 from sdp.services.settings import (
     RESTORE_FAILED_MESSAGE,
+    SETTINGS_SCHEMA_VERSION,
     AppSettings,
     AppSettingsController,
+    RepeatModeSetting,
     SettingsSession,
     load_settings,
     save_settings,
@@ -526,7 +532,7 @@ def test_version_one_file_is_not_rewritten_on_startup(
 def test_version_one_is_upgraded_on_the_next_change(
     tmp_path: Path, controller: PlaybackController, qtbot: QtBot
 ) -> None:
-    """次の変更で初めてversion 2として保存される。"""
+    """次の変更で初めて現在のversionとして保存される。"""
     path = tmp_path / "settings.json"
     path.write_text(
         '{"schema_version": 1, "playback_rate": 1.5, "pitch_compensation": false}\n',
@@ -538,8 +544,261 @@ def test_version_one_is_upgraded_on_the_next_change(
 
     controller.set_playback_rate(1.25)
 
-    qtbot.waitUntil(lambda: json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 2)
+    qtbot.waitUntil(
+        lambda: (
+            json.loads(path.read_text(encoding="utf-8"))["schema_version"]
+            == SETTINGS_SCHEMA_VERSION
+        )
+    )
     document = json.loads(path.read_text(encoding="utf-8"))
     assert document["playback_rate"] == pytest.approx(1.25)
     assert document["waveform_visible"] is True
     session.stop()
+
+
+# -- 2つのControllerの調停（P6-C）-------------------------------------------
+
+
+@pytest.fixture
+def playlist_model() -> PlaylistModel:
+    return PlaylistModel()
+
+
+@pytest.fixture
+def playlist_playback(
+    controller: PlaybackController, playlist_model: PlaylistModel
+) -> PlaylistPlaybackController:
+    return PlaylistPlaybackController(controller, playlist_model)
+
+
+def make_full_app_settings(
+    controller: PlaybackController, playlist_playback: PlaylistPlaybackController
+) -> AppSettingsController:
+    return AppSettingsController(controller, playlist_playback)
+
+
+def test_initial_snapshot_includes_playback_state(
+    controller: PlaybackController, playlist_playback: PlaylistPlaybackController
+) -> None:
+    """音量・ミュート・Repeat・Shuffleの実効値もsnapshotへ入る。"""
+    controller.set_volume(0.3)
+    playlist_playback.set_repeat_mode(RepeatMode.ONE)
+
+    app_settings = make_full_app_settings(controller, playlist_playback)
+
+    assert app_settings.settings.volume == pytest.approx(0.3)
+    assert app_settings.settings.muted is False
+    assert app_settings.settings.repeat_mode is RepeatModeSetting.ONE
+    assert app_settings.settings.shuffle_enabled is False
+
+
+def test_apply_reaches_both_controllers_with_one_notification(
+    controller: PlaybackController,
+    playlist_playback: PlaylistPlaybackController,
+    backend: FakePlaybackBackend,
+) -> None:
+    """6項目以上を一括適用しても通知は1回で、両Controllerの実効値と一致する。"""
+    app_settings = make_full_app_settings(controller, playlist_playback)
+    notified: list[object] = []
+    app_settings.settings_changed.connect(notified.append)
+
+    app_settings.apply(
+        AppSettings(
+            playback_rate=1.25,
+            pitch_compensation=False,
+            waveform_visible=False,
+            spectrum_visible=False,
+            level_meter_visible=False,
+            volume=0.2,
+            muted=True,
+            repeat_mode=RepeatModeSetting.ALL,
+            shuffle_enabled=True,
+        )
+    )
+
+    assert len(notified) == 1
+    assert controller.playback_rate == pytest.approx(1.25)
+    assert controller.volume == pytest.approx(0.2)
+    assert controller.muted is True
+    assert backend.muted is True
+    assert playlist_playback.repeat_mode is RepeatMode.ALL
+    assert playlist_playback.shuffle_enabled is True
+    # 通知時点でsnapshotと実効値が一致している。
+    assert app_settings.settings.volume == pytest.approx(controller.volume)
+    assert app_settings.settings.repeat_mode is RepeatModeSetting.from_repeat_mode(
+        playlist_playback.repeat_mode
+    )
+
+
+def test_player_controls_changes_are_mirrored(
+    controller: PlaybackController, playlist_playback: PlaylistPlaybackController
+) -> None:
+    """PlayerControlsやショートカット経由の変更もsnapshotへ取り込む。"""
+    app_settings = make_full_app_settings(controller, playlist_playback)
+    notified: list[object] = []
+    app_settings.settings_changed.connect(notified.append)
+
+    controller.set_volume(0.6)
+    controller.set_muted(True)
+    playlist_playback.set_repeat_mode(RepeatMode.ALL)
+    playlist_playback.set_shuffle_enabled(True)
+
+    assert app_settings.settings.volume == pytest.approx(0.6)
+    assert app_settings.settings.muted is True
+    assert app_settings.settings.repeat_mode is RepeatModeSetting.ALL
+    assert app_settings.settings.shuffle_enabled is True
+    assert len(notified) == 4
+
+
+def test_failed_apply_rolls_back_every_changed_controller(
+    controller: PlaybackController,
+    playlist_playback: PlaylistPlaybackController,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2つ目以降のsetterが失敗したら、部分適用を残さず元へ戻す。"""
+    app_settings = make_full_app_settings(controller, playlist_playback)
+    before = app_settings.settings
+    notified: list[object] = []
+    app_settings.settings_changed.connect(notified.append)
+
+    def explode(enabled: bool) -> None:
+        del enabled
+        raise RuntimeError("シャッフルを設定できません")
+
+    monkeypatch.setattr(playlist_playback, "set_shuffle_enabled", explode)
+
+    with pytest.raises(RuntimeError):
+        app_settings.apply(
+            replace(
+                before,
+                playback_rate=1.5,
+                volume=0.1,
+                muted=True,
+                repeat_mode=RepeatModeSetting.ONE,
+                shuffle_enabled=True,
+            )
+        )
+
+    assert controller.playback_rate == pytest.approx(before.playback_rate)
+    assert controller.volume == pytest.approx(before.volume)
+    assert controller.muted is before.muted
+    assert playlist_playback.repeat_mode is before.repeat_mode.to_repeat_mode()
+    # 未適用のsnapshotは公開しない（保存も予約されない）。
+    assert app_settings.settings == before
+    assert notified == []
+
+
+def test_apply_after_shutdown_is_rejected(
+    controller: PlaybackController, playlist_playback: PlaylistPlaybackController
+) -> None:
+    """shutdown後の適用は拒否し、Controllerへ触れない。"""
+    app_settings = make_full_app_settings(controller, playlist_playback)
+    app_settings.shutdown()
+
+    with pytest.raises(RuntimeError, match="shutdown後"):
+        app_settings.apply(replace(app_settings.settings, volume=0.1))
+
+    assert controller.volume == pytest.approx(1.0)
+
+
+def test_shutdown_stops_mirroring_both_controllers(
+    controller: PlaybackController, playlist_playback: PlaylistPlaybackController
+) -> None:
+    """shutdown後は両Controllerの変更を取り込まない。"""
+    app_settings = make_full_app_settings(controller, playlist_playback)
+
+    app_settings.shutdown()
+    controller.set_volume(0.1)
+    playlist_playback.set_shuffle_enabled(True)
+
+    assert app_settings.settings.volume == pytest.approx(1.0)
+    assert app_settings.settings.shuffle_enabled is False
+
+
+def test_session_saves_playback_state(
+    tmp_path: Path,
+    controller: PlaybackController,
+    playlist_playback: PlaylistPlaybackController,
+    qtbot: QtBot,
+) -> None:
+    """音量・Repeatの変更もデバウンス保存され、次回のloadで戻る。"""
+    path = tmp_path / "settings.json"
+    app_settings = make_full_app_settings(controller, playlist_playback)
+    session = SettingsSession(path, app_settings, debounce_ms=DEBOUNCE_MS, retry_ms=DEBOUNCE_MS)
+    session.load()
+    session.start()
+
+    controller.set_volume(0.35)
+    playlist_playback.set_repeat_mode(RepeatMode.ALL)
+
+    qtbot.waitUntil(path.is_file, timeout=2_000)
+    qtbot.waitUntil(
+        lambda: load_settings(path, AppSettings(1.0, True)).repeat_mode is RepeatModeSetting.ALL,
+        timeout=2_000,
+    )
+    restored = load_settings(path, AppSettings(1.0, True))
+    assert restored.volume == pytest.approx(0.35)
+    assert restored.repeat_mode is RepeatModeSetting.ALL
+    session.stop()
+
+
+def test_load_applies_playback_state_to_both_controllers(
+    tmp_path: Path,
+    controller: PlaybackController,
+    playlist_playback: PlaylistPlaybackController,
+) -> None:
+    """復元でPlaybackControllerとPlaylistPlaybackControllerの両方へ適用する。"""
+    path = tmp_path / "settings.json"
+    save_settings(
+        path,
+        AppSettings(
+            playback_rate=1.0,
+            pitch_compensation=True,
+            volume=0.15,
+            muted=True,
+            repeat_mode=RepeatModeSetting.ONE,
+            shuffle_enabled=True,
+        ),
+    )
+    app_settings = make_full_app_settings(controller, playlist_playback)
+    session = SettingsSession(path, app_settings, debounce_ms=DEBOUNCE_MS, retry_ms=DEBOUNCE_MS)
+
+    assert session.load() is None
+
+    assert controller.volume == pytest.approx(0.15)
+    assert controller.muted is True
+    assert playlist_playback.repeat_mode is RepeatMode.ONE
+    assert playlist_playback.shuffle_enabled is True
+
+
+def test_save_failure_and_recovery_are_reported_once(
+    tmp_path: Path,
+    controller: PlaybackController,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """保存失敗・復旧は状態が変わったときだけ通知する。"""
+    session = make_session(tmp_path / "settings.json", controller)
+    session.load()
+    failures: list[int] = []
+    recoveries: list[int] = []
+    session.save_failed.connect(lambda: failures.append(1))
+    session.save_recovered.connect(lambda: recoveries.append(1))
+
+    calls: list[int] = []
+
+    def flaky_save(path: Path, settings: AppSettings) -> None:
+        del path, settings
+        calls.append(1)
+        if len(calls) <= 2:
+            raise OSError("保存失敗")
+
+    monkeypatch.setattr("sdp.services.settings.save_settings", flaky_save)
+    controller.set_playback_rate(1.25)
+    assert session.flush() is False
+    controller.set_playback_rate(1.3)
+    assert session.flush() is False
+    controller.set_playback_rate(1.35)
+    assert session.flush() is True
+
+    assert failures == [1]
+    assert recoveries == [1]

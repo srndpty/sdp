@@ -173,6 +173,32 @@ class PlaylistPlaybackController(QObject):
             self._append_history(entry_id)
         return started
 
+    def select_entry_by_id(self, entry_id: str) -> bool:
+        """**再生を開始せずに**指定entryを現在entryとして選び直す。
+
+        起動時に前回の現在曲を復元するための入口。sourceは読み込むが
+        ``play()`` は呼ばないため、状態は ``STOPPED`` のまま・位置は0のままになる
+        （勝手に音を出さない）。
+
+        entryが無い・欠損している・読み込めない場合は ``False`` を返すだけで、
+        別の曲へは移動しない（復元失敗をエラーにしない）。
+        """
+        row = self._playlist.row_of_entry_id(entry_id)
+        if row is None:
+            return False
+        self._playlist.refresh_entry_status(entry_id)
+        row = self._playlist.row_of_entry_id(entry_id)
+        if row is None:
+            return False
+        entry = self._playlist.entry_at(row)
+        if entry.is_missing:
+            return False
+        if not self._load_entry(entry_id, entry.path):
+            return False
+        if self._shuffle_enabled:
+            self._append_history(entry_id)
+        return True
+
     def play_next(self) -> bool:
         """次の再生可能な entry へ進む。
 

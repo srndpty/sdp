@@ -9,11 +9,13 @@ MainWindowへは「現在状態の取得」「復元の適用」「変更通知�
 
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Protocol
 
-from PySide6.QtCore import QObject, QTimer
+from PySide6.QtCore import QObject, QTimer, Signal
 
+from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.services.ui_state import (
     RESTORE_FAILED_MESSAGE,
     UiState,
@@ -47,12 +49,65 @@ class UiStateHolder(Protocol):
     def disconnect_ui_state_changed(self, slot: Callable[[], None]) -> None: ...
 
 
+class PlaylistUiStateSource(QObject):
+    """WindowのUI状態へ「現在曲のentry_id」を合成するアダプター。
+
+    :class:`UiStateSession` はこれも :class:`UiStateHolder` として扱うため、
+    セッション側は PlaylistModel も entry_id の照合も知らない。
+    現在曲の復元（存在しないentry_idの無視）はここで行う。
+    """
+
+    def __init__(
+        self,
+        window: UiStateHolder,
+        playlist_playback: PlaylistPlaybackController,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._window = window
+        self._playlist_playback = playlist_playback
+
+    def capture_ui_state(self) -> UiState:
+        # 現在曲が消えていればControllerのcurrent_entry_idがNoneになり、保存対象からも消える。
+        return replace(
+            self._window.capture_ui_state(),
+            current_playlist_entry_id=self._playlist_playback.current_entry_id,
+        )
+
+    def restore_ui_state(self, state: UiState) -> None:
+        """Windowの状態を適用し、前回の現在曲があれば選び直す（再生はしない）。
+
+        entry_idがPlaylistModelに無い・欠損している場合は復元をあきらめるだけで、
+        ui-state全体を破損扱いにしない。次の保存で自然に消える。
+        """
+        self._window.restore_ui_state(state)
+        entry_id = state.current_playlist_entry_id
+        if entry_id is None:
+            return
+        if not self._playlist_playback.select_entry_by_id(entry_id):
+            _logger.info("前回の現在曲は復元できませんでした（削除・欠損の可能性）")
+
+    def connect_ui_state_changed(self, slot: Callable[[], None]) -> None:
+        self._window.connect_ui_state_changed(slot)
+        self._playlist_playback.current_entry_changed.connect(slot)
+
+    def disconnect_ui_state_changed(self, slot: Callable[[], None]) -> None:
+        self._window.disconnect_ui_state_changed(slot)
+        self._playlist_playback.current_entry_changed.disconnect(slot)
+
+
 class UiStateSession(QObject):
     """ui-state.jsonとMainWindowの間を取り持つ。
 
     復元に失敗した起動では保存を無効化して、壊れたファイルを上書きしない
     （settings.json / playlist.json と同じ方針で、障害は互いに独立させる）。
     """
+
+    save_failed = Signal()
+    """保存に失敗した（**成功→失敗へ変わったときだけ**）。"""
+
+    save_recovered = Signal()
+    """失敗のあとに保存できた（**失敗→成功へ変わったときだけ**）。"""
 
     def __init__(
         self,
@@ -72,6 +127,7 @@ class UiStateSession(QObject):
         self._debounce_ms = max(1, debounce_ms)
         self._retry_ms = max(1, retry_ms)
         self._retry_attempted = False
+        self._save_failed = False
         self._last_saved = UiState()
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
@@ -147,10 +203,25 @@ class UiStateSession(QObject):
                 self._retry_attempted = True
                 self._timer.start(self._retry_ms)
                 _logger.info("UI状態の保存を%dミリ秒後に1回再試行します", self._retry_ms)
+            self._report_failure()
             return False
         self._retry_attempted = False
         self._last_saved = state
+        self._report_success()
         return True
+
+    def _report_failure(self) -> None:
+        """状態が変わったときだけ通知する（デバウンスの度に溢れさせない）。"""
+        if self._save_failed:
+            return
+        self._save_failed = True
+        self.save_failed.emit()
+
+    def _report_success(self) -> None:
+        if not self._save_failed:
+            return
+        self._save_failed = False
+        self.save_recovered.emit()
 
     def stop(self) -> None:
         """タイマーと変更監視を止める（冪等）。flushは呼び出し側が先に行う。"""

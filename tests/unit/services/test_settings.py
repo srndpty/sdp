@@ -2,14 +2,16 @@
 
 import json
 import math
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 import pytest
 
+from sdp.core.playlist.types import RepeatMode
 from sdp.services.settings import (
     SETTINGS_SCHEMA_VERSION,
     AppSettings,
+    RepeatModeSetting,
     SettingsFileError,
     load_settings,
     save_settings,
@@ -33,6 +35,10 @@ def test_app_settings_is_immutable_and_holds_playback_and_visibility() -> None:
         "waveform_visible",
         "spectrum_visible",
         "level_meter_visible",
+        "volume",
+        "muted",
+        "repeat_mode",
+        "shuffle_enabled",
     )
 
 
@@ -43,6 +49,16 @@ def test_visualization_defaults_to_visible() -> None:
     assert settings.waveform_visible is True
     assert settings.spectrum_visible is True
     assert settings.level_meter_visible is True
+
+
+def test_playback_state_defaults() -> None:
+    """音量1.0・ミュートOFF・Repeat OFF・ShuffleOFFが既定（旧versionの補完値）。"""
+    settings = AppSettings(playback_rate=1.0, pitch_compensation=True)
+
+    assert settings.volume == pytest.approx(1.0)
+    assert settings.muted is False
+    assert settings.repeat_mode is RepeatModeSetting.OFF
+    assert settings.shuffle_enabled is False
 
 
 def test_missing_file_returns_controller_defaults(tmp_path: Path) -> None:
@@ -66,8 +82,12 @@ def test_round_trip_uses_utf8_and_only_settings_fields(tmp_path: Path) -> None:
         "waveform_visible",
         "spectrum_visible",
         "level_meter_visible",
+        "volume",
+        "muted",
+        "repeat_mode",
+        "shuffle_enabled",
     }
-    assert document["schema_version"] == SETTINGS_SCHEMA_VERSION == 2
+    assert document["schema_version"] == SETTINGS_SCHEMA_VERSION == 3
 
 
 def test_integer_rate_is_restored_as_float(tmp_path: Path) -> None:
@@ -112,9 +132,9 @@ def test_missing_known_keys_use_defaults(
     assert load_settings(path, DEFAULTS) == expected
 
 
-@pytest.mark.parametrize("version", [None, True, 1.0, "1", 0, 3, 99])
+@pytest.mark.parametrize("version", [None, True, 1.0, "1", 0, 4, 99])
 def test_schema_version_requires_a_supported_integer(tmp_path: Path, version: object) -> None:
-    """versionはbool・float・文字列・欠落・未知値を拒否する（1と2だけ許可）。"""
+    """versionはbool・float・文字列・欠落・未知値を拒否する（1〜3だけ許可）。"""
     path = tmp_path / "settings.json"
     document: dict[str, object] = {
         "playback_rate": 1.0,
@@ -181,8 +201,8 @@ def test_loading_version_one_does_not_rewrite_the_file(tmp_path: Path) -> None:
     assert path.read_bytes() == original
 
 
-def test_saving_after_a_version_one_load_writes_version_two(tmp_path: Path) -> None:
-    """変更後の保存はversion 2になり、可視化設定も含まれる。"""
+def test_saving_after_a_version_one_load_writes_the_current_version(tmp_path: Path) -> None:
+    """変更後の保存は現在のversionになり、可視化設定も含まれる。"""
     path = tmp_path / "settings.json"
     write_document(
         path,
@@ -193,7 +213,7 @@ def test_saving_after_a_version_one_load_writes_version_two(tmp_path: Path) -> N
     save_settings(path, AppSettings(restored.playback_rate, restored.pitch_compensation, False))
 
     document = json.loads(path.read_text(encoding="utf-8"))
-    assert document["schema_version"] == 2
+    assert document["schema_version"] == SETTINGS_SCHEMA_VERSION
     assert document["waveform_visible"] is False
     assert document["spectrum_visible"] is True
     assert load_settings(path, DEFAULTS).waveform_visible is False
@@ -361,3 +381,215 @@ def test_failed_json_write_keeps_existing_and_cleans_temporary_file(
 
     assert path.read_bytes() == original
     assert list(tmp_path.glob("settings.json.*.tmp")) == []
+
+
+# -- schema version 3（音量・ミュート・Repeat・Shuffle）----------------------
+
+
+def v3_document(**overrides: object) -> dict[str, object]:
+    document: dict[str, object] = {
+        "schema_version": 3,
+        "playback_rate": 1.25,
+        "pitch_compensation": False,
+        "waveform_visible": False,
+        "spectrum_visible": True,
+        "level_meter_visible": False,
+        "volume": 0.4,
+        "muted": True,
+        "repeat_mode": "all",
+        "shuffle_enabled": True,
+    }
+    document.update(overrides)
+    return document
+
+
+def test_version_three_round_trip(tmp_path: Path) -> None:
+    """v3は再生設定と可視化設定をすべて往復する。"""
+    path = tmp_path / "settings.json"
+    expected = AppSettings(
+        playback_rate=0.75,
+        pitch_compensation=False,
+        waveform_visible=False,
+        spectrum_visible=True,
+        level_meter_visible=False,
+        volume=0.25,
+        muted=True,
+        repeat_mode=RepeatModeSetting.ONE,
+        shuffle_enabled=True,
+    )
+
+    save_settings(path, expected)
+
+    assert load_settings(path, DEFAULTS) == expected
+
+
+def test_version_three_is_read_from_the_document(tmp_path: Path) -> None:
+    """v3の各キーが読み込まれる。"""
+    path = tmp_path / "settings.json"
+    write_document(path, v3_document())
+
+    settings = load_settings(path, DEFAULTS)
+
+    assert settings.volume == pytest.approx(0.4)
+    assert settings.muted is True
+    assert settings.repeat_mode is RepeatModeSetting.ALL
+    assert settings.shuffle_enabled is True
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_older_versions_use_playback_state_defaults(tmp_path: Path, version: int) -> None:
+    """v1／v2には再生設定が無いため既定値で補う。"""
+    path = tmp_path / "settings.json"
+    write_document(
+        path,
+        {"schema_version": version, "playback_rate": 1.5, "pitch_compensation": True},
+    )
+
+    settings = load_settings(path, DEFAULTS)
+
+    assert settings.volume == pytest.approx(DEFAULTS.volume)
+    assert settings.muted is DEFAULTS.muted
+    assert settings.repeat_mode is DEFAULTS.repeat_mode
+    assert settings.shuffle_enabled is DEFAULTS.shuffle_enabled
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_older_versions_ignore_version_three_keys(tmp_path: Path, version: int) -> None:
+    """v1／v2にv3のキーが混入していても未知キーとして無視する。"""
+    path = tmp_path / "settings.json"
+    write_document(
+        path,
+        {
+            "schema_version": version,
+            "playback_rate": 1.0,
+            "pitch_compensation": True,
+            "volume": 0.1,
+            "muted": True,
+            "repeat_mode": "one",
+            "shuffle_enabled": True,
+        },
+    )
+
+    settings = load_settings(path, DEFAULTS)
+
+    assert settings.volume == pytest.approx(DEFAULTS.volume)
+    assert settings.muted is False
+    assert settings.repeat_mode is RepeatModeSetting.OFF
+    assert settings.shuffle_enabled is False
+
+
+@pytest.mark.parametrize("name", ["volume", "muted", "repeat_mode", "shuffle_enabled"])
+def test_missing_version_three_keys_use_defaults(tmp_path: Path, name: str) -> None:
+    """v3で個別キーが欠落しても既定値で補う（失敗にしない）。"""
+    path = tmp_path / "settings.json"
+    document = v3_document()
+    del document[name]
+    write_document(path, document)
+
+    settings = load_settings(path, DEFAULTS)
+
+    assert getattr(settings, name) == getattr(DEFAULTS, name)
+
+
+@pytest.mark.parametrize("volume", [0.0, 0.5, 1.0])
+def test_volume_boundaries_are_accepted(tmp_path: Path, volume: float) -> None:
+    """0.0〜1.0はそのまま復元する。"""
+    path = tmp_path / "settings.json"
+    write_document(path, v3_document(volume=volume))
+
+    assert load_settings(path, DEFAULTS).volume == pytest.approx(volume)
+
+
+@pytest.mark.parametrize(
+    "volume", [True, False, "0.5", None, math.nan, math.inf, -math.inf, -0.01, 1.01, 2]
+)
+def test_invalid_volume_is_rejected(tmp_path: Path, volume: object) -> None:
+    """bool・文字列・非有限・範囲外の音量をclampせず拒否する。"""
+    path = tmp_path / "settings.json"
+    write_document(path, v3_document(volume=volume))
+
+    with pytest.raises(SettingsFileError, match="volume"):
+        load_settings(path, DEFAULTS)
+
+
+@pytest.mark.parametrize("muted", [0, 1, "true", None])
+def test_muted_requires_exact_bool(tmp_path: Path, muted: object) -> None:
+    """mutedは0／1／文字列を受理しない。"""
+    path = tmp_path / "settings.json"
+    write_document(path, v3_document(muted=muted))
+
+    with pytest.raises(SettingsFileError, match="muted"):
+        load_settings(path, DEFAULTS)
+
+
+@pytest.mark.parametrize("shuffle", [0, 1, "true", None])
+def test_shuffle_requires_exact_bool(tmp_path: Path, shuffle: object) -> None:
+    """shuffle_enabledも厳密なboolだけを受理する。"""
+    path = tmp_path / "settings.json"
+    write_document(path, v3_document(shuffle_enabled=shuffle))
+
+    with pytest.raises(SettingsFileError, match="shuffle_enabled"):
+        load_settings(path, DEFAULTS)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("off", RepeatModeSetting.OFF),
+        ("all", RepeatModeSetting.ALL),
+        ("one", RepeatModeSetting.ONE),
+    ],
+)
+def test_every_repeat_mode_round_trips(
+    tmp_path: Path, text: str, expected: RepeatModeSetting
+) -> None:
+    """Repeatの3値すべてを安定した文字列で往復する。"""
+    path = tmp_path / "settings.json"
+    write_document(path, v3_document(repeat_mode=text))
+
+    settings = load_settings(path, DEFAULTS)
+    assert settings.repeat_mode is expected
+
+    save_settings(path, settings)
+    assert json.loads(path.read_text(encoding="utf-8"))["repeat_mode"] == text
+
+
+@pytest.mark.parametrize("mode", ["OFF", "loop", "", None, 0, True, ["off"]])
+def test_unknown_repeat_mode_is_rejected(tmp_path: Path, mode: object) -> None:
+    """未知のrepeat_modeは既定値へ丸めず復元失敗にする。"""
+    path = tmp_path / "settings.json"
+    write_document(path, v3_document(repeat_mode=mode))
+
+    with pytest.raises(SettingsFileError, match="repeat_mode"):
+        load_settings(path, DEFAULTS)
+
+
+def test_repeat_mode_setting_maps_to_the_core_enum() -> None:
+    """core enumと保存表現が1対1で対応する（暗黙の既定値へ落とさない）。"""
+    for mode in RepeatMode:
+        setting = RepeatModeSetting.from_repeat_mode(mode)
+        assert setting.to_repeat_mode() is mode
+    assert {setting.value for setting in RepeatModeSetting} == {"off", "all", "one"}
+
+
+def test_validate_rejects_invalid_playback_state() -> None:
+    """適用前検証でも音量・bool・Repeatの型を拒否する。"""
+    with pytest.raises(ValueError, match="volume"):
+        validate_settings(replace(DEFAULTS, volume=1.5))
+    with pytest.raises(ValueError, match="muted"):
+        validate_settings(replace(DEFAULTS, muted=1))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="shuffle_enabled"):
+        validate_settings(replace(DEFAULTS, shuffle_enabled="true"))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="repeat_mode"):
+        validate_settings(replace(DEFAULTS, repeat_mode="off"))  # type: ignore[arg-type]
+
+
+def test_position_is_never_saved(tmp_path: Path) -> None:
+    """再生位置・再生中かどうかはsettings.jsonへ保存しない。"""
+    path = tmp_path / "settings.json"
+
+    save_settings(path, DEFAULTS)
+
+    document = json.loads(path.read_text(encoding="utf-8"))
+    for forbidden in ("position_ms", "position", "playing", "state", "current_entry_id"):
+        assert forbidden not in document
