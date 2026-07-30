@@ -35,7 +35,7 @@ Windows 11 向け個人用ローカル音声プレイヤー sdp (sound player) �
 | 設定・プレイリスト永続化 | JSON ファイル（レジストリではない） | 可搬性と手編集のしやすさ |
 | パッケージング | PyInstaller onedir + Inno Setup（per-user） | 起動速度と AV 誤検知の観点で onefile より有利 |
 | 波形キャッシュ形式 | NumPy `.npz`、上限 500MB の LRU | 実装が単純で NumPy 以外の依存が不要 |
-| UI状態の保存 | `ui-state.json`（settings.jsonとは別ファイル、schema version 1、整数値で保存） | 設定画面で選ぶ設定と、日常操作で自然に変わる状態を混ぜない。base64のsaveGeometryは手編集・DPI差・画面外補正に不利なため採らない |
+| UI状態の保存 | `ui-state.json`（settings.jsonとは別ファイル、schema version 2、v1読込可、整数値で保存） | v2で現在曲の`entry_id`を追加する。v1は現在曲なしで補完し、読み込みだけでは移行保存しない。base64のsaveGeometryは手編集・DPI差・画面外補正に不利なため採らない |
 | 設定schema | JSON、schema version 3（v1／v2も読み込み可） | 古いversionに無い項目は既定値で補い、次の変更時に現在のversionで保存する。起動しただけでは書き換えない |
 | Repeatの保存表現 | `"off"` / `"all"` / `"one"` の文字列 | core の `RepeatMode` は `auto()` で永続化を意図していないため、保存層で安定した文字列へ写す |
 | 再生位置の保存 | 保存しない | 数秒の曲では復元価値が低く、突然の再開は予測しにくい。まず現在曲の選択復元だけでUXを評価する |
@@ -300,7 +300,8 @@ P6-C（UX仕上げと破損・失敗時の統合確認）**の3つへ分割す�
   波形・スペクトラム・レベルメーターの表示ON/OFFを追加し、設定ダイアログ
   （Apply／OK／Cancel）と、非表示にした可視化の解析停止を実装した。
   P6-Bでウィンドウ位置・サイズ・最大化・Splitter比率・前回フォルダーを、
-  設定とは別の`ui-state.json`（schema version 1）へ保存・復元するようにした
+  設定とは別の`ui-state.json`（当時schema version 1、P6-Cでversion 2へ拡張）へ
+  保存・復元するようにした
   （[architecture.md §9](./architecture.md)）。実画面の手動受け入れは未完了
   （[testing-strategy.md §6.12、§6.13](./testing-strategy.md)）。
   P6-Cで設定schemaをversion 3へ上げて音量・ミュート・リピート・シャッフルを追加し、

@@ -465,13 +465,25 @@ def test_external_change_is_taken_when_unedited(dialog: SettingsDialog) -> None:
 
 
 def test_external_change_does_not_overwrite_unapplied_edits(dialog: SettingsDialog) -> None:
-    """編集中は入力を書き換えず、未適用の編集を失わせない。"""
+    """編集中は入力も比較基準も書き換えず、同じsnapshot世代を維持する。"""
     volume_spin_box(dialog).setValue(15)
 
     assert dialog.has_unapplied_edits() is True
     assert dialog.refresh_if_unedited(replace(CURRENT, volume=0.9)) is False
 
     assert volume_spin_box(dialog).value() == 15
+    assert dialog.applied_settings == CURRENT
+
+
+def test_apply_after_external_change_uses_the_opened_snapshot(dialog: SettingsDialog) -> None:
+    """編集中の外部変更後も、Applyはダイアログを開いた時点のsnapshot全体を使う。"""
+    requested = requests_of(dialog)
+    check_box(dialog, "settingsWaveformVisibleCheckBox").setChecked(False)
+
+    assert dialog.refresh_if_unedited(replace(CURRENT, volume=0.8)) is False
+    assert dialog.apply_settings() is True
+
+    assert requested == [replace(CURRENT, waveform_visible=False)]
 
 
 def test_tab_order_follows_the_visual_order(dialog: SettingsDialog, qtbot: QtBot) -> None:

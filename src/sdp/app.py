@@ -150,6 +150,7 @@ def build_player(
     save_status.watch(
         SaveCategory.SETTINGS, settings_session.save_failed, settings_session.save_recovered
     )
+    save_status.watch(SaveCategory.PLAYLIST, session.save_failed, session.save_recovered)
     save_status.watch(
         SaveCategory.UI_STATE, ui_state_session.save_failed, ui_state_session.save_recovered
     )
@@ -198,6 +199,7 @@ def run(argv: list[str] | None = None) -> int:
     composition = build_player()
     # 復元完了後から変更監視を始める（load中のSignalを自動保存扱いしない）。
     composition.settings_session.start()
+    composition.playlist_session.start()
     # メタデータの読み取りはここで開始する（GUI スレッドはブロックしない）。
     composition.metadata_reader.start()
     composition.waveform_analysis.start()
@@ -214,7 +216,9 @@ def shutdown(composition: PlayerComposition) -> None:
 
     1カテゴリの例外で後続を飛ばさないよう、各段を独立して実行する
     （大きなライフサイクル基盤は作らず、順序と分離だけをここで守る）。
-    保存の失敗はログへ残すだけにする（ウィンドウが閉じた後は提示できないため）。
+    保存APIの ``False`` は「変更なし」と「内部で記録済みの失敗」の両方を表すため、
+    ここでは失敗判定に使わない。例外だけを段階の失敗として記録し、保存失敗の詳細は
+    各Sessionのログへ任せる（ウィンドウが閉じた後は提示できないため）。
     """
     steps: list[tuple[str, Callable[[], object]]] = [
         # 可視化を先に止め、破棄済みQObjectへシグナルが飛ばないようにする。
@@ -225,10 +229,8 @@ def shutdown(composition: PlayerComposition) -> None:
         # Windowが生きているあいだにUI状態を確定させる（破棄後はgeometryを取得できない）。
         ("ウィンドウ状態の保存", composition.ui_state_session.flush),
         ("設定の保存", composition.settings_session.flush),
-        (
-            "プレイリストの保存",
-            lambda: composition.playlist_session.save_from(composition.playlist_model),
-        ),
+        ("プレイリストの保存", composition.playlist_session.flush),
+        ("プレイリスト監視の停止", composition.playlist_session.stop),
         ("ウィンドウ状態監視の停止", composition.ui_state_session.stop),
         ("設定監視の停止", composition.settings_session.stop),
         ("設定調停の停止", composition.app_settings.shutdown),

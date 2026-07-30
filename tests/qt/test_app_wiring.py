@@ -7,7 +7,7 @@
 import json
 import logging
 import struct
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import cast
@@ -31,7 +31,7 @@ from sdp.core.playback.backend import PlaybackBackend
 from sdp.core.playback.controller import PlaybackController
 from sdp.core.playback.qt_backend import QtMultimediaBackend
 from sdp.core.playback.types import PlaybackState
-from sdp.core.playlist.entry import create_entry
+from sdp.core.playlist.entry import PlaylistEntry, create_entry
 from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.persistence import load_playlist, save_playlist
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
@@ -323,6 +323,9 @@ def test_run_starts_and_stops_background_services_in_order(
     original_start = SettingsSession.start
     original_flush = SettingsSession.flush
     original_stop = SettingsSession.stop
+    original_playlist_start = PlaylistSession.start
+    original_playlist_flush = PlaylistSession.flush
+    original_playlist_stop = PlaylistSession.stop
     original_waveform_start = WaveformAnalysisService.start
     original_waveform_shutdown = WaveformAnalysisService.shutdown
 
@@ -337,6 +340,18 @@ def test_run_starts_and_stops_background_services_in_order(
     def record_stop(session: SettingsSession) -> None:
         events.append("settings_stop")
         original_stop(session)
+
+    def record_playlist_start(session: PlaylistSession, model: PlaylistModel | None = None) -> None:
+        events.append("playlist_start")
+        original_playlist_start(session, model)
+
+    def record_playlist_flush(session: PlaylistSession) -> bool:
+        events.append("playlist_flush")
+        return original_playlist_flush(session)
+
+    def record_playlist_stop(session: PlaylistSession) -> None:
+        events.append("playlist_stop")
+        original_playlist_stop(session)
 
     def record_waveform_start(service: WaveformAnalysisService) -> None:
         events.append("waveform_start")
@@ -367,6 +382,9 @@ def test_run_starts_and_stops_background_services_in_order(
     monkeypatch.setattr(SettingsSession, "start", record_start)
     monkeypatch.setattr(SettingsSession, "flush", record_flush)
     monkeypatch.setattr(SettingsSession, "stop", record_stop)
+    monkeypatch.setattr(PlaylistSession, "start", record_playlist_start)
+    monkeypatch.setattr(PlaylistSession, "flush", record_playlist_flush)
+    monkeypatch.setattr(PlaylistSession, "stop", record_playlist_stop)
     monkeypatch.setattr(WaveformAnalysisService, "start", record_waveform_start)
     monkeypatch.setattr(WaveformAnalysisService, "shutdown", record_waveform_shutdown)
     monkeypatch.setattr(app_module, "default_playlist_path", injected_playlist_path)
@@ -379,10 +397,13 @@ def test_run_starts_and_stops_background_services_in_order(
     assert app_module.run([]) == 0
     assert events == [
         "settings_start",
+        "playlist_start",
         "waveform_start",
         "exec",
         "waveform_shutdown",
         "settings_flush",
+        "playlist_flush",
+        "playlist_stop",
         "settings_stop",
     ]
 
@@ -1710,9 +1731,18 @@ def test_corruption_matrix_keeps_healthy_files_working(
     window.spectrum_panel.shutdown()
 
 
-@pytest.mark.parametrize("failing", [("settings",), ("ui_state",), ("settings", "ui_state")])
+@pytest.mark.parametrize(
+    "failing",
+    [
+        ("settings",),
+        ("playlist",),
+        ("ui_state",),
+        ("settings", "playlist", "ui_state"),
+    ],
+)
 def test_save_failures_are_reported_per_category(
     composition: app_module.PlayerComposition,
+    audio_files: list[Path],
     monkeypatch: pytest.MonkeyPatch,
     qtbot: QtBot,
     failing: tuple[str, ...],
@@ -1724,6 +1754,7 @@ def test_save_failures_are_reported_per_category(
     messages: list[str] = []
     composition.save_status.message_requested.connect(messages.append)
     composition.settings_session.start()
+    composition.playlist_session.start()
     composition.ui_state_session.start()
 
     def failing_save(*args: object, **kwargs: object) -> None:
@@ -1732,21 +1763,28 @@ def test_save_failures_are_reported_per_category(
 
     if "settings" in failing:
         monkeypatch.setattr("sdp.services.settings.save_settings", failing_save)
+    if "playlist" in failing:
+        monkeypatch.setattr("sdp.services.playlist_session.save_playlist", failing_save)
     if "ui_state" in failing:
         monkeypatch.setattr("sdp.services.ui_state_session.save_ui_state", failing_save)
 
     composition.app_settings.apply(replace(composition.app_settings.settings, volume=0.5))
+    composition.playlist_model.add_paths(audio_files[:1])
     window.set_last_open_directory(Path("C:\\Music"))
     composition.settings_session.flush()
+    composition.playlist_session.flush()
     composition.ui_state_session.flush()
     # 同じ失敗を繰り返しても通知は増えない。
     composition.app_settings.apply(replace(composition.app_settings.settings, volume=0.6))
+    composition.playlist_model.add_paths(audio_files[1:2])
     window.set_last_open_directory(Path("C:\\音楽"))
     composition.settings_session.flush()
+    composition.playlist_session.flush()
     composition.ui_state_session.flush()
 
     expected = {
         save_failure_message(SaveCategory.SETTINGS) if "settings" in failing else None,
+        save_failure_message(SaveCategory.PLAYLIST) if "playlist" in failing else None,
         save_failure_message(SaveCategory.UI_STATE) if "ui_state" in failing else None,
     } - {None}
     assert set(messages) == expected
@@ -1790,11 +1828,43 @@ def test_recovered_save_is_reported_once(
     window.spectrum_panel.shutdown()
 
 
+def test_recovered_playlist_save_is_reported_once(
+    composition: app_module.PlayerComposition,
+    audio_files: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """プレイリストの一時失敗と復旧も本番通知経路へ1回ずつ流す。"""
+    messages: list[str] = []
+    composition.save_status.message_requested.connect(messages.append)
+    composition.playlist_session.start()
+    calls: list[int] = []
+    original = save_playlist
+
+    def flaky_save(path: Path, entries: Sequence[PlaylistEntry]) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("一時的な共有違反")
+        original(path, entries)
+
+    monkeypatch.setattr("sdp.services.playlist_session.save_playlist", flaky_save)
+    composition.playlist_model.add_paths(audio_files[:1])
+    composition.playlist_session.flush()
+    composition.playlist_model.add_paths(audio_files[1:2])
+    composition.playlist_session.flush()
+
+    assert messages == [
+        save_failure_message(SaveCategory.PLAYLIST),
+        save_recovered_message(SaveCategory.PLAYLIST),
+    ]
+
+
+@pytest.mark.parametrize("failing", ["settings", "playlist", "ui_state"])
 def test_save_failure_does_not_block_playback_or_other_files(
     composition: app_module.PlayerComposition,
     playlist_file: Path,
     audio_files: list[Path],
     monkeypatch: pytest.MonkeyPatch,
+    failing: str,
 ) -> None:
     """1カテゴリの保存失敗でも再生と他ファイルの保存は続く。"""
 
@@ -1802,23 +1872,32 @@ def test_save_failure_does_not_block_playback_or_other_files(
         del args, kwargs
         raise OSError("保存失敗")
 
-    monkeypatch.setattr("sdp.services.settings.save_settings", failing_save)
+    save_targets = {
+        "settings": "sdp.services.settings.save_settings",
+        "playlist": "sdp.services.playlist_session.save_playlist",
+        "ui_state": "sdp.services.ui_state_session.save_ui_state",
+    }
+    monkeypatch.setattr(save_targets[failing], failing_save)
     composition.settings_session.start()
+    composition.playlist_session.start()
+    composition.ui_state_session.start()
     composition.app_settings.apply(replace(composition.app_settings.settings, volume=0.5))
     composition.playlist_model.add_paths(audio_files)
+    composition.window.set_last_open_directory(Path("C:\\Music"))
 
-    assert composition.settings_session.flush() is False
-    assert composition.playlist_session.save_from(composition.playlist_model) is True
-    assert composition.ui_state_session.is_save_enabled is True
+    assert composition.settings_session.flush() is (failing != "settings")
+    assert composition.playlist_session.flush() is (failing != "playlist")
+    assert composition.ui_state_session.flush() is (failing != "ui_state")
     composition.controller.set_playback_rate(1.25)
     assert composition.controller.playback_rate == pytest.approx(1.25)
-    assert len(load_playlist(playlist_file)) == len(audio_files)
+    if failing != "playlist":
+        assert len(load_playlist(playlist_file)) == len(audio_files)
 
 
 # -- 終了処理 ---------------------------------------------------------------
 
 
-def test_shutdown_continues_after_a_failing_step(
+def test_shutdown_continues_after_a_raising_step(
     composition: app_module.PlayerComposition,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -1866,11 +1945,13 @@ def test_shutdown_stops_every_worker_and_timer(
     window.show()
     qtbot.waitExposed(window)
     composition.settings_session.start()
+    composition.playlist_session.start()
     composition.ui_state_session.start()
 
     app_module.shutdown(composition)
 
     assert composition.settings_session.is_running is False
+    assert composition.playlist_session.is_running is False
     assert composition.ui_state_session.is_running is False
     assert composition.window.spectrum_panel.is_timer_active is False
     assert composition.waveform_analysis.is_running is False

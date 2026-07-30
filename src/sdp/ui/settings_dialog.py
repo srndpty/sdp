@@ -262,7 +262,6 @@ class SettingsDialog(QDialog):
         取り込んだら ``True``。
         """
         if self.has_unapplied_edits():
-            self._applied = settings
             return False
         self.set_settings(settings)
         return True
