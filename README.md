@@ -20,6 +20,9 @@ P6-A／P6-Bの実画面受け入れは完了しており、**P6-Cの実画面受
 
 P7-A（起動引数と単一instance）は実装・自動テスト済み。
 実際のPowerShell間転送とWindowsの前面化制約については手動受け入れが未完了。
+P7-B1（PyInstaller onedir配布ビルド）は実装・自動スモーク済み。
+配布版での実画面・実音、全対応形式、Windows Defenderによる手動受け入れと、
+Qtの外部配布ライセンス監査は未完了。インストーラーと関連付けはP7-B2で扱う。
 
 `uv run python -m sdp` でウィンドウが起動し、次の操作ができる。
 
@@ -207,7 +210,7 @@ Peak／RMSレベルメーター:
 可視化の色設定・バンド数設定・FPS設定・Peak hold時間設定、多チャンネルの個別表示、
 ショートカット編集、再生デバイス選択、キャッシュ容量設定、設定のインポート／エクスポート、
 設定の検索、再生位置の復元、プレイリストの選択行の復元、OpenGL描画、
-Windows のファイル関連付け、インストーラー。
+Windows のファイル関連付け、インストーラー、アプリアイコンとWindows version resource。
 
 保存場所（いずれも `%LOCALAPPDATA%\sdp` 配下）:
 
@@ -273,6 +276,43 @@ uv run python -m sdp "C:\Music\日本語 曲.mp3" "C:\Music\second.flac"
 
 `assets/test_audio/sine440.wav` などのテスト音源で動作を確認できる。
 **最初は音量を下げるかミュートにしてから再生すること。**
+
+## Windows配布ビルド（P7-B1）
+
+PyInstaller 6の`onedir`形式で、consoleを表示しない`dist\sdp\sdp.exe`を作る。
+Pythonやuvをインストールしていない環境でも、このディレクトリ全体を維持すれば起動できる。
+`sdp.exe`だけを`_internal`から切り離してコピーしてはならない。
+
+```powershell
+pwsh -File scripts/build-package.ps1
+pwsh -File scripts/package-smoke.ps1
+```
+
+ビルドスクリプトは以前の`build`／`dist`を安全確認後に削除し、
+`packaging\sdp.spec`から常にクリーンビルドする。スモークは配布物を一時ディレクトリへ
+コピーし、制限した`PATH`と隔離した`LOCALAPPDATA`で次を実行する。
+
+```powershell
+dist\sdp\sdp.exe --selftest
+```
+
+`--selftest`はWindowを表示せず、Qt Widgets／Network／Multimediaのobject構築、ログ・一時領域の
+書き込みに加え、その場で生成した短い無音PCM WAVをFFmpeg backendの`QAudioDecoder`で実decode
+する。音声出力、単一instance server、設定・playlist・ui-state・波形cacheの作成は行わず、
+一時WAVも必ず削除する。終了コードは成功`0`、依存／書き込み失敗`1`、不正なCLI指定`2`である。
+ファイルpathとの併用は不正指定として扱う。
+
+配布物には`LICENSE`、`THIRD_PARTY_NOTICES.txt`、各wheelが提供するライセンス原文を
+`_internal\licenses`以下へ収録する。ただしP7-B1は開発・個人評価用であり、Qt/PySide6を外部配布する
+ためのライセンス条件確認は未完了である。外部へ公開する前に必ず監査すること。
+
+PySide6 6.10.3の標準hookによる実測では、QtのFFmpeg backendとWindows Media Foundation
+backend、FFmpeg runtime DLLが配布物へ入る。Qt 6ではFFmpeg backendが既定で、Windows
+backendは6.10から非推奨である。sdpが別途FFmpeg CLIを起動することはない。形式ごとの対応は
+backendに含まれるcodec、Windows、driver等でも変わるため、WAV／MP3／FLAC／Ogg Vorbis／
+Opus／M4A／AACは対象Windows環境で実音確認する。
+（[Qt Multimediaのbackend説明](https://doc.qt.io/qt-6/qtmultimedia-index.html)、
+[Windows固有事項](https://doc.qt.io/qt-6/qtmultimedia-windows.html)）
 
 ## 開発コマンド
 
