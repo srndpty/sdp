@@ -1,8 +1,9 @@
-"""スペクトラムの処理量とGUI応答性を、厳格な時間上限なしで確認する。
+"""スペクトラムとレベルメーターの処理量とGUI応答性を、厳格な時間上限なしで確認する。
 
 CIへ数百µs単位の上限は設定しない（[testing-strategy.md](../../../docs/testing-strategy.md) §8）。
-ここで担保するのは「音声コールバック内でFFTしない」「1tickでFFTは最大1回」
-「連続tickでもGUI heartbeatが進む」「容量とbar数が固定」といった構造的な性質。
+ここで担保するのは「音声コールバック内でFFTやPeak／RMSをしない」
+「1tickでFFTとLevelは各最大1回」「連続tickでもGUI heartbeatが進む」
+「3本のリングバッファ容量とbar数が固定」といった構造的な性質。
 実測値はローカルの計測スクリプトと最終報告へ記録する。
 """
 
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import QMainWindow
 from pytestqt.qtbot import QtBot
 
 from fakes.fake_playback_backend import FakePlaybackBackend
+from sdp.core.analysis.level import LEVEL_WINDOW_SIZE, LevelProcessor
 from sdp.core.analysis.ring_buffer import PcmRingBuffer
 from sdp.core.analysis.spectrum import (
     FFT_SIZE,
@@ -132,6 +134,51 @@ def test_fft_and_band_aggregation_cost_is_recorded() -> None:
     assert frame.band_count == SPECTRUM_BAND_COUNT
 
 
+def test_level_cost_is_recorded_without_a_strict_limit() -> None:
+    """Peak／RMS＋Peak holdの1tick分の時間を記録する。"""
+    samples = np.sin(
+        2.0 * np.pi * 1_000.0 * np.arange(LEVEL_WINDOW_SIZE, dtype=np.float64) / SAMPLE_RATE
+    ).astype(np.float32)
+    samples.setflags(write=False)
+    processor = LevelProcessor()
+    timer = QElapsedTimer()
+    durations: list[int] = []
+    frame = processor.process(samples, samples, elapsed_seconds=0.033)
+
+    for _ in range(200):
+        timer.start()
+        frame = processor.process(samples, samples, elapsed_seconds=0.033)
+        durations.append(timer.nsecsElapsed())
+
+    average_ms = sum(durations) / len(durations) / 1e6
+    print(
+        f"Peak＋RMS（L／R各4096sample）平均 {average_ms:.4f}ms / 最大 {max(durations) / 1e6:.4f}ms"
+    )
+    assert frame.left_peak_db > -90.0
+
+
+def test_three_ring_buffers_stay_fixed_in_size(tap: PcmTap) -> None:
+    """mono／L／Rの3本とも容量が増えず、合計メモリが固定になる。"""
+    buffer = pcm_buffer()
+    capacities = [
+        tap.ring_buffer.capacity,
+        tap.left_ring_buffer.capacity,
+        tap.right_ring_buffer.capacity,
+    ]
+
+    for _ in range(300):
+        tap.handle_audio_buffer(buffer)
+
+    assert [
+        tap.ring_buffer.capacity,
+        tap.left_ring_buffer.capacity,
+        tap.right_ring_buffer.capacity,
+    ] == capacities
+    total_bytes = sum(capacity * 4 for capacity in capacities)
+    print(f"リングバッファ合計 {total_bytes / 1024:.0f}KB（3本 × {capacities[0]} sample）")
+    assert total_bytes == capacities[0] * 3 * 4
+
+
 def test_ring_buffer_memory_is_fixed() -> None:
     """リングバッファのメモリ量は容量だけで決まる（48kHz 2秒で約384KB）。"""
     buffer = PcmRingBuffer(96_000)
@@ -183,6 +230,37 @@ def test_one_timer_tick_runs_at_most_one_fft(
         SpectrumProcessor.process = original  # pyright: ignore[reportAttributeAccessIssue]
 
     assert len(fft_calls) <= ticks
+    panel.shutdown()
+
+
+def test_one_timer_tick_runs_at_most_one_level_calculation(
+    controller: PlaybackController,
+    tap: PcmTap,
+    source: Path,
+    qtbot: QtBot,
+) -> None:
+    """タイマーが何度回ってもtickごとのPeak／RMS計算は1回を超えない。"""
+    window = QMainWindow()
+    qtbot.addWidget(window)
+    panel = SpectrumPanel(controller, tap)
+    window.setCentralWidget(panel)
+    window.resize(600, 260)
+    window.show()
+    qtbot.waitExposed(window)
+
+    controller.load(source)
+    controller.play()
+    tap.handle_audio_buffer(pcm_buffer())
+
+    qtbot.waitUntil(lambda: panel.level_count >= 1, timeout=3_000)
+    ticks_before = panel.stereo_snapshot_count
+    levels_before = panel.level_count
+    qtbot.waitUntil(lambda: panel.stereo_snapshot_count >= ticks_before + 10, timeout=5_000)
+
+    ticks = panel.stereo_snapshot_count - ticks_before
+    assert panel.level_count - levels_before <= ticks
+    # スペクトラムとレベルは同じtickを共有する（snapshotも各1回）。
+    assert panel.stereo_snapshot_count == panel.snapshot_count
     panel.shutdown()
 
 
@@ -248,9 +326,12 @@ def test_bar_count_stays_bounded_across_widths(
     panel.shutdown()
 
 
-def test_pcm_tap_module_never_imports_the_fft() -> None:
-    """PcmTapのモジュールがspectrumのFFT関数を取り込んでいない。"""
+def test_pcm_tap_module_never_imports_the_fft_or_level() -> None:
+    """PcmTapのモジュールがFFT関数もPeak／RMS関数も取り込んでいない。"""
     assert not hasattr(pcm_tap_module, "compute_spectrum")
     assert not hasattr(pcm_tap_module, "SpectrumProcessor")
+    assert not hasattr(pcm_tap_module, "LevelProcessor")
+    assert not hasattr(pcm_tap_module, "peak_amplitude")
+    assert not hasattr(pcm_tap_module, "rms_amplitude")
     # FFT長の定数だけはリングバッファ容量の下限として参照する。
     assert pcm_tap_module.FFT_SIZE == FFT_SIZE

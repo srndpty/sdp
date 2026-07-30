@@ -44,6 +44,8 @@ from sdp.services.settings import (
     save_settings,
 )
 from sdp.services.waveform_analysis import WaveformAnalysisService
+from sdp.ui.level_meter_widget import NO_SOURCE_MESSAGE as LEVEL_NO_SOURCE_MESSAGE
+from sdp.ui.level_meter_widget import LevelMeterWidget
 from sdp.ui.main_window import MainWindow
 from sdp.ui.player_controls import PlayerControls
 from sdp.ui.playlist_view import PlaylistView
@@ -795,10 +797,80 @@ def test_spectrum_panel_uses_the_same_pcm_tap(
 def test_window_has_exactly_one_spectrum_widget_next_to_the_waveform(
     composition: app_module.PlayerComposition,
 ) -> None:
-    """波形とスペクトラムが1つずつ共存する。"""
+    """波形・スペクトラム・レベルメーターが1つずつ共存する。"""
     assert len(composition.window.findChildren(SpectrumWidget)) == 1
+    assert len(composition.window.findChildren(LevelMeterWidget)) == 1
     assert len(composition.window.findChildren(WaveformWidget)) == 1
     assert composition.window.findChild(WaveformPanel) is not None
+
+
+def test_level_meter_shares_the_spectrum_panel_and_pcm_tap(
+    composition: app_module.PlayerComposition,
+) -> None:
+    """レベルメーターはスペクトラムと同じPanel・同じPcmTapを共有する。"""
+    panel = composition.window.spectrum_panel
+    level = composition.window.findChild(LevelMeterWidget)
+
+    assert level is not None
+    assert level is panel.level_meter_widget
+    assert level.parent() is panel
+    assert panel.pcm_tap is composition.pcm_tap
+
+
+def test_pcm_tap_uses_three_fixed_capacity_buffers(
+    composition: app_module.PlayerComposition,
+) -> None:
+    """mono／L／Rの3本が同じ固定容量で用意される。"""
+    tap = composition.pcm_tap
+    buffers = (tap.ring_buffer, tap.left_ring_buffer, tap.right_ring_buffer)
+    capacity = buffers[0].capacity
+
+    for buffer in buffers:
+        assert buffer.capacity == capacity
+
+    for _ in range(50):
+        composition.backend.audio_buffer_output.audioBufferReceived.emit(int16_stereo_buffer())
+
+    for buffer in buffers:
+        assert buffer.capacity == capacity
+
+
+def test_main_window_has_no_level_calculation(
+    composition: app_module.PlayerComposition,
+) -> None:
+    """MainWindowはLevelProcessorやリングバッファを持たず、配置だけを行う。"""
+    from sdp.core.analysis.level import LevelProcessor
+    from sdp.core.analysis.ring_buffer import PcmRingBuffer
+    from sdp.ui import main_window as main_window_module
+
+    for forbidden in (
+        "LevelProcessor",
+        "StereoLevelFrame",
+        "PcmRingBuffer",
+        "peak_amplitude",
+        "rms_amplitude",
+        "SpectrumProcessor",
+        "compute_spectrum",
+    ):
+        assert not hasattr(main_window_module, forbidden), forbidden
+
+    window = composition.window
+    for name in (name for name in dir(window) if not name.startswith("_")):
+        value = getattr(window, name)
+        assert not isinstance(value, LevelProcessor | PcmRingBuffer), name
+
+
+def test_ui_layer_does_not_import_qaudiobuffer(
+    composition: app_module.PlayerComposition,
+) -> None:
+    """UI層（レベルメーターを含む）はQAudioBuffer系を参照しない。"""
+    del composition
+    from sdp.ui import level_meter_widget as level_module
+    from sdp.ui import spectrum_panel as panel_module
+
+    for module in (level_module, panel_module):
+        for forbidden in ("QAudioBuffer", "QAudioBufferOutput", "QAudioFormat", "PcmChunk"):
+            assert not hasattr(module, forbidden), f"{module.__name__}: {forbidden}"
 
 
 def test_build_player_does_not_start_the_spectrum_timer(
@@ -809,7 +881,10 @@ def test_build_player_does_not_start_the_spectrum_timer(
     assert not panel.is_timer_active
     assert panel.spectrum_widget.frame is None
     assert panel.spectrum_widget.status_text == SPECTRUM_NO_SOURCE_MESSAGE
+    assert panel.level_meter_widget.frame is None
+    assert panel.level_meter_widget.status_text == LEVEL_NO_SOURCE_MESSAGE
     assert composition.pcm_tap.sample_rate == 0
+    assert composition.pcm_tap.channel_count == 0
     assert composition.pcm_tap.available_frame_count == 0
 
 
@@ -834,6 +909,30 @@ def test_source_change_clears_the_pcm_in_the_production_wiring(
 
     assert tap.available_frame_count == 0
     assert tap.sample_rate == 0
+    assert tap.channel_count == 0
+    assert tap.left_ring_buffer.available == 0
+    assert tap.right_ring_buffer.available == 0
+
+
+def test_production_wiring_feeds_all_three_buffers(
+    composition: app_module.PlayerComposition, audio_files: list[Path]
+) -> None:
+    """本番配線のPCM通知でmono／L／Rの3本すべてが埋まる。
+
+    PLAYING での更新は実再生状態の遷移が必要なため、FakeBackendを使う
+    [test_spectrum_panel.py](./analysis/test_spectrum_panel.py)と、実音の
+    [tests/audio/test_pcm_spectrum.py](../audio/test_pcm_spectrum.py)で検証する。
+    """
+    tap = composition.pcm_tap
+    composition.controller.load(audio_files[0])
+
+    composition.backend.audio_buffer_output.audioBufferReceived.emit(int16_stereo_buffer())
+
+    assert tap.channel_count == 2
+    assert tap.available_frame_count == 1
+    left, right = tap.snapshot_stereo(1)
+    assert left.tolist() == pytest.approx([0.5], abs=1e-3)
+    assert right.tolist() == pytest.approx([0.5], abs=1e-3)
 
 
 def test_playback_backend_interface_has_no_pcm_responsibility() -> None:

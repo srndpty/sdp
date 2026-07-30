@@ -347,7 +347,7 @@ UI が Backend を直接触ることは禁止し、import 構成のレビュー�
 
 ---
 
-## 6. PCM リングバッファと FFT・描画更新（P5-A で実装）
+## 6. PCM リングバッファと FFT・レベル・描画更新（P5-A / P5-B で実装）
 
 ### 6.1 QAudioBufferOutput の実測結果
 
@@ -393,13 +393,32 @@ P5-A の着手前に pause / stop / 再生中の直接 `setSource` / 終端通�
 コールバック（`handle_audio_buffer`）で行ってよいのは次だけとする。
 
 1. buffer の妥当性確認（sample rate / channel count / sample format / `constData()`）
-2. bytes 化（`core/analysis/pcm.py`。波形解析の QAudioDecoder 経路と**同じ変換を再利用**する）
-3. NumPy による正規化と channel 平均による mono 化（`waveform.pcm_bytes_to_mono` を再利用）
-4. リングバッファへの追記
-5. 軽量な `sample_rate_changed` の通知
+2. bytes 化（`core/analysis/pcm.py`。波形解析の QAudioDecoder 経路と**同じ変換を再利用**する）。
+   **bytes 化は 1 buffer につき 1 回だけ**で、mono と L / R を同じ bytes から派生させる
+3. NumPy による正規化と mono / 左 / 右の派生（`waveform.pcm_bytes_to_channels` を再利用）
+4. mono / 左 / 右の 3 本のリングバッファへの追記
+5. 軽量な `sample_rate_changed` / `channel_count_changed` の通知
 
-**行わない**: FFT、band 集約、描画、status bar 更新、ファイル I/O、Model / Controller 操作、
+**行わない**: FFT、band 集約、**Peak / RMS、dBFS 変換、Peak hold**、QTimer、描画、
+status bar 更新、ファイル I/O、Model / Controller 操作、
 大量のログ出力（無効 buffer のログは 100 件ごとに 1 回へ間引く）。
+
+#### PcmChunk（P5-B）
+
+`core/analysis/pcm.py` の frozen dataclass。`mono` / `left` / `right`（いずれも 1 次元
+float32・同じ長さ・read-only）と `sample_rate` / `channel_count` を持つ。
+
+- **1 回の bytes 化と 1 つの `(frame数, channel数)` 配列から 3 本を派生させる。**
+  mono 化してから別経路で再び bytes 化して L / R を取り出すことはしない。
+- mono 入力（1ch）では `left` と `right` を `mono` と同値へ複製する。
+- 2ch 以上では `left` = channel 0、`right` = channel 1。**3ch 以上の残り channel は
+  L / R には使わず**、`mono` の全 channel 平均にだけ含める（多 channel の個別表示は行わない）。
+- 有限性・-1〜1・shape 一致を検証し、呼び出し側の配列をコピーして read-only 化する。
+  QAudioBuffer / QAudioFormat / memoryview は保持しない。
+- `audio_buffer_to_mono()` は `PcmChunk.mono` を返す**互換 wrapper**として残し、
+  波形解析（`WaveformAnalysisService`）は従来どおり mono だけを使う。
+- 非有限値と範囲外値の寄せ方は mono と各 channel で独立に行う。mono は従来どおり
+  「channel 平均のあとに寄せる」ため、P5-A までの波形解析の値と一致する。
 
 - **QAudioBuffer とその memory view をコールバックの外へ持ち出さない。** 必要な PCM だけを
   新しい float32 配列へコピーする（保持していないことをテストで検査する）。
@@ -430,6 +449,17 @@ P5-A の着手前に pause / stop / 再生中の直接 `setSource` / 終端通�
   **左側を 0 で埋める**（無効フレームにはしない。起動直後や曲頭でも FFT の shape が安定する）。
 - **thread-safe**。`threading.Lock` を **memcpy の間だけ**保持し、**FFT 中は保持しない**。
   受信が GUI スレッドである実測（§5）は性能上の根拠として使い、正しさの前提にはしない。
+
+**P5-B では同じ契約のリングバッファを 3 本持つ**（mono / 左 / 右）。stereo な 2 次元
+バッファを導入して `PcmRingBuffer` の契約を複雑化させない。3 本でも 48kHz × 2 秒 ×
+float32 で合計約 1.1MB（実測 1,125KB = 96,000 sample × 3 × 4byte）であり、固定容量で十分小さい。
+
+- 公開 API は `snapshot(n)`（mono の互換 API）、`snapshot_mono(n)`、`snapshot_stereo(n)`。
+  `snapshot_stereo` は左右で**別の**read-only 配列を返す。
+- sample rate 変更・**channel count 変更**・source 変更・stop では**3 本すべて**を
+  clear / 作り直す（旧 format や旧 channel layout のサンプルを混ぜない）。
+- 1 tick のうちに同じリングバッファから複数回 snapshot を取らない
+  （mono 用と L / R 用がそれぞれ 1 回で、合計 2 回の呼び出しになる）。
 
 ### 6.5 SpectrumFrame と FFT 設定
 
@@ -502,17 +532,19 @@ coefficient = attack if 新値 > 前回値 else release
 
 ### 6.8 pause / stop / source 変更の契約
 
+スペクトラムとレベルメーターで同じ契約とする。
+
 | 状態 | 挙動 |
 |---|---|
-| `PLAYING` | 約 30FPS で最新 PCM を解析・描画する |
-| `PAUSED` | **最後のフレームを静止表示**し、新しい FFT を止める（タイマー停止）。再開で追従を再開 |
-| `STOPPED` / `NO_MEDIA` | リングバッファ clear、Processor reset、旧フレーム破棄、タイマー停止、プレースホルダー表示 |
+| `PLAYING` | 約 30FPS で最新 PCM を解析・描画する（FFT と Peak / RMS の両方） |
+| `PAUSED` | **最後のフレームを静止表示**し、新しい解析を止める（タイマー停止）。**Peak hold の時間も進めない**（タイマー停止時に経過時間の時計を無効化する）。再開で追従を再開 |
+| `STOPPED` / `NO_MEDIA` | リングバッファ 3 本 clear、SpectrumProcessor / LevelProcessor reset、旧フレーム破棄、タイマー停止、プレースホルダー表示 |
 
 `END_OF_MEDIA` から次曲へ進む場合も、前曲の PCM とフレームを次曲の表示へ持ち越さない。
 
 source 変更時は `PlaybackController.source_changed` を PcmTap と SpectrumPanel の**両方**が
-監視し、リングバッファ clear / sample rate 状態 reset / Processor reset / 旧フレーム破棄を
-即時行う。stateが`PLAYING`のままでも旧フレームを必ず捨て、新 source の最初の PCM が
+監視し、リングバッファ 3 本 clear / format 状態 reset / 両 Processor reset（Peak hold 破棄）/
+旧フレーム破棄を即時行う。stateが`PLAYING`のままでも旧フレームを必ず捨て、新 source の最初の PCM が
 届くまではプレースホルダーを表示する。
 **波形解析サービスとは完全に独立**（相互に参照しない）。
 
@@ -529,13 +561,86 @@ accessibleName は `スペクトラム`。minimumHeight 130、sizePolicy は Exp
   基準線と短い日本語の状態文字を併用する。
 - 状態文字は Widget 内の 1 か所へ QPainter で描く（別 QLabel の表示切替で Panel 高を変動させない）。
 
+### 6.9.1 Peak / RMS レベル（P5-B）
+
+`core/analysis/level.py`（すべて Qt 非依存で単体テストできる）。
+
+**このメーターは出力音量計ではない。** `QAudioBufferOutput` が渡すのは
+速度・ピッチ処理と**音量・ミュートを適用する前**のデコード済み PCM なので
+（[p0-report.md](./p0-report.md) §8.6、§8.7）、表示しているのは**音源信号のレベル**である。
+音量 0 でもミュート中でもメーターは振れる。
+LUFS、true peak、inter-sample peak、K 特性、ラウドネス正規化は扱わない。
+
+設定は 1 か所の定数へ集約する。
+
+```python
+LEVEL_DB_FLOOR = -90.0  # スペクトラムの下限と揃える
+PEAK_HOLD_SECONDS = 1.0
+PEAK_HOLD_RELEASE_DB_PER_SECOND = 24.0
+LEVEL_WINDOW_SIZE = 4096  # FFT 長と同じ。48kHz で約 85ms
+```
+
+- **Peak**: `max(abs(samples))`。空入力は 0。dBFS は `20 * log10(max(peak, 1e-12))` を
+  floor〜0dB へ clamp する（1.0 が 0dB、0.5 が約 -6.02dB、0 は floor）。
+- **RMS**: `sqrt(mean(samples ** 2))`。float32 の二乗和で精度が落ちるため **float64 へ昇格**し、
+  **入力配列は変更しない**（read-only の snapshot をそのまま渡せる）。振幅 1.0 の正弦波は
+  約 -3.01dB、振幅 0.5 の正弦波は約 -9.03dB。RMS は通常 Peak 以下になる。
+- **窓長は毎 tick 4096 sample だけ**。リングバッファ 2 秒分すべてを毎 tick 計算しない。
+- NaN / inf を含む PCM は floor へ黙って丸めず明示的に失敗させる
+  （リングバッファ側で既に寄せているため、通常は届かない）。
+
+`StereoLevelFrame` は frozen dataclass で、左右の Peak / RMS / Peak hold の **6 つの
+dBFS 値だけ**を持つ。bool を数値として受理せず、有限性・floor 以上 0dB 以下・
+`RMS ≦ Peak ≦ Peak hold`（丸め誤差の範囲）を検証する。QColor や時刻オブジェクト、
+NumPy 配列は持たない。0〜1 の正規化済み表示値も持たず、描画側が dB 範囲から変換する。
+
+`LevelProcessor` が Peak hold の状態を持つ。
+
+- **hold は左右で独立**に保持・減衰させる（片 ch の Peak 更新が他 ch の hold を延命しない）。
+- 現在 Peak が hold 以上なら**即時追従**し、保持時間を測り直す。
+- 保持時間（既定 1.0 秒）を過ぎた**ぶんだけ** `24.0 dB/秒` で減衰させる。減衰量は
+  経過秒に比例するため、**タイマー FPS の揺れやこま落ちで減衰速度が変わらない**
+  （1 tick で 2 秒進めた場合と 2 tick で 1 秒ずつ進めた場合が同じ結果になる）。
+- 減衰中も**現在 Peak と floor より下へは落とさない**。
+- `reset()` で hold と経過時間を捨てる（stop / source 変更 / format 変更）。
+- **`QElapsedTimer` は Panel 側が持ち**、Processor へは経過秒だけを渡す（純粋関数に近い状態機械）。
+  pause 中は `process` を呼ばないため、hold の時間も進まない。
+
+### 6.9.2 LevelMeterWidget（P5-B）
+
+`QWidget` を直接継承し、**QPainter で一括描画**する。objectName は `levelMeterWidget`、
+accessibleName は `レベルメーター`。minimumHeight 78（プレイリストを圧迫しないよう
+スペクトラムより低く抑える）、sizePolicy は Expanding / Fixed。
+**マウス操作もフォーカスも持たない**（`NoFocus`）。
+
+- L / R の**横長バー 2 本**を 1 回の paintEvent で描く。チャンネルや目盛ごとに子 Widget を作らない。
+- **Peak と RMS を色だけで区別しない**: RMS は塗りつぶしバー、Peak は細い縦線（1px）、
+  Peak hold は太い短線（3px）。-60 / -40 / -20 / -6dB の基準線と数値目盛も併記する。
+- palette ベースで描く（固定 RGB に依存しない）: 背景 `Base`、目盛と枠 `Mid`、
+  RMS `Highlight`、Peak と L / R ラベル `Text`、Peak hold `Link`、状態文字 `PlaceholderText`。
+- floor 以下の値は描かない（無音では枠と目盛だけになる）。
+- 状態文字（source なし / 停止中 / PCM 待機中 / 失敗）は Widget 内の 1 か所へ QPainter で描く。
+
 ### 6.10 SpectrumPanel とタイマー
 
 `SpectrumPanel(playback: PlaybackController, pcm_tap: PcmTap)` だけを受け取る。
+**スペクトラムとレベルメーターの両方を持ち**、同じ PcmTap と同じ tick を共有する
+（`SpectrumWidget` と `LevelMeterWidget` を縦に並べる）。Panel を可視化ごとに分けて
+MainWindow の依存を増やしたり、汎用オーディオグラフやイベントバスを導入したりはしない。
+
+1 tick の処理順は次のとおり。
+
+1. sample rate を読む
+2. mono snapshot を **1 回**（FFT 長 4096）
+3. L / R snapshot を **1 回**（Level 窓長 4096）
+4. 実経過秒を `QElapsedTimer.restart()` で取り出す
+5. FFT + band 集約 + 平滑化を**最大 1 回**
+6. Peak / RMS + Peak hold を**最大 1 回**
+7. 2 つの Widget を更新する
 
 - 間隔は約 33ms。**`Qt.TimerType.PreciseTimer` を指定する**（既定の CoarseTimer は Windows の
   15.6ms 粒度のため実測 21FPS 程度に落ちたが、PreciseTimer では実測 30.3FPS を得た）。
-- **タイマー 1 tick で FFT は最大 1 回。** 処理中の再入は専用フラグで防ぐ。
+- **タイマー 1 tick で FFT と Level 計算は各最大 1 回。** 処理中の再入は専用フラグで防ぐ。
 - タイマーを動かす条件は「`PLAYING` かつ Widget 表示中かつ top-level window が最小化されていない」。
   それ以外では停止する（SPEC-04）。最小化では子へ hideEvent が来ないため、
   `showEvent` で top-level window へ event filter を入れて `WindowStateChange` を監視する。
@@ -546,13 +651,24 @@ accessibleName は `スペクトラム`。minimumHeight 130、sizePolicy は Exp
   show／最小化復帰、古いtimeoutのいずれでもタイマーや表示状態を再開・変更しない。
 - `QApplication.processEvents()` はタイマーハンドラー内で呼ばない。
 - 最初の PCM が届く前（sample rate が 0）は FFT せずプレースホルダーのまま待つ。
-- **スペクトラムの失敗は再生を妨げない。** 例外はログへ残してプレースホルダー表示へ切り替え、
-  タイマーを止める（ログの大量出力を避ける）。Controller へは何も要求しない。
+- **解析の失敗は再生を妨げない。** 例外はログへ残してプレースホルダー表示へ切り替える。
+  Controller へは何も要求しない。
+- **例外境界は解析ごとに独立させる**（P5-B）。
+  - FFT 失敗: スペクトラムだけ失敗表示。**レベルメーターは更新を続ける**
+  - Level 失敗: レベルメーターだけ失敗表示。**スペクトラムは更新を続ける**
+  - 共通の snapshot 失敗: 両方を失敗表示にしてタイマーを止める
+  - **両方が失敗したときだけ**タイマーを止める（ログの大量出力を避ける）。
+    source 変更で失敗状態から復帰できる
+- Peak hold の減衰はタイマー回数ではなく `QElapsedTimer` の実経過秒で進める。
+  タイマーを止めるとき（pause / 非表示 / 最小化 / 停止）は時計を無効化し、
+  **止まっていた実時間を減衰へ数えない**。
 
 ### 6.11 MainWindow と app.py
 
-`MainWindow` は PlayerControls → SpeedPanel → WaveformPanel → **SpectrumPanel** →
-PlaylistView の順に配置するだけで、FFT・タイマー・リングバッファを持たない。
+`MainWindow` は PlayerControls → SpeedPanel → WaveformPanel → **SpectrumPanel
+（スペクトラム + レベルメーター）** → PlaylistView の順に配置するだけで、
+FFT・Peak / RMS・Peak hold・タイマー・リングバッファ・LevelProcessor を持たない。
+レベルメーターは `SpectrumPanel` の中へ入れるため、MainWindow の依存も既定高も増やさない。
 可視化が 2 つに増えた分だけ既定ウィンドウ高を 540 → 700 へ広げ、プレイリスト領域を残す。
 `MainWindow` へ具体 Backend は渡さない（`PcmTap` は既存の `WaveformAnalysisService` と
 同じく composition 済みサービスとして受け取る）。
@@ -572,8 +688,15 @@ PlaylistView の順に配置するだけで、FFT・タイマー・リングバ�
 `core/analysis/pcm.py` は波形解析にあった QAudioBuffer 変換を**移設して共有した**もので、
 振る舞いは同じ（channel count の検査だけ追加した）。
 
-**P5-B で Peak / RMS レベルメーターを追加する。** その際も PCM 供給基盤はこのまま使い、
-音声コールバックへ FFT や描画を持ち込まない。
+P5-B で Peak / RMS レベルメーターを追加したが、`PlaybackBackend` / `PlaybackController` /
+`FakePlaybackBackend` / 各 schema はいずれも変更していない。`PcmTap` に増えたのは
+L / R リングバッファと `snapshot_stereo` / `channel_count` / `channel_count_changed` だけで、
+音声コールバックへ FFT・Peak / RMS・描画は持ち込んでいない。
+`pcm_bytes_to_mono()` の mono 値も P5-A と同じ（channel 平均後に寄せる）。
+
+**P5-B 完了時点が、当初計画上の「sdp らしい初回完成版」である**
+（[development-plan.md §5](./development-plan.md)）。ただし P3〜P5 の実画面・実マウス・
+実音による手動受け入れはリリース前ゲートとして残る。
 
 ## 7. 波形解析・縮約・キャッシュ
 
