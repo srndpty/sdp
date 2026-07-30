@@ -18,6 +18,7 @@ from sdp.core.playback.qt_backend import QtMultimediaBackend
 from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.services import logging_setup
+from sdp.services.pcm_tap import PcmTap
 from sdp.services.playlist_session import PlaylistSession, default_playlist_path
 from sdp.services.settings import SettingsSession
 from sdp.services.user_paths import default_settings_path, default_waveform_cache_directory
@@ -46,6 +47,7 @@ class PlayerComposition:
     settings_session: SettingsSession
     metadata_reader: MetadataReader
     waveform_analysis: WaveformAnalysisService
+    pcm_tap: PcmTap
     window: MainWindow
 
 
@@ -83,7 +85,17 @@ def build_player(
         if waveform_cache_directory is None
         else waveform_cache_directory,
     )
-    window = MainWindow(controller, playlist_model, playlist_playback, waveform_analysis)
+    # 再生中PCMの供給は Qt Multimedia 固有の補助ポート。ここだけが具体Backendの
+    # QAudioBufferOutput を知る（PlaybackBackend の契約には含めない）。
+    pcm_tap = PcmTap(controller)
+    pcm_tap.connect_audio_buffer_output(backend.audio_buffer_output)
+    window = MainWindow(
+        controller,
+        playlist_model,
+        playlist_playback,
+        waveform_analysis,
+        pcm_tap,
+    )
     restore_messages = [
         message for message in (restore_message, settings_restore_message) if message is not None
     ]
@@ -98,6 +110,7 @@ def build_player(
         settings_session=settings_session,
         metadata_reader=metadata_reader,
         waveform_analysis=waveform_analysis,
+        pcm_tap=pcm_tap,
         window=window,
     )
 
@@ -134,6 +147,9 @@ def run(argv: list[str] | None = None) -> int:
     composition.waveform_analysis.start()
     composition.window.show()
     exit_code = app.exec()
+    # 可視化を先に止め、破棄済みQObjectへシグナルが飛ばないようにする。
+    composition.window.spectrum_panel.shutdown()
+    composition.pcm_tap.shutdown()
     # ワーカーを止めてから保存する。保存の失敗はログへ残すだけにする
     # （ウィンドウが閉じた後でユーザーへ提示できないため）。
     composition.waveform_analysis.shutdown()

@@ -4,16 +4,17 @@ ADR-0001 で採用した QMediaPlayer + QAudioOutput をこのモジュールへ
 Qt の enum・QUrl・例外を PlaybackBackend の契約へ変換する。
 Controller と UI はこのモジュールを import しない。
 
-QAudioBufferOutput（可視化用の PCM タップ）はここでは接続しない。
-PcmTap とリングバッファは P5 の責務であり、将来用の未使用オブジェクトを
-先に持たせない（[AGENTS.md](../../../../AGENTS.md) の方針）。
+可視化用の PCM 供給口として QAudioBufferOutput を所有するが、これは
+PlaybackBackend の一般インターフェースには**含めない**（Qt Multimedia 固有の
+補助ポートとして扱う。mpv へ差し替えた場合に持ち込めないため）。
+接続するのは composition root と PcmTap だけで、UI 層は参照しない。
 """
 
 import logging
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QUrl, Slot
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimedia import QAudioBufferOutput, QAudioOutput, QMediaPlayer
 
 from sdp.core.playback.backend import PlaybackBackend
 from sdp.core.playback.types import (
@@ -90,6 +91,11 @@ class QtMultimediaBackend(PlaybackBackend):
         self._player = QMediaPlayer(self)
         self._audio_output = QAudioOutput(self)
         self._player.setAudioOutput(self._audio_output)
+        # format を指定しない QAudioBufferOutput は「デコード直後のネイティブ形式」
+        # を通知する（再サンプリングを挟まない）。音声出力は QAudioOutput 側で
+        # 従来どおり継続する（P0-C §8、P5-A probe で実測）。
+        self._audio_buffer_output = QAudioBufferOutput(self)
+        self._player.setAudioBufferOutput(self._audio_buffer_output)
 
         # Qt は source 未設定でも StoppedState を返すため、NO_MEDIA と STOPPED は
         # Qt の playbackState だけでは区別できない。source の有無を自分で保持する。
@@ -153,6 +159,17 @@ class QtMultimediaBackend(PlaybackBackend):
 
     def set_pitch_compensation(self, enabled: bool) -> None:
         self._player.setPitchCompensation(bool(enabled))
+
+    # -- Qt 固有の補助ポート -------------------------------------------------
+
+    @property
+    def audio_buffer_output(self) -> QAudioBufferOutput:
+        """再生中PCMの供給口。composition root が PcmTap へ接続するためだけに公開する。
+
+        PlaybackBackend の契約ではないため、UI と Controller はこれに触れない
+        （UI からの import は AST 検査で禁止している）。
+        """
+        return self._audio_buffer_output
 
     # -- 状態 ---------------------------------------------------------------
 

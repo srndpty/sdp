@@ -22,6 +22,7 @@ from sdp.core.playback.types import (
 from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.core.playlist.types import RepeatMode
+from sdp.services.pcm_tap import PcmTap
 from sdp.services.waveform_analysis import WaveformAnalysisService
 from sdp.ui import main_window as main_window_module
 from sdp.ui.main_window import MainWindow
@@ -63,9 +64,12 @@ def window(
     tmp_path: Path,
 ) -> Iterator[MainWindow]:
     waveform_analysis = WaveformAnalysisService(controller, tmp_path / "waveform-cache")
-    main = MainWindow(controller, playlist_model, playlist_playback, waveform_analysis)
+    pcm_tap = PcmTap(controller)
+    main = MainWindow(controller, playlist_model, playlist_playback, waveform_analysis, pcm_tap)
     qtbot.addWidget(main)
     yield main
+    main.spectrum_panel.shutdown()
+    pcm_tap.shutdown()
     waveform_analysis.shutdown()
 
 
@@ -101,8 +105,11 @@ def action_of(window: MainWindow, name: str) -> QAction:
 # -- 依存の向き -------------------------------------------------------------
 
 
-def test_main_window_takes_only_its_four_dependencies() -> None:
-    """MainWindowはController・Model・プレイリスト再生・波形解析（と親）だけを受け取る。"""
+def test_main_window_takes_only_its_composed_dependencies() -> None:
+    """Controller・Model・プレイリスト再生・波形解析・PCMタップ（と親）だけを受け取る。
+
+    具体Backend（QtMultimediaBackend）はここへ渡さない。
+    """
     parameters = list(inspect.signature(MainWindow.__init__).parameters)
     assert parameters == [
         "self",
@@ -110,6 +117,7 @@ def test_main_window_takes_only_its_four_dependencies() -> None:
         "playlist_model",
         "playlist_playback",
         "waveform_analysis",
+        "pcm_tap",
         "parent",
     ]
 

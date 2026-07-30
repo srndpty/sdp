@@ -6,14 +6,22 @@
 
 import json
 import logging
+import struct
 from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
 
 import pytest
+from PySide6.QtMultimedia import (
+    QAudioBuffer,
+    QAudioBufferOutput,
+    QAudioFormat,
+    QMediaPlayer,
+)
 from PySide6.QtWidgets import QApplication, QCheckBox, QDoubleSpinBox, QPushButton
 from pytestqt.qtbot import QtBot
 
+from fakes.fake_playback_backend import FakePlaybackBackend
 from sdp import app as app_module
 from sdp.core.metadata.reader import MetadataReader
 from sdp.core.metadata.types import MetadataStatus, TrackMetadata
@@ -25,6 +33,7 @@ from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.persistence import load_playlist, save_playlist
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.core.playlist.types import RepeatMode
+from sdp.services.pcm_tap import PcmTap
 from sdp.services.playlist_session import RESTORE_FAILED_MESSAGE, PlaylistSession
 from sdp.services.settings import (
     RESTORE_FAILED_MESSAGE as SETTINGS_RESTORE_FAILED_MESSAGE,
@@ -38,6 +47,9 @@ from sdp.services.waveform_analysis import WaveformAnalysisService
 from sdp.ui.main_window import MainWindow
 from sdp.ui.player_controls import PlayerControls
 from sdp.ui.playlist_view import PlaylistView
+from sdp.ui.spectrum_panel import SpectrumPanel
+from sdp.ui.spectrum_widget import NO_SOURCE_MESSAGE as SPECTRUM_NO_SOURCE_MESSAGE
+from sdp.ui.spectrum_widget import SpectrumWidget
 from sdp.ui.speed_panel import SpeedPanel
 from sdp.ui.waveform_panel import WaveformPanel
 from sdp.ui.waveform_widget import WaveformWidget
@@ -95,6 +107,15 @@ def audio_files(tmp_path: Path) -> list[Path]:
     return paths
 
 
+def int16_stereo_buffer(value: int = 16_384) -> QAudioBuffer:
+    """48kHz Int16 stereoの1frame buffer（P0-C実測のWAV形式）。"""
+    audio_format = QAudioFormat()
+    audio_format.setSampleRate(48_000)
+    audio_format.setChannelCount(2)
+    audio_format.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+    return QAudioBuffer(struct.pack("<2h", value, value), audio_format)
+
+
 # -- 組み立て ---------------------------------------------------------------
 
 
@@ -112,6 +133,7 @@ def test_build_player_creates_every_layer(
     assert isinstance(composition.playlist_session, PlaylistSession)
     assert isinstance(composition.settings_session, SettingsSession)
     assert isinstance(composition.waveform_analysis, WaveformAnalysisService)
+    assert isinstance(composition.pcm_tap, PcmTap)
     assert isinstance(composition.window, MainWindow)
     assert composition.playlist_session.file_path == playlist_file
     assert composition.settings_session.file_path == settings_file
@@ -734,3 +756,152 @@ def test_ui_layer_does_not_import_mutagen() -> None:
     for module in (main_window_module, playlist_view_module):
         for forbidden in ("mutagen", "MetadataReader", "read_track_metadata"):
             assert not hasattr(module, forbidden), f"{module.__name__}: {forbidden}"
+
+
+# -- PCM タップとスペクトラム（P5-A）---------------------------------------
+
+
+def test_composition_holds_the_pcm_tap_connected_to_the_backend(
+    composition: app_module.PlayerComposition,
+) -> None:
+    """PcmTapを保持し、具体BackendのQAudioBufferOutputへ接続されている。"""
+    tap = composition.pcm_tap
+    assert isinstance(tap, PcmTap)
+
+    buffer_output = composition.backend.audio_buffer_output
+    assert isinstance(buffer_output, QAudioBufferOutput)
+    # Backend が所有し、QMediaPlayer へ設定済みであること。
+    player = composition.backend.findChild(QMediaPlayer)
+    assert player is not None
+    assert player.audioBufferOutput() is buffer_output
+
+    # 実際のPCM通知経路でリングバッファへ届く。
+    buffer_output.audioBufferReceived.emit(int16_stereo_buffer())
+
+    assert tap.received_buffer_count == 1
+    assert tap.sample_rate == 48_000
+
+
+def test_spectrum_panel_uses_the_same_pcm_tap(
+    composition: app_module.PlayerComposition,
+) -> None:
+    """MainWindow内のSpectrumPanelはcomposition rootと同じPcmTapを使う。"""
+    panel = composition.window.findChild(SpectrumPanel)
+    assert panel is not None
+    assert panel.pcm_tap is composition.pcm_tap
+    assert composition.window.spectrum_panel is panel
+
+
+def test_window_has_exactly_one_spectrum_widget_next_to_the_waveform(
+    composition: app_module.PlayerComposition,
+) -> None:
+    """波形とスペクトラムが1つずつ共存する。"""
+    assert len(composition.window.findChildren(SpectrumWidget)) == 1
+    assert len(composition.window.findChildren(WaveformWidget)) == 1
+    assert composition.window.findChild(WaveformPanel) is not None
+
+
+def test_build_player_does_not_start_the_spectrum_timer(
+    composition: app_module.PlayerComposition,
+) -> None:
+    """buildだけではタイマーを開始しない（sourceなし初期表示）。"""
+    panel = composition.window.spectrum_panel
+    assert not panel.is_timer_active
+    assert panel.spectrum_widget.frame is None
+    assert panel.spectrum_widget.status_text == SPECTRUM_NO_SOURCE_MESSAGE
+    assert composition.pcm_tap.sample_rate == 0
+    assert composition.pcm_tap.available_frame_count == 0
+
+
+def test_source_change_clears_the_pcm_in_the_production_wiring(
+    composition: app_module.PlayerComposition, audio_files: list[Path]
+) -> None:
+    """本番配線でもsource変更で保持中のPCMを捨てる。
+
+    停止・一時停止による clear は実再生状態の遷移が必要なため、
+    FakeBackendを使う[test_pcm_tap.py](./analysis/test_pcm_tap.py)と、
+    実音の[tests/audio/test_pcm_spectrum.py](../audio/test_pcm_spectrum.py)で検証する。
+    """
+    tap = composition.pcm_tap
+    buffer = int16_stereo_buffer()
+
+    composition.controller.load(audio_files[0])
+    composition.backend.audio_buffer_output.audioBufferReceived.emit(buffer)
+    assert tap.available_frame_count == 1
+    assert tap.sample_rate == 48_000
+
+    composition.controller.load(audio_files[1])
+
+    assert tap.available_frame_count == 0
+    assert tap.sample_rate == 0
+
+
+def test_playback_backend_interface_has_no_pcm_responsibility() -> None:
+    """PlaybackBackendの一般契約へPCM SignalやQt型を追加していない。"""
+    for forbidden in (
+        "audio_buffer_output",
+        "pcm_buffer_received",
+        "audioBufferReceived",
+        "QAudioBufferOutput",
+        "QAudioBuffer",
+    ):
+        assert not hasattr(PlaybackBackend, forbidden), forbidden
+
+    from sdp.core.playback import backend as backend_module
+
+    for forbidden in ("QAudioBufferOutput", "QAudioBuffer", "PcmTap", "PcmRingBuffer"):
+        assert not hasattr(backend_module, forbidden), forbidden
+
+
+def test_fake_backend_has_no_audio_buffer_concept() -> None:
+    """FakePlaybackBackendへQAudioBuffer概念を導入していない。"""
+    from fakes import fake_playback_backend as fake_module
+
+    for forbidden in ("QAudioBuffer", "QAudioBufferOutput", "audio_buffer_output"):
+        assert not hasattr(fake_module, forbidden), forbidden
+        assert not hasattr(FakePlaybackBackend, forbidden), forbidden
+
+
+def test_shutdown_stops_the_spectrum_timer_and_the_tap(
+    playlist_file: Path,
+    settings_file: Path,
+    waveform_cache_directory: Path,
+    qtbot: QtBot,
+) -> None:
+    """終了処理でタイマーとPCM受信が残らない。"""
+    composition = app_module.build_player(playlist_file, settings_file, waveform_cache_directory)
+    qtbot.addWidget(composition.window)
+    buffer_output = composition.backend.audio_buffer_output
+
+    composition.window.spectrum_panel.shutdown()
+    composition.pcm_tap.shutdown()
+
+    assert not composition.window.spectrum_panel.is_timer_active
+    buffer_output.audioBufferReceived.emit(int16_stereo_buffer())
+    assert composition.pcm_tap.received_buffer_count == 0
+
+
+def test_visualization_schemas_are_unchanged(
+    composition: app_module.PlayerComposition,
+    playlist_file: Path,
+    settings_file: Path,
+    audio_files: list[Path],
+) -> None:
+    """settings・playlist・波形cacheのschemaへ可視化設定を追加していない。"""
+    composition.playlist_model.add_paths(audio_files)
+    composition.playlist_session.save_from(composition.playlist_model)
+    composition.settings_session.start()
+    composition.controller.set_playback_rate(1.25)
+    composition.settings_session.flush()
+
+    playlist_document = json.loads(playlist_file.read_text(encoding="utf-8"))
+    settings_document = json.loads(settings_file.read_text(encoding="utf-8"))
+
+    assert set(playlist_document) == {"schema_version", "entries"}
+    assert set(settings_document) == {"schema_version", "playback_rate", "pitch_compensation"}
+
+    from sdp.core.analysis import waveform_cache
+
+    assert waveform_cache.WAVEFORM_ANALYSIS_VERSION == 1
+    assert waveform_cache.WAVEFORM_FORMAT_VERSION == 1
+    assert waveform_cache.WAVEFORM_BUCKET_MS == 20

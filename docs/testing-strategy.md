@@ -27,8 +27,9 @@
 
 | 対象 | 検証内容 |
 |---|---|
-| `analysis/spectrum.py` | 既知の正弦波を入力してピークバンドの位置を確認。窓関数・dB 変換・平滑化の数値検証 |
-| `analysis/ring_buffer.py` | 折り返し、スナップショット、満杯時の上書き |
+| `analysis/spectrum.py` | SpectrumFrameの不変性／shape一致／dtype／周波数の昇順と非負／dBの有限性と0dB以下、左0 paddingとFFT_SIZE超過時の最新sample採用、Hann窓によるリーク抑制、rFFT周波数軸、100Hz／1kHz／10kHzの正弦波ピークバンド（許容幅付き）、0dBFSが約0dB・振幅0.5が約-6dBになる振幅補正、無音とDCのfloor収束、clipping入力の0dB clamp、epsilonによるlog(0)防御、96band・対数境界・幾何平均の代表周波数、無bin bandの補間（ピークを複製しない）、30Hz未満と20kHz超の除外、Nyquist制限、低sample rate、有効帯域なしの空フレーム、attack／releaseの係数検証とreset、sample rate変更でのreset、入力配列を変更しないこと |
+| `analysis/ring_buffer.py` | capacity検証、空snapshot、capacity未満／ちょうど／超過、1回のappendがcapacity超過、wrap前／後／複数wrap、最新N sample、Nが保持量超過、N=0、clear、set_capacityでの作り直し、dtype float32と1次元の検証、NaN／inf防御、snapshotのread-only性と非共有性、旧snapshotの不変性、大量appendでの容量固定、sample単位ループやconcatenateを使わない構造、barrierで開始を揃えたthread競合（固定sleepを使わない） |
+| `analysis/pcm.py` | QAudioBufferからのUInt8／Int16／Int32／Float、mono／stereo／3ch、無音、clipping、NaN／inf、空PCM、frame境界不正、sample rate／channel count不正、未対応format、`constData()` が None、byteCount不一致。handler内でbytesへコピーし、QAudioBufferのviewを保持しないこと。Qtが不正なQAudioFormatをリセットしてしまう条件はstub bufferで検証する |
 | `analysis/waveform.py` | WaveformDataのread-only／shape／dtype／有限性／範囲検証、UInt8／Int16／Int32／Float正規化、stereo mono化、frame境界、無音／正弦波／clipping、増分chunk境界、端数bucket、1sample追加、旧snapshot不変、60分相当18万bucket |
 | `analysis/waveform_cache.py` | path／size／mtime／analysis version／bucket／format versionのkey無効化matrix、SHA-256名、日本語path、float32往復、必須field／dtype／shape／NaN／inf／min>max／duration／completeの破損matrix、allow_pickle=False、write／fsync／replace失敗、temp回収、hit時刻、決定的500MB LRU、個別削除失敗継続 |
 | `metadata/reader.py` の純粋読取 | タグあり（MP3 / FLAC）・タグなし・壊れたファイル・未対応形式・欠損・ディレクトリ。日本語と空白、複数アーティストの結合、空文字の `None` 化、長さの丸めと NaN / inf / 負値の防御、長さ不明でもタグを捨てないこと、既知の解析・I/O失敗だけを`MetadataReadError`へ正規化し、属性取得などの予期しない例外は変換せず伝播すること、読み取りで元ファイルを書き換えないこと。タグ付きファイルはテスト音源を tmp_path へ複製して Mutagen 自身で書き込む（外部プロセスを起動しない） |
@@ -55,11 +56,11 @@
 | `SingleInstanceService` | 同一プロセス内でサーバーとクライアントを往復させる |
 | `PlayerControls` | **FakeBackend + 実 PlaybackController** で、状態ごとのボタン活性、シーク（ドラッグ中の非同期更新の抑止、有効なpress/releaseでの1回だけのseek、source・duration変更による古い操作の取消）、音量・ミュートの往復とフィードバックループの不在を検証する。子ウィジェットは `objectName` で取得する |
 | `MainWindow` | `QFileDialog.getOpenFileName` を差し替え、キャンセル / 選択、ファイル名とタイトルの更新、`MediaStatus` とエラー表示（具体的エラーの優先、`detail` を出さないこと）、source解除、終了アクションを検証する |
-| `app.py` の配線 | Backend → Controller → PlaylistModel → 永続化サービス → MainWindow を組み立て、復元済みModelの前後曲可否をWindow構築時に反映できること。イベントループは起動しない |
+| `app.py` の配線 | Backend → Controller → PlaylistModel → 永続化サービス → MainWindow を組み立て、復元済みModelの前後曲可否をWindow構築時に反映できること。イベントループは起動しない。PcmTapを保持しBackendのQAudioBufferOutputへ接続されていること、SpectrumPanelが同じPcmTapを使うこと、SpectrumWidgetとWaveformWidgetが1つずつ共存すること、buildだけではタイマーを開始しないこと、source変更でPCMがclearされること、shutdownでタイマーとPCM受信が残らないこと、PlaybackBackend IF・FakeBackend・settings／playlist／波形cache schemaが不変であること |
 | `ShortcutManager` | 実QTestキー入力で全割当、auto repeat設定、相対値の境界、sourceなし、入力Widget・ボタンSpace・modalでの抑止、管理外のCtrl+O／Ctrl+Shift+O／Ctrl+C／Ctrl+Vの通過、QObject削除後の安全性を検証する |
 | `SettingsSession` | MainWindow構築前のController適用、build時未開始、start冪等、1.5秒相当のデバウンス、連続変更の最終snapshot、終了時flush、一時失敗後の1回自動再試行、破損時保存無効化、QObject削除時timer停止を検証する |
 | プレイリストの永続化ライフサイクル | 保存先の決定、ファイル未作成での空起動、順序・entry_id・重複行・日本語パス・欠損行の復元、並べ替え / 削除 / 全消去後の保存、読み書き I/O エラーのログ記録。**破損ファイルではクラッシュせず空で起動し、その起動の保存を無効化して既存ファイルを上書きしないこと** |
-| UI 層の依存 | `src/sdp/ui/` 配下を再帰走査し、`qt_backend` / `QMediaPlayer` / `QAudioOutput` 自身またはその配下をimportしていないことを標準ライブラリの `ast` で検査する（親モジュール経由も完全修飾して判定し、新しい依存は追加しない） |
+| UI 層の依存 | `src/sdp/ui/` 配下を再帰走査し、`qt_backend` / `QMediaPlayer` / `QAudioOutput` / `QAudioBufferOutput` / `QAudioBuffer` / `QAudioDecoder` 自身またはその配下をimportしていないことを標準ライブラリの `ast` で検査する（親モジュール経由も完全修飾して判定し、新しい依存は追加しない） |
 | `MetadataReader` | 実ファイルに対する非同期完了、GUIスレッドでの反映、entry_id・token・path照合、削除・欠損・不適用結果のtoken回収、shutdown後の論理キャンセル、専用poolの並列上限。実行中の同期I/Oを強制停止できないことは協調的shutdownの制約として扱う |
 | `WaveformAnalysisService` | fake decode境界でstart冪等、source監視、source変更時の即時clear、事前確認失敗でも同一tokenのstarted→failedとなること、partial／完了／失敗、cache hit／破損miss、request tokenと回収、source切替cancel、stale結果・旧cache保存防止、解析中のsize／mtime変更を終端失敗にすること、読取中削除、GUI thread受信、stat再確認とLRUがworker側であること、縮約中のGUI heartbeat、60分相当stream、timeout後もthread終了まで待つshutdown／QObject削除を検証する |
 | 実`QAudioDecoder` | 音声出力deviceを使わず、WAVとMP3のPCM、実duration、有限min/max、partial、decoderのthread affinity、不正ファイル、decoder生成後のsource切替cancel、shutdown後のthread終了を通常CIで検証する |
@@ -67,7 +68,11 @@
 | `WaveformWidget` | QPainter描画、palette変更、resizeと投影cache、線数がpixel幅以下、source／durationなし、左右クリック、中央・端・音源端のclamp、drag move中の非通知、固定中心のpreview、release時1回、clear／source変更／hide／disableでの取消をQTestで検証する |
 | `WaveformPanel` | sourceなし、started／partial／finished／cache hit／failed／cleared、状態文言がWidget内の1か所だけであること、path・token不一致の無視、生error非表示、position追従、Controller duration優先とcomplete fallback、partial duration非採用、解析中・失敗後のseek、source切替中のdrag取消をFakeBackendで検証する。さらに実Serviceをstartし、Controller→request→worker→公開Signal→Panel→Widgetの正常decode、cache hit、事前確認失敗、decode失敗、A→B切替を統合テストする |
 | 波形描画性能 | 180,000 bucketを800／1,920／3,840pxへ投影し、出力・描画線が幅以下であること、QTimerによる100回のposition更新と別QTimerのGUI heartbeatが通常event loop上で共に進むことを厳格な時間上限なしで確認する |
-| 可視化ウィジェット | 表示 ON/OFF でタイマーと PCM タップが停止すること（SPEC-04） |
+| `PcmTap` | sourceなし、有効buffer受信、sample rate公開と重複通知の抑制、リングバッファへのappendとmono化、sample rate変更でのclearと容量再構築、source変更／stopでのclear、pauseでの保持、無効buffer（終端の空buffer）の破棄と件数計上、未対応formatの無視、通常失敗と予期しない例外のログ間引き、コールバックから例外を漏らさないこと、PlaybackControllerを操作しないこと、FFT・QWidget・PlaylistModelを参照しないこと、QAudioBufferを保持しないこと、コールバック実行threadの記録、実QAudioBufferOutputでの接続／二重接続／切断、shutdownの冪等性と終端性（queue済み／直接入力の無視、再接続拒否）、破棄後のシグナルで落ちないこと。PCMは公開スロット `handle_audio_buffer` から注入する |
+| `SpectrumWidget` | objectName／accessibleName／minimumHeight／sizePolicy、初期プレースホルダー、empty／silence／96bandフレームの描画、resizeと幅0、bar数がband数とpixel幅以下であること、band毎の子Widgetを作らないこと、palette変更での再描画、clear_frameでの旧フレーム破棄、pause相当の再描画でのフレーム保持、マウス操作とフォーカスを持たないこと、破棄後の安全性。pixel完全一致は検証しない |
+| `SpectrumPanel` | ControllerとPcmTapだけを受け取ること、Widgetが1つ、sourceなし／load直後／PAUSED／STOPPED／NO_MEDIAでタイマー停止、PLAYINGで開始、pausedでの最終フレーム保持とFFT停止、stop／PLAYINGを維持したsource変更でのフレーム即時reset、sample rate変更でのprocessor reset、1tickでsnapshot1回・FFT最大1回、Widgetのフレーム更新、PCM到着前はFFTしないこと、hidden／最小化でWidget固有タイマーを止めつつ共有PCM受信は継続すること、再表示／復帰での再開、再入防止、停止後の古いtimeoutの安全性、shutdown後はSignal・表示イベントでも再開・変更しない終端性、FFT失敗で再生を変更せずControllerへ何も要求しないこと、失敗後もsource変更で復帰できること、波形解析・PlaylistModel・cacheを参照しないこと。固定sleepを使わず状態変化とqtbotの待機で判定する |
+| スペクトラム性能 | 音声コールバック内でFFTを呼ばないこと、コールバックがリングバッファ追記だけで容量を増やさないこと、タイマー1tickでFFTが1回を超えないこと、連続更新中も別QTimerのGUI heartbeatが進むこと、幅を変えてもbar数が有界であること、コールバックとFFT＋band集約の所要時間の記録（**CIへ厳格な時間上限は設けない**） |
+| 可視化ウィジェットのライフサイクル | 表示 ON/OFF と最小化でWidget固有タイマーが停止し、共有PCMタップは固定容量で受信を継続すること（SPEC-04） |
 
 ## 4. 実音再生テスト（`audio` マーカー。ローカル手動実行のみ）
 
@@ -84,6 +89,13 @@
 - 再生中に1.50→0.75→1.00倍へ変更し、source・PLAYING・position前進・errorなしを確認する
 - pitch補正ON/OFFの反復、直接load・次曲・Repeat ONE後の速度／pitch維持を確認する
 - wall clock比や周波数の再収録による音質自動判定は行わない
+- **実 `QAudioBufferOutput` からの PCM 取得**（`tests/audio/test_pcm_spectrum.py`）:
+  WAV と MP3 での buffer 受信、sample rate と channel count、mono float32 の有限性、
+  PCM タップを付けても音声出力と position が継続し `errorOccurred` が出ないこと、
+  440Hz 音源のピークが 440Hz 付近になること、コールバック実行 thread の実測、
+  playbackRate 0.75 / 1.5 と pitch 補正 ON/OFF での format 不変、
+  stop・曲切替・終端での PCM clear、SpectrumPanel が実再生に追従して pause で静止すること、
+  再生中 shutdown の安全性。環境依存の skip は入れず、通常の `audio` マーカーで実行する
 
 形式ごとの対応可否は P0-A で 6 形式すべて実測済みのため、ここでは全形式を再検証せず、
 WAV と代表的な圧縮形式 1 つに留める。
@@ -253,6 +265,46 @@ P4-Aには表示Widgetがないため、ログと`%LOCALAPPDATA%\sdp\cache\wavef
 - [ ] WAV／MP3／30～60分音源と100%／可能なら150%表示倍率でresize・操作が重くならない
 - [ ] 解析失敗中も再生UI、プレイリスト、速度・ピッチ操作を継続できる
 
+## 6.10 P5-A 手動スモーク（PCMタップとリアルタイムスペクトラム）
+
+実画面・実マウス・実音で行う。自動テストでは代替できないため**リリース前ゲートとして残す**。
+
+表示:
+
+- [ ] sourceなしでプレースホルダーが出る
+- [ ] 再生開始でスペクトラムが動く
+- [ ] 一時停止で静止し、再開で動き出す
+- [ ] 停止でスペクトラムが消える（無音表示へ戻る）
+- [ ] WAV と MP3 の両方で動く
+- [ ] 日本語・空白を含むパスで動く
+- [ ] ウィンドウresize、100%表示倍率、可能なら150%でも崩れない
+- [ ] 波形とスペクトラムがプレイリスト領域を過度に圧迫しない
+
+周波数:
+
+- [ ] 正弦波音源（100Hz / 1kHz / 10kHz）でピーク位置がおおむね正しい
+- [ ] 通常の音楽で低音が左、高音が右に出る
+- [ ] 無音でfloorへ下がる
+- [ ] attackが速くreleaseが滑らかで、不自然な激しいちらつきがない
+
+再生状態:
+
+- [ ] play / pause / stop / seek / 次曲 / 前曲
+- [ ] Repeat ONE / Repeat ALL / shuffle
+- [ ] 0.5 / 1.0 / 2.0倍、pitch補正 ON / OFF
+- [ ] いずれでもクラッシュせず、前曲のPCMを次曲の表示へ持ち越さない
+
+負荷:
+
+- [ ] 10分以上の連続再生でUI操作が重くならない
+- [ ] CPU使用率が暴走しない（タスクマネージャで目視）
+- [ ] メモリが増加し続けない
+- [ ] 最小化中に更新が止まり、復帰後に再開する
+
+なお、可聴音を伴わない範囲での実測は済んでいる（30FPS を50秒継続して 30.3FPS、
+プロセス CPU 8.6%、RSS は 113MB で横ばい、PCM 破棄 0 件、リングバッファ 345KB 固定）。
+上記は「実際に目と耳で確認する」項目として残す。
+
 ## 7. 手動チェックリスト（リリース前）
 
 - [ ] ファイルの D&D 追加で順序が維持される
@@ -272,6 +324,22 @@ P4-Aには表示Widgetがないため、ログと`%LOCALAPPDATA%\sdp\cache\wavef
 - 可視化のフレーム時間（`QElapsedTimer`、95 パーセンタイル）
 - `audioBufferReceived` の処理時間
 - 波形解析のスループット（音源の分数 / 実時間秒）
+
+P5-A のローカル実測（PySide6 6.10.3 / Windows 11。CI では上限を課さない）:
+
+| 項目 | 実測 |
+|---|---|
+| PCM コールバック 1 回 | 平均 0.056ms / 最大 0.374ms |
+| 4096 点 FFT + 96band 集約 | 平均 0.114ms / 最大 0.441ms |
+| 30FPS を 50 秒継続 | 実測 30.3FPS（FFT 1,514 回 = snapshot 回数と一致） |
+| PCM 通知頻度（1.0 倍） | 10.8 件/秒（P0-C の 11.2 件/秒と整合） |
+| プロセス CPU | 8.6%（Qt のデコードと音声出力、波形パネル、実描画を含む） |
+| RSS | 104MB → 113MB で横ばい（t=35s 以降は増加なし） |
+| リングバッファ | 44.1kHz で 88,200 sample = 345KB 固定 |
+| 破棄した PCM buffer | 0 件 |
+
+タイマー種別の比較も実測した。既定の CoarseTimer では 33ms 指定でも約 21FPS まで落ちるため、
+`Qt.TimerType.PreciseTimer` を指定している。
 
 psutil などの依存は追加しない。CPU 使用率はタスクマネージャの目視と
 チェックリストへの記録で足りる（個人開発の現実性を優先する）。
