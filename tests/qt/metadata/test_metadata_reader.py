@@ -542,8 +542,15 @@ def test_shutdown_clears_pending_tasks_and_returns(
     reader.start()
     qtbot.waitUntil(lambda: read_function.started.is_set(), timeout=WAIT_TIMEOUT_MS)
 
-    read_function.release()
-    reader.shutdown(timeout_ms=2_000)
+    # workerを先に解放すると、高速環境ではshutdownより前に全queueを処理し終える。
+    # shutdownが未開始taskをclearしたあと、実行中の1件だけを解放する順序に固定する。
+    release_timer = threading.Timer(0.05, read_function.release)
+    release_timer.start()
+    try:
+        reader.shutdown(timeout_ms=2_000)
+    finally:
+        release_timer.cancel()
+        release_timer.join()
 
     assert reader.is_running is False
     # 全 50 件が実行される前に終わっている。
