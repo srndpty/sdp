@@ -214,6 +214,31 @@ def test_callback_does_not_leak_exceptions(tap: PcmTap, monkeypatch: pytest.Monk
     assert tap.received_buffer_count == 0
 
 
+def test_unexpected_callback_errors_do_not_flood_the_log(
+    tap: PcmTap,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """予期しない例外は初回だけtracebackを残し、以後は100件単位で集約する。"""
+    import sdp.services.pcm_tap as pcm_tap_module
+
+    def explode(buffer: object) -> tuple[object, int]:
+        del buffer
+        raise RuntimeError("想定外")
+
+    monkeypatch.setattr(pcm_tap_module, "audio_buffer_to_mono", explode)
+
+    with caplog.at_level(logging.WARNING, logger="sdp.services.pcm_tap"):
+        for _ in range(250):
+            send(tap, int16_buffer([0, 0]))
+
+    assert tap.discarded_buffer_count == 250
+    assert len(caplog.records) == 3
+    assert sum(record.exc_info is not None for record in caplog.records) == 1
+    assert "累計100件" in caplog.records[1].message
+    assert "累計200件" in caplog.records[2].message
+
+
 # -- clear 契約 -------------------------------------------------------------
 
 
@@ -386,7 +411,7 @@ def test_disconnect_stops_further_deliveries(tap: PcmTap) -> None:
 def test_shutdown_is_idempotent_and_clears(
     tap: PcmTap, controller: PlaybackController, sources: tuple[Path, Path]
 ) -> None:
-    """shutdownはPCM受信とsource監視を止め、二重呼出でも落ちない。"""
+    """shutdown後は全入力を拒否し、二重呼出でも状態を変えない。"""
     buffer_output = QAudioBufferOutput()
     tap.connect_audio_buffer_output(buffer_output)
     send(tap, int16_buffer([32767, 32767]))
@@ -396,10 +421,18 @@ def test_shutdown_is_idempotent_and_clears(
 
     assert tap.available_frame_count == 0
     buffer_output.audioBufferReceived.emit(int16_buffer([0, 0]))
+    send(tap, int16_buffer([0, 0]))
     assert tap.received_buffer_count == 1
+    assert tap.discarded_buffer_count == 0
     # source監視も解除済みのため、以降のController通知で例外にならない。
     controller.load(sources[0])
+    controller.play()
+    controller.stop()
     assert tap.sample_rate == 0
+    assert tap.available_frame_count == 0
+
+    with pytest.raises(RuntimeError, match="shutdown後"):
+        tap.connect_audio_buffer_output(QAudioBufferOutput())
 
 
 def test_deleted_tap_does_not_crash_on_a_later_signal(

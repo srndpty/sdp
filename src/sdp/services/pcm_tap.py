@@ -60,6 +60,7 @@ class PcmTap(QObject):
         self._sample_rate = 0
         self._received_count = 0
         self._discarded_count = 0
+        self._unexpected_error_count = 0
         self._buffer_output: QAudioBufferOutput | None = None
         self._shutdown = False
 
@@ -98,6 +99,8 @@ class PcmTap(QObject):
 
     def connect_audio_buffer_output(self, buffer_output: QAudioBufferOutput) -> None:
         """QAudioBufferOutput のPCM通知を受け取り始める（composition rootのみ）。"""
+        if self._shutdown:
+            raise RuntimeError("shutdown後のPcmTapは再接続できません")
         if self._buffer_output is buffer_output:
             return
         self.disconnect_audio_buffer_output()
@@ -117,12 +120,17 @@ class PcmTap(QObject):
 
     def shutdown(self) -> None:
         """PCM受信とsource監視を止め、保持中のPCMを捨てる（冪等）。"""
+        if self._shutdown:
+            return
+        # disconnect前に終端化し、既にqueueされたbufferも受理しない。
+        self._shutdown = True
         self.disconnect_audio_buffer_output()
-        if not self._shutdown:
-            self._shutdown = True
+        for signal, slot in (
+            (self._playback.source_changed, self._on_source_changed),
+            (self._playback.state_changed, self._on_state_changed),
+        ):
             try:
-                self._playback.source_changed.disconnect(self._on_source_changed)
-                self._playback.state_changed.disconnect(self._on_state_changed)
+                signal.disconnect(slot)
             except RuntimeError:
                 # Controllerが既に破棄済み。終了処理を妨げない。
                 _logger.debug("PcmTapのController接続は既に解除されています")
@@ -146,6 +154,8 @@ class PcmTap(QObject):
         （P0-C）、ここで観測可能な失敗（件数とログ）へ変換する。
         QAudioBuffer とその memory view はこのスロットの外へ持ち出さない。
         """
+        if self._shutdown:
+            return
         try:
             if not isinstance(value, QAudioBuffer):
                 self._discard("QAudioBuffer以外が通知されました")
@@ -161,16 +171,27 @@ class PcmTap(QObject):
             self._discard(str(error))
         except Exception:
             self._discarded_count += 1
-            _logger.exception("PCMタップで予期しない例外が発生")
+            self._unexpected_error_count += 1
+            if self._unexpected_error_count == 1:
+                _logger.exception("PCMタップで予期しない例外が発生")
+            elif self._unexpected_error_count % _DISCARD_LOG_INTERVAL == 0:
+                _logger.warning(
+                    "PCMタップの予期しない例外が累計%d件発生",
+                    self._unexpected_error_count,
+                )
 
     @Slot(object)
     def _on_source_changed(self, source: object) -> None:
         del source
+        if self._shutdown:
+            return
         # 新sourceの最初のPCMが届くまで、前sourceのPCMを残さない。
         self.clear()
 
     @Slot(PlaybackState)
     def _on_state_changed(self, state: PlaybackState) -> None:
+        if self._shutdown:
+            return
         # PAUSED では保持する（最後のフレームを静止表示できるようにする）。
         if state in (PlaybackState.STOPPED, PlaybackState.NO_MEDIA):
             self.clear()

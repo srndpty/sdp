@@ -20,6 +20,7 @@ from sdp.ui.spectrum_widget import NO_SOURCE_MESSAGE, SpectrumWidget
 _logger = logging.getLogger(__name__)
 
 STOPPED_MESSAGE = "停止中"
+WAITING_MESSAGE = "PCMを待機中…"
 FAILED_MESSAGE = "スペクトラムを表示できません"
 
 
@@ -40,6 +41,7 @@ class SpectrumPanel(QWidget):
         self._widget = SpectrumWidget(self)
         self._processing = False
         self._failed = False
+        self._shutdown = False
         self._snapshot_count = 0
         self._analysis_count = 0
         self._watched_window: QWidget | None = None
@@ -87,13 +89,30 @@ class SpectrumPanel(QWidget):
         return self._analysis_count
 
     def shutdown(self) -> None:
-        """タイマーを止める（終了処理から呼ぶ。冪等）。"""
+        """接続とタイマーを終端し、以後の通知で再開しない（冪等）。"""
+        if self._shutdown:
+            return
+        self._shutdown = True
         self._timer.stop()
+        for signal, slot in (
+            (self._playback.source_changed, self._on_source_changed),
+            (self._playback.state_changed, self._on_state_changed),
+            (self._pcm_tap.sample_rate_changed, self._on_sample_rate_changed),
+        ):
+            try:
+                signal.disconnect(slot)
+            except RuntimeError:
+                _logger.debug("SpectrumPanelのSignal接続は既に解除されています")
+        if self._watched_window is not None:
+            self._watched_window.removeEventFilter(self)
+            self._watched_window = None
 
     # -- Qt イベント --------------------------------------------------------
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
+        if self._shutdown:
+            return
         self._watch_top_level_window()
         self._update_timer()
 
@@ -103,7 +122,11 @@ class SpectrumPanel(QWidget):
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         # top-level windowの最小化・復帰では子へhideEventが来ないため直接監視する。
-        if watched is self._watched_window and event.type() is QEvent.Type.WindowStateChange:
+        if (
+            not self._shutdown
+            and watched is self._watched_window
+            and event.type() is QEvent.Type.WindowStateChange
+        ):
             self._update_timer()
         return super().eventFilter(watched, event)
 
@@ -111,19 +134,26 @@ class SpectrumPanel(QWidget):
 
     @Slot(object)
     def _on_source_changed(self, source: object) -> None:
-        del source
+        if self._shutdown:
+            return
         # PcmTap側もclearするが、表示状態はPanelが独立して解除する。
         self._failed = False
         self._processor.reset()
-        self._apply_state(self._playback.state)
+        # source_changed時点のstateがPLAYINGでも、前sourceのframeを即時に捨てる。
+        self._widget.clear_frame(NO_SOURCE_MESSAGE if source is None else WAITING_MESSAGE)
+        self._update_timer()
 
     @Slot(PlaybackState)
     def _on_state_changed(self, state: PlaybackState) -> None:
+        if self._shutdown:
+            return
         self._apply_state(state)
 
     @Slot(int)
     def _on_sample_rate_changed(self, sample_rate: int) -> None:
         del sample_rate
+        if self._shutdown:
+            return
         # 旧formatの平滑化状態を新formatへ持ち越さない。
         self._processor.reset()
 
@@ -159,7 +189,8 @@ class SpectrumPanel(QWidget):
     def _should_run(self) -> bool:
         window = self.window()
         return (
-            not self._failed
+            not self._shutdown
+            and not self._failed
             and self._playback.state is PlaybackState.PLAYING
             and self.isVisible()
             and not window.isMinimized()
@@ -190,6 +221,7 @@ class SpectrumPanel(QWidget):
             frame = self._processor.process(samples, sample_rate)
             self._analysis_count += 1
             self._widget.set_frame(frame)
+            self._widget.set_status_text("")
         except Exception:
             # スペクトラムの失敗は再生を妨げない。Controllerへは何も要求しない。
             _logger.exception("スペクトラムの更新に失敗しました")

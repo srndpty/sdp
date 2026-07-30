@@ -20,7 +20,7 @@ sdp の設計文書。要件 ID（PLAY-xx、WAVE-xx 等）とマイルストー�
 - `audioBufferReceived` 内で重い FFT や描画を行わない。PCM は固定長リングバッファへ渡す
   （P5-A で実装。§6.3）。
 - 可視化は固定 FPS のタイマーで最新スナップショットを描画する。
-- 非表示のビジュアライザーは処理を停止する。
+- 非表示のビジュアライザーはWidget単位の重い解析・描画を停止する。共有PCMタップは受信を継続する。
 - 再生失敗、解析失敗、メタデータ失敗を独立して扱う。
 - god class を避け、UI・再生制御・音声解析・ファイル操作・設定・Windows 統合を分離する。
 
@@ -405,11 +405,14 @@ P5-A の着手前に pause / stop / 再生中の直接 `setSource` / 終端通�
   新しい float32 配列へコピーする（保持していないことをテストで検査する）。
 - PySide6 はスロット内の例外を呼び出し元へ伝播させないため（P0-C）、**例外を外へ漏らさず**、
   無効 buffer・未対応 format は件数を数えて捨てる。再生エラーへは変換しない。
+  予期しない例外は初回だけtracebackを記録し、継続時は100件ごとの警告へ間引く。
 - **clear 契約**: `source_changed` で即時 clear。`state_changed` が `STOPPED` / `NO_MEDIA` に
   なったら clear（`END_OF_MEDIA` から次曲へ進む場合も前曲 PCM を持ち越さない）。
   **`PAUSED` では保持する**（最後のフレームを静止表示するため）。
 - **format 変更時**: sample rate が変わったら、新しい rate に合う容量へ**作り直してから**
   追記する。旧 format のサンプルを新 format へ混ぜない。
+- **shutdown契約**: shutdownは終端操作とする。接続とController監視を解除してPCMをclearし、
+  queue済みbufferや直接slot呼出を含む以後の入力を無視する。shutdown後の再接続は禁止する。
 
 ### 6.4 PcmRingBuffer
 
@@ -509,7 +512,8 @@ coefficient = attack if 新値 > 前回値 else release
 
 source 変更時は `PlaybackController.source_changed` を PcmTap と SpectrumPanel の**両方**が
 監視し、リングバッファ clear / sample rate 状態 reset / Processor reset / 旧フレーム破棄を
-即時行う。新 source の最初の PCM が届くまではプレースホルダーを表示する。
+即時行う。stateが`PLAYING`のままでも旧フレームを必ず捨て、新 source の最初の PCM が
+届くまではプレースホルダーを表示する。
 **波形解析サービスとは完全に独立**（相互に参照しない）。
 
 ### 6.9 SpectrumWidget
@@ -535,7 +539,11 @@ accessibleName は `スペクトラム`。minimumHeight 130、sizePolicy は Exp
 - タイマーを動かす条件は「`PLAYING` かつ Widget 表示中かつ top-level window が最小化されていない」。
   それ以外では停止する（SPEC-04）。最小化では子へ hideEvent が来ないため、
   `showEvent` で top-level window へ event filter を入れて `WindowStateChange` を監視する。
+  `PcmTap`はP5-B以降の複数可視化で共用するため可視性では切断せず、固定容量リングバッファへの
+  受信を継続する。停止するのはWidget固有のFFT・平滑化・描画だけとする。
 - タイマー停止後に古い timeout が処理されても安全に何もしない。
+- shutdownは終端操作とし、Signalとevent filterを解除する。以後のsource／state／sample rate通知、
+  show／最小化復帰、古いtimeoutのいずれでもタイマーや表示状態を再開・変更しない。
 - `QApplication.processEvents()` はタイマーハンドラー内で呼ばない。
 - 最初の PCM が届く前（sample rate が 0）は FFT せずプレースホルダーのまま待つ。
 - **スペクトラムの失敗は再生を妨げない。** 例外はログへ残してプレースホルダー表示へ切り替え、

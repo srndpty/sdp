@@ -20,8 +20,14 @@ from sdp.core.analysis.spectrum import (
     SpectrumFrame,
 )
 from sdp.core.playback.controller import PlaybackController
+from sdp.core.playback.types import PlaybackState
 from sdp.services.pcm_tap import PcmTap
-from sdp.ui.spectrum_panel import FAILED_MESSAGE, STOPPED_MESSAGE, SpectrumPanel
+from sdp.ui.spectrum_panel import (
+    FAILED_MESSAGE,
+    STOPPED_MESSAGE,
+    WAITING_MESSAGE,
+    SpectrumPanel,
+)
 from sdp.ui.spectrum_widget import NO_SOURCE_MESSAGE, SpectrumWidget
 
 
@@ -256,16 +262,30 @@ def test_source_change_resets_the_frame(
     controller: PlaybackController,
     tap: PcmTap,
     sources: tuple[Path, Path],
+    backend: FakePlaybackBackend,
+    monkeypatch: pytest.MonkeyPatch,
     qtbot: QtBot,
 ) -> None:
-    """source切替で前曲のフレームを持ち越さない。"""
+    """PLAYINGのままsourceが変わっても前曲のフレームを即時に捨てる。"""
     start_playing(controller, tap, sources[0])
     qtbot.waitUntil(lambda: widget_of(panel).frame is not None, timeout=2_000)
 
+    # source_changedとstate_changedの順序へ依存しないよう、Backendの同期停止通知を抑える。
+    def keep_playing(path: Path) -> None:
+        del path
+
+    monkeypatch.setattr(backend, "load", keep_playing)
     controller.load(sources[1])
 
+    assert controller.state is PlaybackState.PLAYING
     assert widget_of(panel).frame is None
+    assert widget_of(panel).status_text == WAITING_MESSAGE
     assert tap.available_frame_count == 0
+
+    feed(tap)
+    qtbot.waitUntil(lambda: widget_of(panel).frame is not None, timeout=2_000)
+
+    assert widget_of(panel).status_text == ""
 
 
 def test_sample_rate_change_resets_the_processor(
@@ -405,13 +425,16 @@ def test_hidden_panel_stops_the_timer(
     tap: PcmTap,
     sources: tuple[Path, Path],
 ) -> None:
-    """非表示では不要な更新を止める（SPEC-04）。"""
+    """非表示ではFFTを止めるが、共有PCMタップは受信を続ける（SPEC-04）。"""
     start_playing(controller, tap, sources[0])
     assert panel.is_timer_active
+    received_before = tap.received_buffer_count
 
     panel.hide()
+    feed(tap)
 
     assert not panel.is_timer_active
+    assert tap.received_buffer_count == received_before + 1
 
 
 def test_showing_again_while_playing_restarts_the_timer(
@@ -451,14 +474,17 @@ def test_minimizing_the_window_stops_the_timer(
     window: QMainWindow,
     qtbot: QtBot,
 ) -> None:
-    """top-level windowの最小化でタイマーを止める。"""
+    """最小化ではFFTを止めるが、共有PCMタップは受信を続ける。"""
     start_playing(controller, tap, sources[0])
     assert panel.is_timer_active
+    received_before = tap.received_buffer_count
 
     window.setWindowState(Qt.WindowState.WindowMinimized)
     qtbot.waitUntil(lambda: not panel.is_timer_active, timeout=3_000)
+    feed(tap)
 
     assert not panel.is_timer_active
+    assert tap.received_buffer_count == received_before + 1
 
 
 def test_restoring_the_window_restarts_the_timer(
@@ -546,11 +572,29 @@ def test_shutdown_stops_the_timer(
     controller: PlaybackController,
     tap: PcmTap,
     sources: tuple[Path, Path],
+    backend: FakePlaybackBackend,
+    window: QMainWindow,
+    qtbot: QtBot,
 ) -> None:
-    """終了処理でタイマーを止める（冪等）。"""
+    """shutdown後はSignalや表示イベントでも再開しない（冪等）。"""
     start_playing(controller, tap, sources[0])
+    qtbot.waitUntil(lambda: widget_of(panel).frame is not None, timeout=2_000)
+    frame_before = widget_of(panel).frame
 
     panel.shutdown()
     panel.shutdown()
 
     assert not panel.is_timer_active
+    assert panel._watched_window is None  # pyright: ignore[reportPrivateUsage]
+
+    controller.load(sources[1])
+    backend.emit_state(PlaybackState.PLAYING)
+    tap.sample_rate_changed.emit(44_100)
+    window.setWindowState(Qt.WindowState.WindowMinimized)
+    window.setWindowState(Qt.WindowState.WindowNoState)
+    panel.hide()
+    panel.show()
+    qtbot.wait(50)
+
+    assert not panel.is_timer_active
+    assert widget_of(panel).frame is frame_before
