@@ -19,11 +19,18 @@ from sdp.core.playback.controller import PlaybackController
 from sdp.core.playback.qt_backend import QtMultimediaBackend
 from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
+from sdp.launch import LaunchRequestHandler
 from sdp.services import logging_setup
+from sdp.services.launch_request import LaunchRequest, parse_launch_request
 from sdp.services.pcm_tap import PcmTap
 from sdp.services.playlist_session import PlaylistSession, default_playlist_path
 from sdp.services.save_status import SaveCategory, SaveStatusReporter, restore_failure_message
 from sdp.services.settings import AppSettingsController, SettingsSession
+from sdp.services.single_instance import (
+    InstanceOutcome,
+    SingleInstanceService,
+    default_server_name,
+)
 from sdp.services.ui_state_session import PlaylistUiStateSource, UiStateSession
 from sdp.services.user_paths import (
     default_settings_path,
@@ -37,6 +44,7 @@ _logger = logging.getLogger(__name__)
 
 APPLICATION_NAME = "sdp"
 ORGANIZATION_NAME = "sdp"
+SECONDARY_TRANSFER_FAILED_EXIT_CODE = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +70,8 @@ class PlayerComposition:
     ui_state_session: UiStateSession
     save_status: SaveStatusReporter
     window: MainWindow
+    launch_handler: LaunchRequestHandler
+    single_instance: SingleInstanceService | None
 
 
 def build_player(
@@ -69,6 +79,8 @@ def build_player(
     settings_file: Path | None = None,
     waveform_cache_directory: Path | None = None,
     ui_state_file: Path | None = None,
+    launch_request: LaunchRequest | None = None,
+    single_instance: SingleInstanceService | None = None,
 ) -> PlayerComposition:
     """Backend → Controller → PlaylistModel → プレイリスト再生 → MainWindow の順に組み立てる。
 
@@ -155,7 +167,8 @@ def build_player(
         SaveCategory.UI_STATE, ui_state_session.save_failed, ui_state_session.save_recovered
     )
     save_status.message_requested.connect(window.show_status_message)
-    return PlayerComposition(
+    launch_handler = LaunchRequestHandler(playlist_model, window)
+    composition = PlayerComposition(
         backend=backend,
         controller=controller,
         playlist_model=playlist_model,
@@ -169,7 +182,12 @@ def build_player(
         ui_state_session=ui_state_session,
         save_status=save_status,
         window=window,
+        launch_handler=launch_handler,
+        single_instance=single_instance,
     )
+    # 保存済みplaylistを置換せず、その末尾へ初回起動引数を追加する。
+    launch_handler.apply_initial(LaunchRequest() if launch_request is None else launch_request)
+    return composition
 
 
 def create_application(argv: list[str]) -> QApplication:
@@ -186,17 +204,37 @@ def create_application(argv: list[str]) -> QApplication:
     return app
 
 
-def run(argv: list[str] | None = None) -> int:
-    """アプリを起動し、終了コードを返す。
-
-    コマンドライン引数による音声ファイルの読み込みは P7 の責務のため扱わない。
-    """
+def run(argv: list[str] | None = None, *, server_name: str | None = None) -> int:
+    """単一instance判定後にprimaryだけを構築し、終了コードを返す。"""
     logging_setup.configure_logging()
     logging_setup.install_excepthook()
 
-    app = create_application(list(argv if argv is not None else sys.argv))
+    raw_argv = list(argv if argv is not None else sys.argv)
+    current_directory = Path.cwd()
+    request = parse_launch_request(raw_argv[1:] if raw_argv else (), current_directory)
+    app = create_application(raw_argv)
+    single_instance = SingleInstanceService(
+        default_server_name() if server_name is None else server_name
+    )
+    outcome = single_instance.start_or_forward(request)
+    if outcome is InstanceOutcome.FORWARDED:
+        single_instance.shutdown()
+        return 0
+    if outcome is InstanceOutcome.FORWARD_FAILED:
+        # 同名instanceが疑われる状態では二重起動せず、技術詳細はログだけへ残す。
+        _logger.error("起動要求を既存instanceへ転送できなかったため終了します")
+        single_instance.shutdown()
+        return SECONDARY_TRANSFER_FAILED_EXIT_CODE
+
     # composition はイベントループ実行中ずっと参照され続ける（寿命の保証）。
-    composition = build_player()
+    try:
+        composition = build_player(
+            launch_request=request,
+            single_instance=single_instance,
+        )
+    except Exception:
+        single_instance.shutdown()
+        raise
     # 復元完了後から変更監視を始める（load中のSignalを自動保存扱いしない）。
     composition.settings_session.start()
     composition.playlist_session.start()
@@ -204,6 +242,9 @@ def run(argv: list[str] | None = None) -> int:
     composition.metadata_reader.start()
     composition.waveform_analysis.start()
     composition.window.show()
+    # Window表示後からIPC要求を同じcompositionへ適用する。
+    single_instance.request_received.connect(composition.launch_handler.handle_received)
+    single_instance.start_delivery()
     # 表示で生じるmove／resizeを「ユーザー変更」として保存しないよう、show後に監視を始める。
     composition.ui_state_session.start()
     exit_code = app.exec()
@@ -220,23 +261,39 @@ def shutdown(composition: PlayerComposition) -> None:
     ここでは失敗判定に使わない。例外だけを段階の失敗として記録し、保存失敗の詳細は
     各Sessionのログへ任せる（ウィンドウが閉じた後は提示できないため）。
     """
-    steps: list[tuple[str, Callable[[], object]]] = [
-        # 可視化を先に止め、破棄済みQObjectへシグナルが飛ばないようにする。
-        ("可視化の停止", composition.window.spectrum_panel.shutdown),
-        ("PCMタップの停止", composition.pcm_tap.shutdown),
-        ("波形解析の停止", composition.waveform_analysis.shutdown),
-        ("メタデータ読み取りの停止", composition.metadata_reader.shutdown),
-        # Windowが生きているあいだにUI状態を確定させる（破棄後はgeometryを取得できない）。
-        ("ウィンドウ状態の保存", composition.ui_state_session.flush),
-        ("設定の保存", composition.settings_session.flush),
-        ("プレイリストの保存", composition.playlist_session.flush),
-        ("プレイリスト監視の停止", composition.playlist_session.stop),
-        ("ウィンドウ状態監視の停止", composition.ui_state_session.stop),
-        ("設定監視の停止", composition.settings_session.stop),
-        ("設定調停の停止", composition.app_settings.shutdown),
-    ]
+    steps: list[tuple[str, Callable[[], object]]] = []
+    if composition.single_instance is not None:
+        steps.append(("単一instance IPCの停止", lambda: _stop_single_instance(composition)))
+    steps.extend(
+        [
+            # 可視化を先に止め、破棄済みQObjectへシグナルが飛ばないようにする。
+            ("可視化の停止", composition.window.spectrum_panel.shutdown),
+            ("PCMタップの停止", composition.pcm_tap.shutdown),
+            ("波形解析の停止", composition.waveform_analysis.shutdown),
+            ("メタデータ読み取りの停止", composition.metadata_reader.shutdown),
+            # Windowが生きているあいだにUI状態を確定させる（破棄後はgeometryを取得できない）。
+            ("ウィンドウ状態の保存", composition.ui_state_session.flush),
+            ("設定の保存", composition.settings_session.flush),
+            ("プレイリストの保存", composition.playlist_session.flush),
+            ("プレイリスト監視の停止", composition.playlist_session.stop),
+            ("ウィンドウ状態監視の停止", composition.ui_state_session.stop),
+            ("設定監視の停止", composition.settings_session.stop),
+            ("設定調停の停止", composition.app_settings.shutdown),
+        ]
+    )
     for name, step in steps:
         try:
             step()
         except Exception:
             _logger.exception("終了処理の%sに失敗しました", name)
+
+
+def _stop_single_instance(composition: PlayerComposition) -> None:
+    service = composition.single_instance
+    if service is None:
+        return
+    try:
+        service.request_received.disconnect(composition.launch_handler.handle_received)
+    except RuntimeError:
+        _logger.debug("単一instance要求のSignal接続は既に解除されています")
+    service.shutdown()

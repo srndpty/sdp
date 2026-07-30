@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 from PySide6.QtMultimedia import (
     QAudioBuffer,
@@ -20,7 +21,7 @@ from PySide6.QtMultimedia import (
     QAudioFormat,
     QMediaPlayer,
 )
-from PySide6.QtWidgets import QApplication, QCheckBox, QDoubleSpinBox, QPushButton
+from PySide6.QtWidgets import QApplication, QCheckBox, QDoubleSpinBox, QPushButton, QWidget
 from pytestqt.qtbot import QtBot
 
 from fakes.fake_playback_backend import FakePlaybackBackend
@@ -36,7 +37,9 @@ from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.persistence import load_playlist, save_playlist
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.core.playlist.types import RepeatMode
+from sdp.launch import LaunchRequestHandler
 from sdp.services import settings as app_settings_module
+from sdp.services.launch_request import LaunchRequest
 from sdp.services.pcm_tap import PcmTap
 from sdp.services.playlist_session import PlaylistSession
 from sdp.services.save_status import (
@@ -51,6 +54,7 @@ from sdp.services.settings import (
     SettingsSession,
     save_settings,
 )
+from sdp.services.single_instance import InstanceOutcome
 from sdp.services.ui_state import (
     MINIMUM_SPLITTER_SIZE,
     ScreenRect,
@@ -408,6 +412,71 @@ def test_run_starts_and_stops_background_services_in_order(
     ]
 
 
+def test_secondary_exits_without_building_composition_or_running_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """転送成功したsecondaryはPlayerCompositionもevent loopも作らず0で終了する。"""
+    events: list[str] = []
+
+    class ForwardedInstance:
+        def __init__(self, name: str) -> None:
+            events.append(f"instance:{name}")
+
+        def start_or_forward(self, request: LaunchRequest) -> InstanceOutcome:
+            events.append(f"forward:{len(request.paths)}")
+            return InstanceOutcome.FORWARDED
+
+        def shutdown(self) -> None:
+            events.append("shutdown")
+
+    def fail_build(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise AssertionError("secondaryでcompositionを構築してはいけません")
+
+    monkeypatch.setattr(app_module, "SingleInstanceService", ForwardedInstance)
+    monkeypatch.setattr(app_module, "build_player", fail_build)
+    monkeypatch.setattr(app_module.logging_setup, "configure_logging", lambda: None)
+    monkeypatch.setattr(app_module.logging_setup, "install_excepthook", lambda: None)
+
+    assert app_module.run(["sdp", "relative.wav"], server_name="test-secondary") == 0
+    assert events == ["instance:test-secondary", "forward:1", "shutdown"]
+
+
+def test_secondary_transfer_failure_does_not_start_another_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """既存instanceが疑われる転送失敗では二重起動せず専用codeで終了する。"""
+    shutdowns: list[int] = []
+
+    class FailedInstance:
+        def __init__(self, name: str) -> None:
+            del name
+
+        def start_or_forward(self, request: LaunchRequest) -> InstanceOutcome:
+            del request
+            return InstanceOutcome.FORWARD_FAILED
+
+        def shutdown(self) -> None:
+            shutdowns.append(1)
+
+    monkeypatch.setattr(app_module, "SingleInstanceService", FailedInstance)
+
+    def fail_build(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        pytest.fail("転送失敗時にcompositionを構築してはいけません")
+
+    monkeypatch.setattr(
+        app_module,
+        "build_player",
+        fail_build,
+    )
+    monkeypatch.setattr(app_module.logging_setup, "configure_logging", lambda: None)
+    monkeypatch.setattr(app_module.logging_setup, "install_excepthook", lambda: None)
+
+    assert app_module.run(["sdp"], server_name="test-failed") == 2
+    assert shutdowns == [1]
+
+
 # -- 起動時復元 -------------------------------------------------------------
 
 
@@ -442,6 +511,155 @@ def test_restores_saved_playlist(
     assert entries[1].path.name == "テスト 音源.mp3"
     assert entries[3].is_missing
     assert composition.window.statusBar().currentMessage() == "プレイリストを復元しました（4件）。"
+
+
+def test_initial_launch_paths_are_appended_after_restored_playlist(
+    playlist_file: Path, audio_files: list[Path], qtbot: QtBot
+) -> None:
+    """初回起動引数は復元済みplaylistを置換せず、順序どおり末尾へ追加する。"""
+    restored = [create_entry(audio_files[0])]
+    save_playlist(playlist_file, restored)
+    request = LaunchRequest((audio_files[1].resolve(), audio_files[1].resolve()))
+
+    composition = app_module.build_player(playlist_file, launch_request=request)
+    qtbot.addWidget(composition.window)
+    entries = composition.playlist_model.entries()
+
+    assert [entry.entry_id for entry in entries[:1]] == [restored[0].entry_id]
+    assert [entry.path for entry in entries] == [
+        audio_files[0].resolve(),
+        audio_files[1].resolve(),
+        audio_files[1].resolve(),
+    ]
+    assert composition.controller.source is None
+    assert composition.window.statusBar().currentMessage() == "2曲をプレイリストへ追加しました。"
+    composition.window.spectrum_panel.shutdown()
+
+
+def test_received_launch_uses_existing_window_and_model_and_requests_foreground(
+    composition: app_module.PlayerComposition,
+    audio_files: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """IPC要求を同じcompositionへ追加し、最大化を保ったまま最小化を解除する。"""
+    calls: list[object] = []
+    minimized_maximized = Qt.WindowState.WindowMinimized | Qt.WindowState.WindowMaximized
+
+    def record_state(window: MainWindow, state: Qt.WindowState) -> None:
+        del window
+        calls.append(state)
+
+    def current_state(window: MainWindow) -> Qt.WindowState:
+        del window
+        return minimized_maximized
+
+    def record_show(window: MainWindow) -> None:
+        del window
+        calls.append("show")
+
+    def record_raise(window: MainWindow) -> None:
+        del window
+        calls.append("raise")
+
+    def record_activate(window: MainWindow) -> None:
+        del window
+        calls.append("activate")
+
+    def inactive(window: MainWindow) -> bool:
+        del window
+        return False
+
+    def record_alert(widget: QWidget, duration: int = 0) -> None:
+        del widget, duration
+        calls.append("alert")
+
+    monkeypatch.setattr(MainWindow, "windowState", current_state)
+    monkeypatch.setattr(MainWindow, "setWindowState", record_state)
+    monkeypatch.setattr(MainWindow, "show", record_show)
+    monkeypatch.setattr(MainWindow, "raise_", record_raise)
+    monkeypatch.setattr(MainWindow, "activateWindow", record_activate)
+    monkeypatch.setattr(MainWindow, "isActiveWindow", inactive)
+    monkeypatch.setattr(QApplication, "alert", record_alert)
+    model = composition.playlist_model
+    window = composition.window
+
+    composition.launch_handler.handle_received(
+        LaunchRequest((audio_files[0].resolve(), audio_files[1].resolve()))
+    )
+
+    assert composition.playlist_model is model
+    assert composition.window is window
+    assert [entry.path for entry in model.entries()] == [
+        audio_files[0].resolve(),
+        audio_files[1].resolve(),
+    ]
+    restored_state = calls[0]
+    assert isinstance(restored_state, Qt.WindowState)
+    assert restored_state & Qt.WindowState.WindowMaximized
+    assert not restored_state & Qt.WindowState.WindowMinimized
+    assert calls[1:] == ["show", "raise", "activate", "alert"]
+
+
+def test_empty_received_launch_requests_foreground(
+    composition: app_module.PlayerComposition,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """引数なしsecondaryはplaylistを変更せず、既存Windowの表示を要求する。"""
+    activations: list[int] = []
+
+    def record_activation(handler: LaunchRequestHandler) -> None:
+        del handler
+        activations.append(1)
+
+    monkeypatch.setattr(LaunchRequestHandler, "_activate_window", record_activation)
+
+    composition.launch_handler.handle_received(LaunchRequest())
+
+    assert composition.playlist_model.rowCount() == 0
+    assert activations == [1]
+
+
+def test_invalid_only_received_launch_still_requests_foreground(
+    composition: app_module.PlayerComposition,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """無視引数だけでも、二回目の起動意図としてWindowを前面化する。"""
+    activations: list[int] = []
+
+    def record_activation(handler: LaunchRequestHandler) -> None:
+        del handler
+        activations.append(1)
+
+    monkeypatch.setattr(LaunchRequestHandler, "_activate_window", record_activation)
+
+    composition.launch_handler.handle_received(LaunchRequest(ignored_arguments=("bad\0path",)))
+
+    assert (
+        composition.window.statusBar().currentMessage() == "追加できるファイルがありませんでした。"
+    )
+    assert activations == [1]
+
+
+def test_activate_window_false_adds_without_foreground_request(
+    composition: app_module.PlayerComposition,
+    audio_files: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """activate_window=Falseはpath追加だけを行い、Window操作をしない。"""
+
+    def fail_activation(handler: LaunchRequestHandler) -> None:
+        del handler
+        raise AssertionError("activate_window=FalseでWindowを前面化してはいけません")
+
+    monkeypatch.setattr(LaunchRequestHandler, "_activate_window", fail_activation)
+
+    composition.launch_handler.handle_received(
+        LaunchRequest((audio_files[0].resolve(),), activate_window=False)
+    )
+
+    assert [entry.path for entry in composition.playlist_model.entries()] == [
+        audio_files[0].resolve()
+    ]
 
 
 # -- 終了時保存 -------------------------------------------------------------
