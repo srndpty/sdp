@@ -10,6 +10,7 @@ from pathlib import Path
 
 APP_DIR_NAME = "sdp"
 SETTINGS_FILE_NAME = "settings.json"
+UI_STATE_FILE_NAME = "ui-state.json"
 WAVEFORM_CACHE_DIRECTORY = Path("cache") / "waveforms"
 
 
@@ -28,6 +29,15 @@ def app_data_directory() -> Path:
 def default_settings_path() -> Path:
     """既定の設定保存先（``%LOCALAPPDATA%\\sdp\\settings.json``）。"""
     return app_data_directory() / SETTINGS_FILE_NAME
+
+
+def default_ui_state_path() -> Path:
+    """既定のUI状態保存先（``%LOCALAPPDATA%\\sdp\\ui-state.json``）。
+
+    設定画面から明示的に変更する ``settings.json`` とは別ファイルにする
+    （日常利用で自然に変わる状態を混ぜない）。
+    """
+    return app_data_directory() / UI_STATE_FILE_NAME
 
 
 def default_waveform_cache_directory() -> Path:
