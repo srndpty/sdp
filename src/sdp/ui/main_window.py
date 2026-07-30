@@ -5,10 +5,11 @@
 """
 
 import logging
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction
+from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtGui import QAction, QGuiApplication, QMoveEvent, QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
@@ -24,6 +25,14 @@ from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.services.pcm_tap import PcmTap
 from sdp.services.settings import AppSettings, AppSettingsController
+from sdp.services.ui_state import (
+    ScreenRect,
+    SplitterState,
+    UiState,
+    WindowState,
+    distribute_splitter_sizes,
+    fit_window_state,
+)
 from sdp.services.waveform_analysis import WaveformAnalysisService
 from sdp.ui.player_controls import PlayerControls
 from sdp.ui.playlist_view import PlaylistView
@@ -69,7 +78,15 @@ class MainWindow(QMainWindow):
 
     レイアウト骨格・メニュー・ステータス表示に徹し、再生操作は PlayerControls、
     波形操作はWaveformPanel、プレイリスト操作はPlaylistViewへ委譲する。
-    永続化（playlist.json）は知らない。
+    永続化（playlist.json／settings.json／ui-state.json）は知らない。
+    UI状態は :meth:`capture_ui_state` / :meth:`restore_ui_state` の小さなAPIで
+    受け渡すだけで、JSON・schema version・保存先・保存タイマー・破損処理は持たない。
+    """
+
+    ui_state_changed = Signal()
+    """位置・サイズ・最大化・Splitter・前回フォルダーのいずれかが変わった。
+
+    復元適用中は発火しない（復元をユーザー変更として保存予約しないため）。
     """
 
     def __init__(
@@ -87,6 +104,10 @@ class MainWindow(QMainWindow):
         self._app_settings = app_settings
         self._settings_dialog: SettingsDialog | None = None
         self._has_current_source_error = False
+        self._last_open_directory: Path | None = None
+        # 表示前はレイアウトが確定しないため、最初のshowEventで比率を適用し直す。
+        self._pending_splitter: SplitterState | None = None
+        self._restoring_ui_state = False
 
         self.setWindowTitle(WINDOW_TITLE)
 
@@ -109,11 +130,14 @@ class MainWindow(QMainWindow):
         player_layout.addWidget(self._spectrum_panel)
 
         splitter = QSplitter(Qt.Orientation.Vertical, self)
+        splitter.setObjectName("mainSplitter")
         splitter.addWidget(player_panel)
         splitter.addWidget(self._playlist_view)
         # プレイリストが十分な高さを持つようにする。
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
+        splitter.splitterMoved.connect(self._on_ui_state_changed)
+        self._splitter = splitter
         self.setCentralWidget(splitter)
         # 波形とスペクトラムが増えた分だけ既定の高さを広げ、プレイリスト領域を残す。
         self.resize(720, 700)
@@ -227,11 +251,174 @@ class MainWindow(QMainWindow):
     def open_file(self) -> None:
         """ファイルダイアログで選んだ音源を読み込む。キャンセル時は何もしない。"""
         selected, _ = QFileDialog.getOpenFileName(
-            self, "音声ファイルを開く", "", FILE_DIALOG_FILTER
+            self, "音声ファイルを開く", self.file_dialog_directory(), FILE_DIALOG_FILTER
         )
         if not selected:
+            # Cancelでは前回フォルダーを変更しない。
             return
-        self._controller.load(Path(selected))
+        path = Path(selected)
+        self.set_last_open_directory(path.parent)
+        self._controller.load(path)
+
+    # -- UI状態（P6-B）-------------------------------------------------------
+
+    @property
+    def last_open_directory(self) -> Path | None:
+        """「開く...」で最後に使ったフォルダー（未使用なら ``None``）。"""
+        return self._last_open_directory
+
+    def set_last_open_directory(self, path: Path | None) -> None:
+        """前回フォルダーを更新する。相対パスは無視する。"""
+        directory = path
+        if directory is not None and not directory.is_absolute():
+            _logger.debug("相対パスは前回フォルダーとして保存しません: %s", directory)
+            return
+        if directory == self._last_open_directory:
+            return
+        self._last_open_directory = directory
+        self._on_ui_state_changed()
+
+    def file_dialog_directory(self) -> str:
+        """ファイルダイアログの初期ディレクトリ。
+
+        GUIスレッドで存在確認すると切断済みネットワークパス等で停止し得るため、
+        保存値はI/OせずそのままQtへ渡す。未保存の場合だけ空文字を返す。
+        """
+        directory = self._last_open_directory
+        return "" if directory is None else str(directory)
+
+    def connect_ui_state_changed(self, slot: Callable[[], None]) -> None:
+        """UI状態の変更通知を購読する（UiStateSession用の小さな入口）。"""
+        self.ui_state_changed.connect(slot)
+
+    def disconnect_ui_state_changed(self, slot: Callable[[], None]) -> None:
+        self.ui_state_changed.disconnect(slot)
+
+    def capture_ui_state(self) -> UiState:
+        """現在のウィンドウ状態を取得する（保存はしない）。
+
+        最大化・全画面中でも**normal geometry**を返し、最小化状態は保存しない。
+        """
+        return UiState(
+            window=self._capture_window_state(),
+            main_splitter=self._capture_splitter_state(),
+            last_open_directory=self._last_open_directory,
+        )
+
+    def restore_ui_state(self, state: UiState, screens: Sequence[ScreenRect] | None = None) -> None:
+        """保存済みUI状態を適用する（表示前に呼ぶ）。
+
+        geometry は現在の画面構成へ補正してから適用し、最大化はそのあとで
+        設定する（最大化を先にすると normal geometry が失われる）。
+        Splitterは可視化の表示設定を適用したあとの比率として反映する。
+        """
+        self._restoring_ui_state = True
+        try:
+            window = state.window
+            if window is not None:
+                available = self._screen_rects() if screens is None else list(screens)
+                minimum = self.minimumSizeHint()
+                fitted = fit_window_state(
+                    window,
+                    available,
+                    minimum_size=(max(1, minimum.width()), max(1, minimum.height())),
+                )
+                self.setGeometry(fitted.x, fitted.y, fitted.width, fitted.height)
+                window_state = self.windowState() & ~Qt.WindowState.WindowMinimized
+                if fitted.maximized:
+                    window_state |= Qt.WindowState.WindowMaximized
+                else:
+                    window_state &= ~Qt.WindowState.WindowMaximized
+                self.setWindowState(window_state)
+            splitter = state.main_splitter
+            if splitter is not None:
+                self._pending_splitter = splitter
+                self._apply_splitter_state(splitter)
+            if state.last_open_directory is not None:
+                self._last_open_directory = state.last_open_directory
+        finally:
+            self._restoring_ui_state = False
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        pending = self._pending_splitter
+        if pending is None:
+            return
+        # 表示でレイアウトが確定してから、保存比率をもう一度当てる。
+        self._pending_splitter = None
+        self._restoring_ui_state = True
+        try:
+            self._apply_splitter_state(pending)
+        finally:
+            self._restoring_ui_state = False
+
+    def moveEvent(self, event: QMoveEvent) -> None:
+        super().moveEvent(event)
+        self._on_ui_state_changed()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._on_ui_state_changed()
+
+    def changeEvent(self, event: QEvent) -> None:
+        super().changeEvent(event)
+        if event.type() is QEvent.Type.WindowStateChange:
+            self._on_ui_state_changed()
+
+    def _on_ui_state_changed(self, *args: object) -> None:
+        del args
+        # 復元適用そのものをユーザー変更として保存予約させない。
+        if not self._restoring_ui_state:
+            self.ui_state_changed.emit()
+
+    def _capture_window_state(self) -> WindowState:
+        # 最大化・全画面中は geometry() が画面全体になるため normalGeometry を使う。
+        rectangle = self.normalGeometry()
+        if not rectangle.isValid():
+            rectangle = self.geometry()
+        # 最小化中でも「最大化されていたかどうか」は保持する（最小化自体は保存しない）。
+        maximized = bool(self.windowState() & Qt.WindowState.WindowMaximized)
+        return WindowState(
+            x=rectangle.x(),
+            y=rectangle.y(),
+            width=max(1, rectangle.width()),
+            height=max(1, rectangle.height()),
+            maximized=maximized,
+        )
+
+    def _capture_splitter_state(self) -> SplitterState | None:
+        sizes = self._splitter.sizes()
+        if len(sizes) != 2 or sum(sizes) < 1:
+            return None
+        return SplitterState(player_size=max(0, sizes[0]), playlist_size=max(0, sizes[1]))
+
+    def _apply_splitter_state(self, state: SplitterState) -> None:
+        total = sum(self._splitter.sizes())
+        player, playlist = distribute_splitter_sizes(state, total)
+        self._splitter.setSizes([player, playlist])
+
+    def _screen_rects(self) -> list[ScreenRect]:
+        """現在の画面の利用可能領域（primaryを先頭にする）。"""
+        primary = QGuiApplication.primaryScreen()
+        screens = list(QGuiApplication.screens())
+        # PySideのstubはNoneを含めないが、screen無し環境では実際にNoneになり得る。
+        if primary is not None and primary in screens:  # pyright: ignore[reportUnnecessaryComparison]
+            screens.remove(primary)
+            screens.insert(0, primary)
+        rectangles: list[ScreenRect] = []
+        for screen in screens:
+            available = screen.availableGeometry()
+            if available.width() < 1 or available.height() < 1:
+                continue
+            rectangles.append(
+                ScreenRect(
+                    x=available.x(),
+                    y=available.y(),
+                    width=available.width(),
+                    height=available.height(),
+                )
+            )
+        return rectangles
 
     # -- Controller からの通知 ----------------------------------------------
 

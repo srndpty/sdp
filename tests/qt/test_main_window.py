@@ -8,8 +8,16 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QCheckBox, QDialogButtonBox, QDoubleSpinBox, QLabel, QTableView
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QDialogButtonBox,
+    QDoubleSpinBox,
+    QLabel,
+    QSplitter,
+    QTableView,
+)
 from pytestqt.qtbot import QtBot
 
 from fakes.fake_playback_backend import FakePlaybackBackend
@@ -24,6 +32,14 @@ from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.core.playlist.types import RepeatMode
 from sdp.services.pcm_tap import PcmTap
 from sdp.services.settings import AppSettings, AppSettingsController
+from sdp.services.ui_state import (
+    MINIMUM_SPLITTER_SIZE,
+    ScreenRect,
+    SplitterState,
+    UiState,
+    WindowState,
+    distribute_splitter_sizes,
+)
 from sdp.services.waveform_analysis import WaveformAnalysisService
 from sdp.ui import main_window as main_window_module
 from sdp.ui.main_window import MainWindow
@@ -652,3 +668,409 @@ def test_hidden_waveform_panel_stops_following_the_position(
     app_settings_of(window).apply(AppSettings(1.0, True, waveform_visible=True))
 
     assert widget.position_ms == controller.position_ms
+
+
+# -- UI状態（P6-B）----------------------------------------------------------
+
+
+def screens() -> list[ScreenRect]:
+    """テストから注入する固定の画面構成（実モニターに依存しない）。"""
+    return [ScreenRect(x=0, y=0, width=1920, height=1040)]
+
+
+def usable_size(window: MainWindow) -> tuple[int, int]:
+    """minimumSizeHintを下回らないテスト用サイズ。
+
+    MainWindowの最小サイズは可視化とコントロールの分だけ大きいため、
+    固定値を書くとプラットフォームやフォント差で壊れる。
+    """
+    hint = window.minimumSizeHint()
+    return (hint.width() + 60, hint.height() + 60)
+
+
+def window_state_of(window: MainWindow) -> WindowState:
+    state = window.capture_ui_state().window
+    assert state is not None
+    return state
+
+
+def expected_player_ratio(window: MainWindow, saved: SplitterState, total: int) -> float:
+    """保存比率を子Widgetのminimum sizeで補正した期待値。"""
+    splitter = window.findChild(QSplitter, "mainSplitter")
+    assert splitter is not None
+    player = splitter.widget(0)
+    playlist = splitter.widget(1)
+    assert player is not None
+    assert playlist is not None
+    player_minimum = max(player.minimumHeight(), player.minimumSizeHint().height(), 0)
+    playlist_minimum = max(playlist.minimumHeight(), playlist.minimumSizeHint().height(), 0)
+    requested_player, _ = distribute_splitter_sizes(saved, total)
+    fitted_player = max(player_minimum, min(total - playlist_minimum, requested_player))
+    return fitted_player / total
+
+
+def test_capture_returns_the_current_geometry(window: MainWindow, qtbot: QtBot) -> None:
+    """captureは現在のnormal geometryとSplitterサイズを返す。"""
+    width, height = usable_size(window)
+    window.setGeometry(120, 80, width, height)
+    window.show()
+    qtbot.waitExposed(window)
+
+    state = window.capture_ui_state()
+
+    assert state.window is not None
+    assert (state.window.x, state.window.y) == (120, 80)
+    assert (state.window.width, state.window.height) == (width, height)
+    assert state.window.maximized is False
+    assert state.main_splitter is not None
+    assert state.main_splitter.total > 0
+
+
+def test_capture_keeps_the_normal_geometry_while_maximized(
+    window: MainWindow, qtbot: QtBot
+) -> None:
+    """最大化中でも、最大化後の画面サイズをnormal sizeとして保存しない。"""
+    width, height = usable_size(window)
+    window.setGeometry(150, 90, width, height)
+    window.show()
+    qtbot.waitExposed(window)
+    before = window_state_of(window)
+
+    window.setWindowState(Qt.WindowState.WindowMaximized)
+    qtbot.waitUntil(lambda: window.isMaximized(), timeout=2_000)
+    state = window.capture_ui_state()
+
+    assert state.window is not None
+    # 最大化後のgeometry（画面全体）ではなく、最大化前のnormal geometryを保存する。
+    assert (state.window.x, state.window.y) == (before.x, before.y)
+    assert (state.window.width, state.window.height) == (before.width, before.height)
+    assert state.window.maximized is True
+
+
+def test_capture_does_not_save_the_minimized_state(window: MainWindow, qtbot: QtBot) -> None:
+    """最小化状態は保存しない（次回はnormalまたはmaximizedで起動する）。"""
+    width, height = usable_size(window)
+    window.setGeometry(100, 100, width, height)
+    window.show()
+    qtbot.waitExposed(window)
+    before = window_state_of(window)
+
+    window.setWindowState(Qt.WindowState.WindowMinimized)
+    qtbot.wait(20)
+    state = window.capture_ui_state()
+
+    assert state.window is not None
+    assert (state.window.width, state.window.height) == (before.width, before.height)
+    assert state.window.maximized is False
+
+
+def test_restore_applies_the_geometry(window: MainWindow) -> None:
+    """restoreで位置とサイズを適用する。"""
+    width, height = usable_size(window)
+
+    window.restore_ui_state(
+        UiState(window=WindowState(x=200, y=150, width=width, height=height, maximized=False)),
+        screens(),
+    )
+
+    assert window.geometry().x() == 200
+    assert window.geometry().y() == 150
+    assert window.width() == width
+    assert window.height() == height
+    assert not window.isMaximized()
+
+
+def test_restore_applies_maximized_after_the_normal_geometry(
+    window: MainWindow, qtbot: QtBot
+) -> None:
+    """最大化はnormal geometryを設定したあとに適用する。"""
+    width, height = usable_size(window)
+
+    window.restore_ui_state(
+        UiState(window=WindowState(x=140, y=120, width=width, height=height, maximized=True)),
+        screens(),
+    )
+    window.show()
+    qtbot.waitExposed(window)
+
+    assert window.isMaximized()
+    captured = window_state_of(window)
+    assert (captured.x, captured.y) == (140, 120)
+    assert (captured.width, captured.height) == (width, height)
+    assert captured.maximized is True
+
+
+def test_restore_normal_state_clears_existing_maximized_state(
+    window: MainWindow, qtbot: QtBot
+) -> None:
+    """normal状態の復元は既存の最大化・最小化フラグを明示的に解除する。"""
+    width, height = usable_size(window)
+    window.show()
+    qtbot.waitExposed(window)
+    window.setWindowState(Qt.WindowState.WindowMaximized)
+    qtbot.waitUntil(window.isMaximized, timeout=2_000)
+
+    window.restore_ui_state(
+        UiState(window=WindowState(x=160, y=110, width=width, height=height, maximized=False)),
+        screens(),
+    )
+    qtbot.waitUntil(lambda: not window.isMaximized(), timeout=2_000)
+
+    assert not window.isMinimized()
+    assert (window.geometry().x(), window.geometry().y()) == (160, 110)
+    assert (window.width(), window.height()) == (width, height)
+
+
+def test_restore_moves_an_offscreen_window_back(window: MainWindow) -> None:
+    """完全に画面外の保存値は画面内へ補正して適用する。"""
+    window.restore_ui_state(
+        UiState(window=WindowState(x=-5000, y=-4000, width=800, height=600, maximized=False)),
+        screens(),
+    )
+
+    assert window.geometry().x() >= 0
+    assert window.geometry().y() >= 0
+
+
+def test_restore_and_capture_round_trip_the_splitter(window: MainWindow, qtbot: QtBot) -> None:
+    """Splitterは比率として復元され、captureで取り出せる。"""
+    window.resize(800, 900)
+    window.show()
+    qtbot.waitExposed(window)
+
+    saved = SplitterState(600, 200)
+    window.restore_ui_state(UiState(main_splitter=saved), screens())
+    qtbot.wait(20)
+    captured = window.capture_ui_state().main_splitter
+
+    assert captured is not None
+    assert captured.player_size > captured.playlist_size
+    assert captured.player_ratio == pytest.approx(
+        expected_player_ratio(window, saved, captured.total), abs=0.03
+    )
+
+
+def test_splitter_restore_adapts_to_the_current_window_size(
+    window: MainWindow, qtbot: QtBot
+) -> None:
+    """保存時と違うWindow高さでも、比率を保って再配分する。"""
+    window.resize(800, 500)
+    window.show()
+    qtbot.waitExposed(window)
+
+    # 保存時は合計2000相当（前回のほうが大きいウィンドウ）。
+    saved = SplitterState(1400, 600)
+    window.restore_ui_state(UiState(main_splitter=saved), screens())
+    qtbot.wait(20)
+    captured = window.capture_ui_state().main_splitter
+
+    assert captured is not None
+    assert captured.total <= window.height()
+    assert captured.playlist_size > 0
+    assert captured.player_ratio == pytest.approx(
+        expected_player_ratio(window, saved, captured.total), abs=0.03
+    )
+
+
+def test_splitter_restore_works_with_every_visualization_hidden(
+    window: MainWindow, qtbot: QtBot
+) -> None:
+    """可視化を全部OFFにしてもSplitter復元が破綻せず、プレイリストが残る。"""
+    window._app_settings.apply(  # pyright: ignore[reportPrivateUsage]
+        AppSettings(
+            1.0,
+            True,
+            waveform_visible=False,
+            spectrum_visible=False,
+            level_meter_visible=False,
+        )
+    )
+    window.resize(800, 700)
+    window.show()
+    qtbot.waitExposed(window)
+
+    saved = SplitterState(500, 200)
+    window.restore_ui_state(UiState(main_splitter=saved), screens())
+    qtbot.wait(20)
+    captured = window.capture_ui_state().main_splitter
+
+    assert captured is not None
+    assert captured.playlist_size >= MINIMUM_SPLITTER_SIZE
+    assert captured.player_ratio == pytest.approx(
+        expected_player_ratio(window, saved, captured.total), abs=0.03
+    )
+
+
+def test_splitter_restore_works_with_every_visualization_visible(
+    window: MainWindow, qtbot: QtBot
+) -> None:
+    """可視化を全部ONにした状態でも同じ契約で復元できる。"""
+    window.resize(800, 1100)
+    window.show()
+    qtbot.waitExposed(window)
+
+    saved = SplitterState(700, 300)
+    window.restore_ui_state(UiState(main_splitter=saved), screens())
+    qtbot.wait(20)
+    captured = window.capture_ui_state().main_splitter
+
+    assert captured is not None
+    assert captured.playlist_size >= MINIMUM_SPLITTER_SIZE
+    assert captured.player_ratio == pytest.approx(
+        expected_player_ratio(window, saved, captured.total), abs=0.03
+    )
+
+
+# -- 前回フォルダー ---------------------------------------------------------
+
+
+def test_file_dialog_starts_in_the_last_directory(
+    window: MainWindow, audio_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """保存された前回フォルダーをファイルダイアログの初期位置へ渡す。"""
+    requested: list[str] = []
+
+    def record_dialog(*args: object, **kwargs: object) -> tuple[str, str]:
+        del kwargs
+        requested.append(str(args[2]))
+        return ("", "")
+
+    window.set_last_open_directory(audio_file.parent)
+    monkeypatch.setattr(main_window_module.QFileDialog, "getOpenFileName", record_dialog)
+
+    window.open_file()
+
+    assert requested == [str(audio_file.parent)]
+
+
+def test_selecting_a_file_updates_the_last_directory(
+    window: MainWindow, audio_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ファイル選択が成功したら、その親フォルダーを保存対象へ反映する。"""
+    monkeypatch.setattr(
+        main_window_module.QFileDialog, "getOpenFileName", stub_open_dialog(str(audio_file))
+    )
+    changes: list[int] = []
+    window.ui_state_changed.connect(lambda: changes.append(1))
+
+    window.open_file()
+
+    assert window.last_open_directory == audio_file.parent
+    assert len(changes) == 1
+
+
+def test_cancelling_the_dialog_keeps_the_last_directory(
+    window: MainWindow, audio_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancelでは前回フォルダーを変更しない。"""
+    window.set_last_open_directory(audio_file.parent)
+    monkeypatch.setattr(main_window_module.QFileDialog, "getOpenFileName", stub_open_dialog(""))
+    changes: list[int] = []
+    window.ui_state_changed.connect(lambda: changes.append(1))
+
+    window.open_file()
+
+    assert window.last_open_directory == audio_file.parent
+    assert changes == []
+
+
+def test_drag_and_drop_does_not_change_the_last_directory(
+    window: MainWindow, playlist_model: PlaylistModel, audio_file: Path
+) -> None:
+    """プレイリストへの追加（D&D相当）では前回フォルダーを変えない。"""
+    playlist_model.add_paths([audio_file])
+
+    assert window.last_open_directory is None
+    assert window.capture_ui_state().last_open_directory is None
+
+
+def test_missing_last_directory_is_passed_without_synchronous_io(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """前回フォルダーは存在確認せずダイアログへ渡し、GUIを事前I/Oで止めない。"""
+    directory = tmp_path / "切断済みを想定した フォルダー"
+    requested: list[str] = []
+
+    def fail_if_checked(self: Path) -> bool:
+        del self
+        raise AssertionError("GUIスレッドでPath.is_dir()を呼んではならない")
+
+    def record_dialog(*args: object, **kwargs: object) -> tuple[str, str]:
+        del kwargs
+        requested.append(str(args[2]))
+        return ("", "")
+
+    window.set_last_open_directory(directory)
+    monkeypatch.setattr(Path, "is_dir", fail_if_checked)
+    monkeypatch.setattr(main_window_module.QFileDialog, "getOpenFileName", record_dialog)
+
+    window.open_file()
+
+    assert requested == [str(directory)]
+
+
+def test_relative_last_directory_is_ignored(window: MainWindow) -> None:
+    """相対パスは前回フォルダーとして保持しない。"""
+    window.set_last_open_directory(Path("音楽"))
+
+    assert window.last_open_directory is None
+
+
+def test_unicode_last_directory_round_trips(window: MainWindow, tmp_path: Path) -> None:
+    """日本語・空白を含むフォルダーも保持できる。"""
+    directory = tmp_path / "音 楽"
+    directory.mkdir()
+
+    window.set_last_open_directory(directory)
+
+    assert window.capture_ui_state().last_open_directory == directory
+    assert window.file_dialog_directory() == str(directory)
+
+
+# -- 通知と責務 -------------------------------------------------------------
+
+
+def test_move_and_resize_notify_once_each(window: MainWindow, qtbot: QtBot) -> None:
+    """移動・リサイズ・最大化でUI状態の変更を通知する。"""
+    window.show()
+    qtbot.waitExposed(window)
+    changes: list[int] = []
+    window.ui_state_changed.connect(lambda: changes.append(1))
+
+    window.move(180, 140)
+    window.resize(840, 680)
+    qtbot.wait(20)
+
+    assert len(changes) >= 2
+
+
+def test_restore_does_not_notify(window: MainWindow, qtbot: QtBot) -> None:
+    """復元適用をユーザー変更として通知しない。"""
+    window.show()
+    qtbot.waitExposed(window)
+    changes: list[int] = []
+    window.ui_state_changed.connect(lambda: changes.append(1))
+
+    window.restore_ui_state(
+        UiState(
+            window=WindowState(x=210, y=160, width=900, height=700, maximized=False),
+            main_splitter=SplitterState(400, 300),
+            last_open_directory=Path("C:\\Music"),
+        ),
+        screens(),
+    )
+
+    assert changes == []
+
+
+def test_main_window_does_not_know_the_ui_state_file() -> None:
+    """MainWindowはJSON・schema version・保存先・保存タイマーを持たない。"""
+    for forbidden in (
+        "json",
+        "load_ui_state",
+        "save_ui_state",
+        "UiStateSession",
+        "UI_STATE_SCHEMA_VERSION",
+        "default_ui_state_path",
+    ):
+        assert not hasattr(main_window_module, forbidden), forbidden

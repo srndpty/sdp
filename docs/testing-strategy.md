@@ -46,6 +46,7 @@
 | `ui/player_controls.py` の時間整形 | `m:ss` / `h:mm:ss` の境界値と負値の扱い |
 | `ui/speed_panel.py` | Slider整数値とrateの境界変換、Slider／SpinBoxの双方向同期、Controller同期Signalへの耐性、float32読み戻し時の要求表示維持、6プリセット、1.0倍reset、pitch補正ON/OFF、sourceなし操作、load／transport／seekを呼ばないこと |
 | `services/settings.py` | UTF-8往復、保存キー限定（速度・ピッチ・可視化3項目）、欠落キーの既定値補完、未知キーの無視、version／型／0.5～2.0／NaN／inf検証、bool欄の厳密判定（0／1／文字列を拒否）、非UTF-8・不正JSON、fsync／replace失敗時の既存ファイル保持と一時ファイル回収。**schema version 1→2の移行**（v1の可視化設定を表示ONで補完し、同名v2キーがfalse／不正型でも未知キーとして無視すること、読み込みだけではファイルを書き換えないこと、変更後はv2で保存されること、v2の3項目の独立往復と厳密検証、未知versionの拒否）、`validate_settings`が適用前検証としてboolと値域を拒否すること |
+| `services/ui_state.py`（P6-B） | UiStateの既定値と不変性、schema version 1の往復、window／splitter／last_open_directoryの欠落を「未保存」として扱うこと、未知キーの無視、未知schema versionの拒否、boolをint欄で拒否、width／height=0や負値の拒否、負座標の受理、maximizedの厳密bool、splitterの0以上と合計0拒否、絶対パスのみ受理（相対パス拒否・Unicode／空白パス）、存在しないフォルダーでも読み込みを失敗させないこと、非UTF-8・不正JSON・非objectルート、atomic save（fsync／replace／json.dump失敗時の既存ファイル保持と一時ファイル回収）。**画面補正**は整数矩形を注入して、単一画面内・左/上モニターの負座標・一部だけ画面内・完全画面外のprimary中央復帰・タイトル帯／矩形の重なりによる所属画面選択・大小が異なるsecondary基準のサイズclamp・最小サイズ・極端な座標・screenなしのfallback・最大化フラグの保持を検証する。**Splitter**は比率での再配分、合計の一致、片側が潰れないこと、総量が小さい場合の下限、総量0での保存値維持を検証する |
 | `playlist/persistence.py` | `playlist.json` の往復（順序・entry_id・日本語パス）、未作成時の空リスト、ファイル状態を保存しないこと、アトミック書き込みと失敗時の既存ファイル保持、保存前のID重複検証、schema version の厳密な整数判定、非UTF-8を含む破損データごとの明示的エラー、未知キーの無視（将来は M3U8 も） |
 
 ## 3. Qt 統合テスト（pytest-qt、`QT_QPA_PLATFORM=offscreen`）
@@ -57,10 +58,13 @@
 | `QtMultimediaBackend` | Qt enum 写像の完全性（値が増えたら失敗する）、エラー変換、故障注入による変換失敗・再入ガード、状態通知の重複抑制、音を鳴らさない load・source差し替え・再ロード。所有する QMediaPlayer / QAudioOutput は `findChildren` で取得し、テストのために公開 API を増やさない |
 | `SingleInstanceService` | 同一プロセス内でサーバーとクライアントを往復させる |
 | `PlayerControls` | **FakeBackend + 実 PlaybackController** で、状態ごとのボタン活性、シーク（ドラッグ中の非同期更新の抑止、有効なpress/releaseでの1回だけのseek、source・duration変更による古い操作の取消）、音量・ミュートの往復とフィードバックループの不在を検証する。子ウィジェットは `objectName` で取得する |
+| `MainWindow`（UI状態） | captureがnormal geometryとSplitterサイズを返すこと、**最大化中でもnormal geometryを返すこと**、最小化状態を保存しないこと、restoreでgeometryと最大化を適用しnormal復元では既存の最大化／最小化を解除すること、画面外の保存値を画面内へ戻すこと、Splitterの往復と現在Window高さへの適応、可視化が全ON／全OFFのどちらでも保存比率を許容誤差内で復元すること、前回フォルダーを同期I/Oなしでファイルダイアログへ渡すこと、ファイル選択で親フォルダーを更新し**Cancelでは更新しないこと**、D&Dで更新しないこと、相対パスの無視、Unicodeパス、move／resizeの通知、**復元適用が通知しないこと**、JSON・schema version・保存先・保存タイマーを持たないことを検証する |
 | `MainWindow` | `QFileDialog.getOpenFileName` を差し替え、キャンセル / 選択、ファイル名とタイトルの更新、`MediaStatus` とエラー表示（具体的エラーの優先、`detail` を出さないこと）、source解除、終了アクションを検証する。**設定アクションでダイアログが開くこと、二重に開かないこと、閉じた後に再度開けること、開き直しで最新設定が入ること、ダイアログの要求が調停サービス経由でControllerと各Panelへ届くこと、JSON・schema version・保存タイマーを持たないこと、復元済み表示設定をWindow表示前に反映すること、3つの可視化を個別にON/OFFできること、波形非表示中は位置追従を止め再表示で現在位置へ復帰すること**を検証する |
+| `app.py` の配線（UI状態） | PlayerCompositionがUiStateSessionを保持しbuild時に監視しないこと、既定パスが`%LOCALAPPDATA%\sdp\ui-state.json`で設定ファイルと別であること、Window表示前にgeometryと前回フォルダーが復元されること、可視化の表示設定を適用したあとにSplitterが復元されること、復元だけではファイルを書き換えないこと、終了時flushで保存されること、破損時に既定位置で起動し元ファイルを上書きしないこと、ui-state／settings／playlistの障害と保存可否が互いに独立であること、3つのschemaが混ざらないこと、`run()`がstopより前にflushすること、UI層がui-stateのJSON I/Oを持たないことを検証する |
 | `app.py` の配線（設定） | AppSettingsControllerを保持しSettingsSessionと同じsnapshotを使うこと、保存済み表示設定をWindow表示前に反映すること、version 1設定から正常起動し起動だけでは書き換えないこと、初期読込で保存が走らないこと、設定ダイアログの変更がControllerと各Panelへ届くこと、終了時flushでversion 2として保存されること、設定保存失敗がプレイリスト保存と再生を妨げないこと、UI層が設定JSONを読み書きしないことを検証する |
 | `app.py` の配線 | Backend → Controller → PlaylistModel → 永続化サービス → MainWindow を組み立て、復元済みModelの前後曲可否をWindow構築時に反映できること。イベントループは起動しない。PcmTapを保持しBackendのQAudioBufferOutputへ接続されていること、SpectrumPanelが同じPcmTapを使うこと、**LevelMeterWidgetが1つでSpectrumPanel内にあり同じPcmTapを共有すること、mono／L／Rの3本が同じ固定容量であること、本番配線のPCM通知で3本が埋まること、MainWindowがLevelProcessorやリングバッファを持たないこと、UI層がQAudioBuffer系を参照しないこと**、SpectrumWidgetとWaveformWidgetが1つずつ共存すること、buildだけではタイマーを開始しないこと、source変更でPCMがclearされること、shutdownでタイマーとPCM受信が残らないこと、PlaybackBackend IF・FakeBackend・settings／playlist／波形cache schemaが不変であること |
 | `ShortcutManager` | 実QTestキー入力で全割当、auto repeat設定、相対値の境界、sourceなし、入力Widget・ボタンSpace・modalでの抑止、管理外のCtrl+O／Ctrl+Shift+O／Ctrl+C／Ctrl+Vの通過、QObject削除後の安全性を検証する |
+| `UiStateSession`（P6-B） | 未作成時の既定状態復元、保存済み状態のWindowへの適用、**復元が保存契機にならないこと**、build時に監視を始めないこと、start冪等、move／resize／最大化／Splitter／前回フォルダーそれぞれのデバウンス保存、連続変更で最終snapshotだけを保存すること、同値なら書き換えないこと、flushの即時保存とtimer停止、一時失敗後の1回自動再試行、破損時の保存無効化と元ファイル保護、Window破棄後のflushが例外を出さないこと、stop冪等とSignal解除、stop後にschedule_saveしないこと、QObject削除でtimerが残らないこと、ui-state破損時もsettingsが保存でき・settings破損時もui-stateが保存できることを検証する |
 | `SettingsSession` | MainWindow構築前のController適用、build時未開始、start冪等、1.5秒相当のデバウンス、連続変更の最終snapshot、終了時flush、一時失敗後の1回自動再試行、破損時保存無効化、QObject削除時timer停止を検証する。可視化設定の変更もデバウンス保存対象になること、復元した表示設定がstart前にsnapshotへ入り保存契機にならないこと、version 1ファイルが起動では書き換わらず次の変更でversion 2になることを検証する |
 | `AppSettingsController` | Controller現在値と可視化既定からの初期snapshot、applyでの差分適用と1回だけの通知、通知slot内でController実効値とsnapshotが一致すること、rate／pitch同時変更でも通知1回、Backendの実効読戻し採用、2つ目のsetter失敗時のrollbackと未適用snapshot・保存通知の抑止、同値applyでの無通知、表示ON/OFFだけの変更でControllerのsetterを呼ばないこと、SpeedPanel／ショートカット経由の変更をsnapshotへ取り込むこと（可視化設定を失わないこと）、不正値の拒否と既存設定の保持、shutdownの冪等性・監視解除・apply拒否を検証する |
 | `SettingsDialog` | objectName／accessibleName、速度入力の範囲・刻み・小数桁、OK／Cancel／Applyの存在、開いた時点の適用済み設定表示、編集だけでは要求しないこと、Applyで閉じずに要求すること、OKで要求して成功時だけ閉じること、調停側が成功通知しなければ適用済み扱いにせずエラーを表示すること、Cancel／EscがApply後の変更を戻さず未適用編集だけ破棄すること、同値Applyでも1回だけ要求すること、`set_settings`での再反映、開いたダイアログの再前面化で全入力の未適用編集を維持すること、プログラム経由の不正値を適用せず短いエラーを出すこと（不正・適用失敗のままOKで閉じないこと）、成功時のエラー消去、JSON・schema version・PlaybackControllerを参照しないこと、破棄後にcallbackを残さないことを検証する |
@@ -381,6 +385,32 @@ RSSは60.9→65.5MBでt=30s以降横ばい、リングバッファ3本合計1,03
 - [ ] 破損した`settings.json`では既定値で起動し、元ファイルを上書きしない
 - [ ] 100%／可能なら150%表示倍率でダイアログが崩れない
 - [ ] Tab順が自然で、キーボードだけで操作でき、EscでCancelできる
+
+## 6.13 P6-B 手動スモーク（ウィンドウ状態と前回フォルダー）
+
+実画面で行う。マルチモニターと解像度変更は自動テストで代替できないため
+**リリース前ゲートとして残す**。
+
+- [ ] ウィンドウを移動して終了し、次回起動で同じ位置に出る
+- [ ] サイズを変えて終了し、次回起動で同じサイズになる
+- [ ] 最大化して終了し、次回起動でも最大化で出る
+- [ ] 最大化を解除すると、最大化前のサイズに戻る
+- [ ] 最小化したまま終了しても、次回は最小化では起動しない
+- [ ] スプリッターの比率を変えて終了し、次回起動で復元される
+- [ ] 可視化が全ONのときも全OFFのときもスプリッターが復元され、プレイリストが潰れない
+- [ ] 「開く...」でファイルを選ぶと、次回そのフォルダーから始まる
+- [ ] ダイアログをキャンセルしても前回フォルダーが変わらない
+- [ ] プレイリストへのD&Dでは前回フォルダーが変わらない
+- [ ] 日本語・空白を含むフォルダーでも前回フォルダーが復元される
+- [ ] secondary monitorへ移動して終了し、次回同じモニターで出る
+- [ ] 大小の異なるmonitor間で、保存サイズが復元先monitor内へ収まる
+- [ ] secondary monitorを外した状態で起動しても画面外へ消えない
+- [ ] 解像度を下げた状態で起動しても画面外へ消えず、サイズが画面内へ収まる
+- [ ] 切断済みネットワークフォルダーを前回位置にしても、「開く...」の前処理で固まらない
+- [ ] 100%／可能なら150%表示倍率で崩れない
+- [ ] `ui-state.json`を壊すと既定位置で起動し、通知が出て**元ファイルが上書きされない**
+- [ ] `ui-state.json`が壊れていても設定とプレイリストは保存される
+- [ ] 移動やリサイズを連打しても、書き込みが連続して発生しない（終了直前の状態が残る）
 
 ## 7. 手動チェックリスト（リリース前）
 

@@ -1163,15 +1163,110 @@ objectNameは`settingsDialog`、各入力は`settingsPlaybackRateSpinBox`、
 - 非表示→再表示だけでは解析の失敗状態を消さない（復帰はsource変更・format変更のまま）。
   非表示中は解析しないため、新たな失敗もログも生まれない。
 
-### 9.6 起動と保存のライフサイクル
+### 9.6 UI状態（P6-B）
+
+設定画面で**明示的に変更する** ``AppSettings``（settings.json）と、使っているうちに
+**自然に変わる**ウィンドウ状態は別ファイル・別責務にする。同じ値を両方へ保存しない。
+
+| 項目 | ファイル | 変わり方 |
+|---|---|---|
+| 速度・ピッチ・可視化の表示ON/OFF | `settings.json`（schema v2） | 設定画面から明示的に |
+| ウィンドウ位置・サイズ・最大化・Splitter比率・前回フォルダー | `ui-state.json`（schema v1） | 日常操作で自動的に |
+
+保存形式は Qt の ``saveGeometry()`` / ``QByteArray`` の base64 ではなく、
+**意味の明確な整数値**とする（手編集・デバッグ・DPIやQtバージョン差の吸収・
+画面外補正・破損箇所の個別検証がしやすい）。
+
+```json
+{
+  "schema_version": 1,
+  "window": {"x": 120, "y": 80, "width": 960, "height": 760, "maximized": false},
+  "main_splitter": {"player": 360, "playlist": 400},
+  "last_open_directory": "C:\Music"
+}
+```
+
+- `services/ui_state.py`（**Qt非依存**）: 値オブジェクト（`WindowState` /
+  `SplitterState` / `UiState` / `ScreenRect`）、JSON解析とschema検証、アトミック保存、
+  画面外補正とSplitter再配分の純粋関数。MainWindow・QSplitter・QFileDialog・
+  PlaybackController・PlaylistModel・AppSettingsControllerを参照しない。
+- `services/ui_state_session.py`（Qt調停）: 復元の適用、変更のデバウンス保存、
+  終了時flush。Windowへは `capture_ui_state` / `restore_ui_state` /
+  `connect_ui_state_changed` の小さな契約（Protocol）だけを要求し、ui層をimportしない。
+- 値の契約: boolをint欄で受理しない、width／heightは正、splitterは0以上かつ合計が正、
+  パスは**絶対パスのみ**。未知キーは無視し、既知キーの欠落は「未保存」、
+  既知キーの不正値は復元失敗とする。
+
+#### ウィンドウgeometry
+
+- 保存するのは**normal状態**のx・y・width・heightと`maximized`。
+  最大化中は `normalGeometry()` を使い、**最大化された画面全体のサイズを
+  normal sizeとして保存しない**。
+- **最小化状態は保存しない。** 最小化中に終了しても、次回はnormalまたはmaximizedで開く
+  （`windowState()` の Maximized フラグだけを見る）。
+- 復元は「normal geometryを設定 → 必要なら最大化」の順。逆にするとnormal geometryを失う。
+
+#### 画面外補正（マルチモニター）
+
+`fit_window_state(state, screens, minimum_size=...)` を純粋関数として持ち、
+`QScreen.availableGeometry()` を `ScreenRect` へ写して渡す（テストから注入できる）。
+
+- **負のx／yを一律に拒否しない。** 左・上に置かれたモニターでは正当な値。
+- タイトルバー相当の帯が最も広く重なる画面を復元先とする。タイトル帯がどの画面にも
+  重ならない場合は、ウィンドウ矩形との交差面積が最大の画面を使う。
+- 選んだ画面でタイトルバー相当の帯（上端24px・幅80px以上）が見えていれば位置を保つ。
+- どの画面とも重ならない（モニターを外した・解像度が変わった）場合は
+  **primary screenの中央**へ戻す。
+- サイズは**選んだscreen**のavailable size以内へclampし、`minimumSizeHint()` を下回らせない。
+  サイズを縮めた場合は位置も補正し、矩形全体をそのscreen内へ収める。
+- 画面情報が取れない場合は位置に触れず、サイズの下限だけを保証する。
+
+#### Splitter
+
+- 保存は上下の絶対サイズだが、**復元は比率**として現在の利用可能高さへ再配分する
+  （`distribute_splitter_sizes`）。前回と違うウィンドウ高さでも見た目の比率が保たれる。
+- 片側が完全に潰れないよう最小60px（総量が小さい場合は総量の半分）を確保する。
+- 可視化の表示ON/OFFでplayer側の最小高さが変わるため、**Splitterの復元は
+  AppSettingsの可視化適用のあと**に行う。表示でレイアウトが確定してから
+  最初の `showEvent` でもう一度比率を当て直す。
+
+#### 前回フォルダー
+
+- 「開く...」の初期ディレクトリに使う。**ファイルを選んだときだけ**その親フォルダーを
+  保存対象へ反映し、**Cancelでは変更しない**。プレイリストへのD&Dでも変更しない
+  （追加操作であって「開く」操作ではないため）。
+- 保存するのはファイルパスではなくディレクトリで、相対パスは保持しない。
+- 読み込み時にもダイアログを開く直前にも存在確認をしない。切断済みネットワークドライブ等
+  への同期I/OでGUIを止めないため、保存値をそのまま `QFileDialog` へ渡す。Qtが初期位置へ
+  アクセスするときの待ち時間まではアプリ側で保証しない。
+
+#### 保存契機と障害の独立性
+
+- 監視するのはmove／resize／WindowStateChange／splitterMoved／前回フォルダー変更。
+  MainWindowはこれらを `ui_state_changed` の1本へまとめて通知する。
+- **移動・リサイズのたびには書き込まない。** 1.2秒のデバウンスでまとめ、
+  最大化・復元の連続イベントでも最終snapshotだけを保存する。終了時は必ずflushし、
+  変更がなければ書き換えない。**復元の適用中は通知しない**（restoreを保存契機にしない）。
+- 破損時は既定状態で起動して短い復元失敗メッセージを出し、その起動では保存を無効化して
+  元ファイルを守る。`settings.json` / `playlist.json` / `ui-state.json` の
+  **保存可否と障害は互いに独立**とする。
+
+### 9.7 起動と保存のライフサイクル
 
 - 順序は「設定読込 → `AppSettings`生成 → Controllerへ速度・ピッチ適用 →
-  MainWindow構築 → **可視化表示設定の適用** → Window表示 → 監視開始」。
+  プレイリスト復元 → MainWindow構築 → **可視化表示設定の適用** →
+  **UI状態読込とgeometry／Splitter／前回フォルダーの復元** → Window表示 → 各監視開始」。
   可視化が一瞬見えてから消えるフリッカーを避けるため、表示設定はWindow表示**前**に反映する。
 - `build_player()`はMainWindow構築前に設定をControllerへ適用し、構築だけでは監視を開始しない。
   **起動時の適用をユーザー変更として保存しない。**
   `run()`が全構築後に監視を開始し、変更から1.5秒のデバウンスと正常終了時のflushで保存する。
   変更がないApplyではファイルを書き換えない。
+- UI状態の監視は**Window表示後**に開始する（表示で生じるmove／resizeを
+  ユーザー変更として保存しないため）。
+- 終了順は「SpectrumPanel → PcmTap → 波形解析 → MetadataReader → **UI状態flush** →
+  設定flush → プレイリスト保存 → 各session stop → AppSettingsController shutdown」。
+  **Windowが破棄された後にgeometryを取得しない**（破棄済みならUI状態の保存を諦めて
+  終了処理を止めない）。
 - 書き込みは同一ディレクトリの一時ファイルへUTF-8で書き、flush／fsync後に`os.replace`で
   アトミックに置き換える。復元失敗時は既定値で起動して通知し、その起動では設定保存を
   無効化して破損ファイルを保護する。設定とプレイリストの障害・保存可否は互いに独立し、
