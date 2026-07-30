@@ -41,6 +41,7 @@ for package_name in (
     "shiboken6",
     "numpy",
     "mutagen",
+    "pyinstaller",
 ):
     datas += license_files(package_name, package_name)
 

@@ -15,8 +15,9 @@ sdp の Windows onedir 配布物には、次のランタイムが含まれます
 - Mutagen: GNU GPL version 2 or later
   _internal/licenses/mutagen/
 
-PyInstallerはビルドツールであり、PyInstaller自体はsdpの実行時配布物へ含めません。
-ただし、PyInstallerのbootloaderには例外付きGPLライセンスが適用されます。
+PyInstallerはビルドツールであり、PyInstallerのPython module自体はsdpの実行時配布物へ
+含めません。ただしbootloaderはsdp.exeへ組み込まれるため、例外付きGPLライセンス原文を
+_internal/licenses/pyinstaller/COPYING.txtへ同梱します。
 
 注意:
 現在のPySide6 wheelに含まれるQt関連ファイルは、環境によって商用ライセンス参照文だけの
