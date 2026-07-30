@@ -1432,13 +1432,19 @@ PySide6 6.10.3の標準hookによるP7-B1実測では、`ffmpegmediaplugin.dll`�
 `windowsmediaplugin.dll`、FFmpegのavcodec／avformat／avutil／swresample／swscale DLLを
 収集した。Qt 6の既定はFFmpeg backendで、Windows Media Foundation backendはQt 6.10から
 非推奨である。sdp自身は外部FFmpeg CLIを同梱・起動しない。各形式は実際のbackend、codec、
-hardware driver等にも左右されるため、selftestのclass構築成功を全codec対応の証明にしない。
+hardware driver等にも左右されるため、selftestの無音WAV decode成功を全codec対応の証明にしない。
 （[Qt Multimedia backend](https://doc.qt.io/qt-6/qtmultimedia-index.html)）
 
 `--selftest`は通常起動と独立したCLI modeで、`PlayerComposition`、Window、音声再生、
 単一instance IPCを開始しない。Qt Widgets／Network／Multimediaの必須classを構築し、
-ログ保存先とQt temp directoryへの書き込みを確認する。成功0、依存または書き込み失敗1、
-不正引数2を返す。これは起動診断であり、実音や全codecの受け入れを代替しない。
+ログ保存先とQt temp directoryへの書き込みを確認する。さらに標準ライブラリで短い無音PCM WAVを
+Qt tempへ生成し、FFmpeg backendを明示した`QAudioDecoder`で最低1bufferを実decodeして削除する。
+成功0、依存または書き込み失敗1、不正引数2を返す。これは音を出さずにplugin loadを診断するが、
+実音や圧縮形式を含む全codecの受け入れは代替しない。
+
+layout検査はFFmpeg／Windows media plugin、FFmpeg runtime DLL、VC Runtimeに加え、宣言した
+project／Python／PySide6／NumPy／Mutagen／PyInstallerのライセンス文書を必須にする。specも
+必須ライセンス原文をwheelから検出できない場合はbuildを失敗させ、欠落した配布物を作らない。
 
 ### 12.2 P7-B2以降
 

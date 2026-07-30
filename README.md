@@ -296,10 +296,11 @@ pwsh -File scripts/package-smoke.ps1
 dist\sdp\sdp.exe --selftest
 ```
 
-`--selftest`はWindowを表示せず、Qt Widgets／Network／Multimediaのobject構築、
-ログ・一時領域の書き込みだけを確認する。再生、単一instance server、設定・playlist・
-ui-state・波形cacheの作成は行わない。終了コードは成功`0`、依存／書き込み失敗`1`、
-不正なCLI指定`2`である。ファイルpathとの併用は不正指定として扱う。
+`--selftest`はWindowを表示せず、Qt Widgets／Network／Multimediaのobject構築、ログ・一時領域の
+書き込みに加え、その場で生成した短い無音PCM WAVをFFmpeg backendの`QAudioDecoder`で実decode
+する。音声出力、単一instance server、設定・playlist・ui-state・波形cacheの作成は行わず、
+一時WAVも必ず削除する。終了コードは成功`0`、依存／書き込み失敗`1`、不正なCLI指定`2`である。
+ファイルpathとの併用は不正指定として扱う。
 
 配布物には`LICENSE`、`THIRD_PARTY_NOTICES.txt`、各wheelが提供するライセンス原文を
 `_internal\licenses`以下へ収録する。ただしP7-B1は開発・個人評価用であり、Qt/PySide6を外部配布する
