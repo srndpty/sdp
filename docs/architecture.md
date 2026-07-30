@@ -1086,6 +1086,10 @@ Mutagen による非同期メタデータ取得と表示（P2-D）。
   | `waveform_visible` | v2 | 波形の表示ON/OFF |
   | `spectrum_visible` | v2 | スペクトラムの表示ON/OFF |
   | `level_meter_visible` | v2 | Peak／RMSレベルメーターの表示ON/OFF |
+  | `volume` | v3 | 0.0〜1.0 の音量 |
+  | `muted` | v3 | ミュートのON/OFF |
+  | `repeat_mode` | v3 | `"off"` / `"all"` / `"one"` |
+  | `shuffle_enabled` | v3 | シャッフルのON/OFF |
 
 - 可視化の色、バンド数、FPS、窓長、Peak hold時間・減衰速度、ショートカット、
   再生デバイス、キャッシュ容量は**保存対象へ入れない**（P6後半以降）。
@@ -1095,31 +1099,43 @@ Mutagen による非同期メタデータ取得と表示（P2-D）。
 - 読み込み時は未知のキーを無視し、**欠落した既知キーは既定値で補い、値が不正な
   既知キーは明示的に失敗させる**（両者を同じ扱いにしない）。
 
-### 9.2 schema version 1 → 2 の移行
+**Repeat の保存表現**: core の `RepeatMode` は `auto()` の値を持ち永続化を意図していない
+ため、保存層は安定した文字列を持つ別enum `RepeatModeSetting`（`off` / `all` / `one`）へ
+写す。core enumの定義順や実装が変わってもファイル互換を壊さないためで、対応表に無い値は
+既定値へ丸めず失敗させる。依存方向は services → core の一方向のままとする。
 
-- **version 1 と 2 の両方を有効な入力として読み込む。** version 1 には可視化設定が
-  ないため、3項目とも既定値（表示ON）で補う。v1文書に同名のv2キーが混入していても
-  未知キーとして無視し、値の検証や復元には使わない。
-- **読み込みだけではファイルを書き換えない。** version 1 で起動しても、次に
-  設定が変わって通常の保存契機が来たときに初めて version 2 として保存する。
-- 未知の将来versionは version 2 として上書きせず、復元エラーとして扱う
+### 9.2 schema version の移行
+
+- **version 1・2・3 のいずれも有効な入力として読み込む。** 古いversionに無い項目は
+  既定値で補う（可視化は表示ON、音量1.0、ミュートOFF、Repeat OFF、ShuffleOFF）。
+- **古いversionでは、後のversionのキーが混入していても未知キーとして無視する**
+  （v1のファイルへ手で書いた `volume` をv1の意味へ影響させない）。
+- **読み込みだけではファイルを書き換えない。** 古いversionで起動しても、次に
+  設定が変わって通常の保存契機が来たときに初めて現在のversionとして保存する。
+- 未知の将来versionは上書きせず、復元エラーとして扱う
   （その起動では保存を無効化し、元ファイルを保護する）。
 
 ### 9.3 適用の調停（AppSettingsController）
 
 `services/settings.py`。適用済み設定のsnapshotを1か所で持つ小さなQObject。
+**実効値の持ち主は2つある**ため、両方を調停する。
 
-- `apply(settings)` は検証してから**差分のある項目だけ**Controllerへ適用する。適用中の
+| 設定 | 実効値を持つ層 |
+|---|---|
+| 再生速度・ピッチ補正・音量・ミュート | `PlaybackController` |
+| Repeat・Shuffle | `PlaylistPlaybackController` |
+| 可視化の表示ON/OFF | 保存層のsnapshotだけ（適用先はMainWindowの配置責務） |
+
+- `apply(settings)` は検証してから**差分のある項目だけ**各Controllerへ適用する。適用中の
   Controller echoは集約し、全setter成功後に実効値を読み戻してsnapshotを1回だけ公開する。
-  途中で失敗した場合はControllerを直前値へ可能な限り戻し、未適用snapshotを公開・保存しない。
+  途中で失敗した場合は**変更済みのControllerをすべて**直前値へ可能な限り戻し、
+  未適用snapshotを公開・保存しない（rollback自体の失敗はログへ残し、再生は止めない）。
   同値なら通知しない。
-- 再生速度とピッチ補正は`PlaybackController`へ適用する。可視化の表示ON/OFFは
-  `settings_changed` で公開するだけで、**どのWidgetをどう隠すかは知らない**。
-- SpeedPanelやショートカット経由でControllerが直接変更された場合もsnapshotへ
-  追従させ、保存対象を1か所に保つ（可視化設定は再生操作で失われない）。
+- SpeedPanel・PlayerControls・ショートカット経由で各Controllerが直接変更された場合も
+  snapshotへ追従させ、保存対象を1か所に保つ（可視化設定は再生操作で失われない）。
 - shutdownは終端操作とし、以後のController通知を無視して`apply()`も拒否する。
-- JSON読み書き、QDialog、Backend具体型、PCM解析、FFT／レベル計算、プレイリスト操作は
-  持たない。`SettingsSession`はこのsnapshotだけを見て保存する。
+- JSON読み書き、QDialog、Backend具体型、PCM解析、FFT／レベル計算、プレイリストの
+  曲順操作は持たない。`SettingsSession`はこのsnapshotだけを見て保存する。
 
 ### 9.4 設定ダイアログ（P6-A）
 
@@ -1163,7 +1179,7 @@ objectNameは`settingsDialog`、各入力は`settingsPlaybackRateSpinBox`、
 - 非表示→再表示だけでは解析の失敗状態を消さない（復帰はsource変更・format変更のまま）。
   非表示中は解析しないため、新たな失敗もログも生まれない。
 
-### 9.6 UI状態（P6-B）
+### 9.6 UI状態（P6-B / P6-C）
 
 設定画面で**明示的に変更する** ``AppSettings``（settings.json）と、使っているうちに
 **自然に変わる**ウィンドウ状態は別ファイル・別責務にする。同じ値を両方へ保存しない。
@@ -1171,7 +1187,7 @@ objectNameは`settingsDialog`、各入力は`settingsPlaybackRateSpinBox`、
 | 項目 | ファイル | 変わり方 |
 |---|---|---|
 | 速度・ピッチ・可視化の表示ON/OFF | `settings.json`（schema v2） | 設定画面から明示的に |
-| ウィンドウ位置・サイズ・最大化・Splitter比率・前回フォルダー | `ui-state.json`（schema v1） | 日常操作で自動的に |
+| ウィンドウ位置・サイズ・最大化・Splitter比率・前回フォルダー・現在曲 | `ui-state.json`（schema v2） | 日常操作で自動的に |
 
 保存形式は Qt の ``saveGeometry()`` / ``QByteArray`` の base64 ではなく、
 **意味の明確な整数値**とする（手編集・デバッグ・DPIやQtバージョン差の吸収・
@@ -1179,12 +1195,38 @@ objectNameは`settingsDialog`、各入力は`settingsPlaybackRateSpinBox`、
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "window": {"x": 120, "y": 80, "width": 960, "height": 760, "maximized": false},
   "main_splitter": {"player": 360, "playlist": 400},
-  "last_open_directory": "C:\Music"
+  "last_open_directory": "C:\Music",
+  "current_playlist_entry_id": "..."
 }
 ```
+
+#### 現在曲（P6-C）
+
+- 保存するのは**entry_id**で、行番号もパスも保存しない。並べ替えても、同じパスの
+  重複行があっても、同じentryへ戻れる。
+- `ui_state.py` は PlaylistModel を知らない（実在確認をしない）。照合と復元は
+  `PlaylistUiStateSource`（services）が行い、`UiStateSession` も MainWindow も
+  entry_id の照合を持たない。`PlaybackController` へ entry_id を持たせない。
+- 復元は `PlaylistPlaybackController.select_entry_by_id()` で**選ぶだけ**。
+  sourceは読み込むが `play()` は呼ばないため、**自動再生しない・位置は0のまま**。
+- entry_id が存在しない・欠損している場合は復元をあきらめるだけで、ui-state全体を
+  破損扱いにしない。次の保存で自然に取り除かれる（現在曲が削除・全消去された場合も
+  `current_entry_id` が `None` になり、保存対象から消える）。
+- 現在曲の変更もUI状態の保存契機にする（`PlaylistUiStateSource` が
+  `current_entry_changed` を購読して通知する）。
+- v1のui-stateには現在曲が無いためNoneで補い、読み込んだだけではv2へ書き換えない。
+
+#### 再生位置を保存しない理由（P6-C）
+
+- 数秒の曲やSEでは復元価値が低い。
+- 前回終了位置から突然再開するのは予測しにくい。
+- 音源が更新された場合、その位置がまだ妥当かの判定が必要になる。
+- duration不明・ライブ音源・壊れたファイルの扱いが増える。
+- 定期保存の頻度が上がる（位置は常に変化するため）。
+- まず**現在曲の選択復元だけ**でUXを評価する。再生中かどうかも保存しない。
 
 - `services/ui_state.py`（**Qt非依存**）: 値オブジェクト（`WindowState` /
   `SplitterState` / `UiState` / `ScreenRect`）、JSON解析とschema検証、アトミック保存、
@@ -1251,6 +1293,19 @@ objectNameは`settingsDialog`、各入力は`settingsPlaybackRateSpinBox`、
   元ファイルを守る。`settings.json` / `playlist.json` / `ui-state.json` の
   **保存可否と障害は互いに独立**とする。
 
+### 9.6.1 保存・復元失敗のユーザー通知（P6-C）
+
+`services/save_status.py`。カテゴリ（設定／プレイリスト／ウィンドウ状態）と、
+メッセージ整形の純粋関数、通知抑制の小さなQObjectだけを持つ。
+
+- **復元失敗**は起動時に1文へまとめる（例:「設定とプレイリストの復元に失敗しました。
+  既定状態で起動します。」）。カテゴリは重複を除いて既定順へ揃え、
+  **生の例外文もファイルパスも出さない**（詳細はログだけ）。
+- **保存失敗**は終了を待たずステータスバーへ短く出す（例:「設定を保存できませんでした。」）。
+  デバウンス保存はタイマーごとに失敗し得るため、**状態が変わったときだけ**通知する
+  （失敗→成功で「保存しました」を1回）。modal dialogは出さず、再生は妨げない。
+- 終了時の保存失敗はウィンドウが閉じた後でユーザーへ提示できないため、ログだけへ残す。
+
 ### 9.7 起動と保存のライフサイクル
 
 - 順序は「設定読込 → `AppSettings`生成 → Controllerへ速度・ピッチ適用 →
@@ -1267,6 +1322,14 @@ objectNameは`settingsDialog`、各入力は`settingsPlaybackRateSpinBox`、
   設定flush → プレイリスト保存 → 各session stop → AppSettingsController shutdown」。
   **Windowが破棄された後にgeometryを取得しない**（破棄済みならUI状態の保存を諦めて
   終了処理を止めない）。
+- 終了処理は `app.shutdown()` がカテゴリごとに独立して実行する。**1カテゴリの例外で
+  後続を飛ばさない**（各段をtry/exceptで囲み、失敗はログへ残して次へ進む）。
+  大きなライフサイクル基盤は作らず、順序と分離だけをここで守る。
+- 起動時の現在曲復元は「設定適用 → プレイリスト復元 → MainWindow構築 → 可視化適用 →
+  UI状態復元（geometry・Splitter・前回フォルダー・現在曲）→ Window表示 → 監視開始」の
+  順で行う。**復元しただけでは再生しない。**
+- 異常終了ではデバウンス済みの直近状態までが残る。crash handlerや強制終了時の
+  完全な保証は行わない。
 - 書き込みは同一ディレクトリの一時ファイルへUTF-8で書き、flush／fsync後に`os.replace`で
   アトミックに置き換える。復元失敗時は既定値で起動して通知し、その起動では設定保存を
   無効化して破損ファイルを保護する。設定とプレイリストの障害・保存可否は互いに独立し、
