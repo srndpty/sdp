@@ -886,3 +886,258 @@ def test_shutdown_stops_the_timer(
     assert not panel.is_timer_active
     assert widget_of(panel).frame is frame_before
     assert level_of(panel).frame is level_before
+
+
+# -- 表示ON/OFF（P6-A）-----------------------------------------------------
+
+
+def test_both_visualizations_are_visible_by_default(panel: SpectrumPanel) -> None:
+    """既定では両方表示（設定の既定値と揃える）。"""
+    assert panel.is_spectrum_visible
+    assert panel.is_level_meter_visible
+    assert widget_of(panel).isVisibleTo(panel)
+    assert level_of(panel).isVisibleTo(panel)
+
+
+def test_hiding_the_spectrum_stops_the_fft_but_keeps_the_level(
+    panel: SpectrumPanel,
+    controller: PlaybackController,
+    tap: PcmTap,
+    sources: tuple[Path, Path],
+    qtbot: QtBot,
+) -> None:
+    """スペクトラム非表示ではFFTもmono snapshotも行わず、レベルは続く。"""
+    start_playing(controller, tap, sources[0])
+    qtbot.waitUntil(lambda: panel.analysis_count >= 1, timeout=2_000)
+
+    panel.set_spectrum_visible(False)
+    analyses = panel.analysis_count
+    snapshots = panel.snapshot_count
+    levels = panel.level_count
+    qtbot.waitUntil(lambda: panel.level_count >= levels + 3, timeout=3_000)
+
+    assert panel.analysis_count == analyses
+    assert panel.snapshot_count == snapshots
+    assert not widget_of(panel).isVisibleTo(panel)
+    assert widget_of(panel).frame is None
+    assert level_of(panel).frame is not None
+    assert panel.is_timer_active
+
+
+def test_hiding_the_level_meter_stops_the_level_but_keeps_the_spectrum(
+    panel: SpectrumPanel,
+    controller: PlaybackController,
+    tap: PcmTap,
+    sources: tuple[Path, Path],
+    qtbot: QtBot,
+) -> None:
+    """レベル非表示ではPeak／RMSもstereo snapshotも行わず、FFTは続く。"""
+    start_playing(controller, tap, sources[0])
+    qtbot.waitUntil(lambda: panel.level_count >= 1, timeout=2_000)
+
+    panel.set_level_meter_visible(False)
+    levels = panel.level_count
+    stereo = panel.stereo_snapshot_count
+    analyses = panel.analysis_count
+    qtbot.waitUntil(lambda: panel.analysis_count >= analyses + 3, timeout=3_000)
+
+    assert panel.level_count == levels
+    assert panel.stereo_snapshot_count == stereo
+    assert not level_of(panel).isVisibleTo(panel)
+    assert level_of(panel).frame is None
+    assert widget_of(panel).frame is not None
+    assert panel.is_timer_active
+
+
+def test_hidden_visualizations_do_not_request_pcm(
+    panel: SpectrumPanel,
+    controller: PlaybackController,
+    tap: PcmTap,
+    sources: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot: QtBot,
+) -> None:
+    """非表示の可視化にはframe数0でPCMを要求しない（コピーもしない）。"""
+    requests: list[tuple[int, int]] = []
+    original = PcmTap.snapshot_visualization
+
+    def record(instance: PcmTap, *, mono_frames: int, level_frames: int) -> object:
+        requests.append((mono_frames, level_frames))
+        return original(instance, mono_frames=mono_frames, level_frames=level_frames)
+
+    monkeypatch.setattr(PcmTap, "snapshot_visualization", record)
+    panel.set_spectrum_visible(False)
+    start_playing(controller, tap, sources[0])
+
+    qtbot.waitUntil(lambda: len(requests) >= 2, timeout=3_000)
+
+    assert {mono for mono, _ in requests} == {0}
+    assert {level for _, level in requests} == {LEVEL_WINDOW_SIZE}
+
+
+def test_hiding_both_stops_the_timer_but_not_the_pcm_tap(
+    panel: SpectrumPanel,
+    controller: PlaybackController,
+    tap: PcmTap,
+    sources: tuple[Path, Path],
+    qtbot: QtBot,
+) -> None:
+    """両方非表示でタイマーを止めるが、共有PCMタップは受信を続ける。"""
+    start_playing(controller, tap, sources[0])
+    qtbot.waitUntil(lambda: panel.level_count >= 1, timeout=2_000)
+    received = tap.received_buffer_count
+
+    panel.set_spectrum_visible(False)
+    panel.set_level_meter_visible(False)
+    feed(tap)
+
+    assert not panel.is_timer_active
+    assert not panel.isVisible()
+    assert tap.received_buffer_count == received + 1
+    assert tap.available_frame_count > 0
+
+
+def test_showing_again_while_playing_resumes_the_analysis(
+    panel: SpectrumPanel,
+    controller: PlaybackController,
+    tap: PcmTap,
+    sources: tuple[Path, Path],
+    qtbot: QtBot,
+) -> None:
+    """再表示すると最新PCMから解析を再開する。"""
+    start_playing(controller, tap, sources[0])
+    panel.set_spectrum_visible(False)
+    panel.set_level_meter_visible(False)
+    qtbot.waitUntil(lambda: not panel.is_timer_active, timeout=2_000)
+
+    panel.set_spectrum_visible(True)
+    panel.set_level_meter_visible(True)
+
+    assert panel.is_timer_active
+    qtbot.waitUntil(lambda: widget_of(panel).frame is not None, timeout=3_000)
+    qtbot.waitUntil(lambda: level_of(panel).frame is not None, timeout=3_000)
+
+
+def test_showing_again_while_paused_does_not_start_the_timer(
+    panel: SpectrumPanel,
+    controller: PlaybackController,
+    tap: PcmTap,
+    sources: tuple[Path, Path],
+) -> None:
+    """pause中に表示ONへ戻してもタイマーは動かさない。"""
+    start_playing(controller, tap, sources[0])
+    panel.set_spectrum_visible(False)
+    panel.set_level_meter_visible(False)
+    controller.pause()
+
+    panel.set_spectrum_visible(True)
+    panel.set_level_meter_visible(True)
+
+    assert not panel.is_timer_active
+
+
+def test_showing_again_while_minimized_does_not_start_the_timer(
+    panel: SpectrumPanel,
+    controller: PlaybackController,
+    tap: PcmTap,
+    sources: tuple[Path, Path],
+    window: QMainWindow,
+    qtbot: QtBot,
+) -> None:
+    """最小化中に表示ONへ戻してもタイマーは動かさない。"""
+    start_playing(controller, tap, sources[0])
+    panel.set_level_meter_visible(False)
+    window.setWindowState(Qt.WindowState.WindowMinimized)
+    qtbot.waitUntil(lambda: not panel.is_timer_active, timeout=3_000)
+
+    panel.set_level_meter_visible(True)
+
+    assert not panel.is_timer_active
+
+
+def test_hidden_time_is_not_counted_into_the_peak_hold_release(
+    panel: SpectrumPanel,
+    controller: PlaybackController,
+    tap: PcmTap,
+    sources: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot: QtBot,
+) -> None:
+    """非表示だった実時間をPeak holdの減衰へ加算しない。"""
+    elapsed: list[float] = []
+    original = LevelProcessor.process
+
+    def record(
+        instance: LevelProcessor,
+        left: object,
+        right: object,
+        *,
+        elapsed_seconds: float,
+    ) -> object:
+        elapsed.append(elapsed_seconds)
+        return original(
+            instance,
+            left,  # pyright: ignore[reportArgumentType]
+            right,  # pyright: ignore[reportArgumentType]
+            elapsed_seconds=elapsed_seconds,
+        )
+
+    monkeypatch.setattr(LevelProcessor, "process", record)
+    start_playing(controller, tap, sources[0])
+    qtbot.waitUntil(lambda: len(elapsed) >= 2, timeout=3_000)
+
+    panel.set_spectrum_visible(False)
+    panel.set_level_meter_visible(False)
+    qtbot.waitUntil(lambda: not panel.is_timer_active, timeout=2_000)
+    qtbot.wait(300)
+    count = len(elapsed)
+    panel.set_spectrum_visible(True)
+    panel.set_level_meter_visible(True)
+    qtbot.waitUntil(lambda: len(elapsed) > count, timeout=3_000)
+
+    # 再開後の最初のtickは経過0秒から始まる（止まっていた0.3秒を数えない）。
+    assert elapsed[count] == pytest.approx(0.0)
+
+
+def test_visibility_toggle_does_not_clear_a_failed_state(
+    panel: SpectrumPanel,
+    controller: PlaybackController,
+    tap: PcmTap,
+    sources: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot: QtBot,
+) -> None:
+    """非表示→再表示だけでは失敗状態を消さない（復帰はsource変更・format変更）。"""
+    from sdp.core.analysis.spectrum import SpectrumProcessor
+
+    def explode(*args: object, **kwargs: object) -> SpectrumFrame:
+        raise RuntimeError("想定外のFFT失敗")
+
+    monkeypatch.setattr(SpectrumProcessor, "process", explode)
+    start_playing(controller, tap, sources[0])
+    qtbot.waitUntil(lambda: widget_of(panel).status_text == FAILED_MESSAGE, timeout=3_000)
+
+    panel.set_spectrum_visible(False)
+    panel.set_spectrum_visible(True)
+    analyses = panel.analysis_count
+    qtbot.wait(SPECTRUM_TIMER_INTERVAL_MS * 3)
+
+    assert panel.analysis_count == analyses
+    assert widget_of(panel).frame is None
+
+
+def test_shutdown_ignores_later_visibility_changes(
+    panel: SpectrumPanel,
+    controller: PlaybackController,
+    tap: PcmTap,
+    sources: tuple[Path, Path],
+) -> None:
+    """shutdown後の表示ON要求でタイマーを再開しない。"""
+    start_playing(controller, tap, sources[0])
+    panel.shutdown()
+
+    panel.set_spectrum_visible(False)
+    panel.set_spectrum_visible(True)
+    panel.set_level_meter_visible(True)
+
+    assert not panel.is_timer_active

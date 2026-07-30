@@ -1,7 +1,12 @@
-"""再生・解析状態を追従波形Widgetへ接続するUI調停層。"""
+"""再生・解析状態を追従波形Widgetへ接続するUI調停層。
+
+設定で非表示にされているあいだは位置追従の更新を行わず、再表示時に
+現在sourceの位置・長さへ復帰する（[architecture.md](../../../docs/architecture.md) §7）。
+"""
 
 from pathlib import Path
 
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from sdp.core.analysis.waveform import WaveformData
@@ -61,6 +66,18 @@ class WaveformPanel(QWidget):
     def waveform_widget(self) -> WaveformWidget:
         return self._widget
 
+    def showEvent(self, event: QShowEvent) -> None:
+        """再表示時に現在sourceの位置・長さへ追従し直す。
+
+        非表示中もsource変更とcache／解析結果の反映は続けているため、
+        ここで復帰するのは追従位置と長さだけでよい。旧sourceの波形は
+        ``_on_source_changed`` で既に破棄されている。
+        """
+        super().showEvent(event)
+        if self._playback.source is not None:
+            self._widget.set_position(max(0, self._playback.position_ms))
+        self._widget.set_duration(self._effective_duration(self._playback.duration_ms))
+
     def _on_source_changed(self, source: object) -> None:
         self._active_path = None
         self._active_token = None
@@ -69,7 +86,8 @@ class WaveformPanel(QWidget):
         self._widget.reset_for_source(available)
 
     def _on_position_changed(self, position_ms: int) -> None:
-        if self._playback.source is not None:
+        # 非表示中は追従描画を行わない（復帰時にshowEventで追い付く）。
+        if self._playback.source is not None and self.isVisible():
             self._widget.set_position(max(0, position_ms))
 
     def _on_duration_changed(self, duration_ms: int) -> None:

@@ -45,7 +45,7 @@
 | `services/logging_setup.py` | ログファイルの UTF-8 出力、多重初期化でハンドラーが増えないこと、出力先変更時のハンドラー置換、ローテーション設定、出力先の決定、未捕捉例外フックの記録と多重インストールの抑止 |
 | `ui/player_controls.py` の時間整形 | `m:ss` / `h:mm:ss` の境界値と負値の扱い |
 | `ui/speed_panel.py` | Slider整数値とrateの境界変換、Slider／SpinBoxの双方向同期、Controller同期Signalへの耐性、float32読み戻し時の要求表示維持、6プリセット、1.0倍reset、pitch補正ON/OFF、sourceなし操作、load／transport／seekを呼ばないこと |
-| `services/settings.py` | UTF-8往復、保存キー限定、欠落キーの既定値補完、未知キーの無視、version／型／0.5～2.0／NaN／inf検証、非UTF-8・不正JSON、fsync／replace失敗時の既存ファイル保持と一時ファイル回収 |
+| `services/settings.py` | UTF-8往復、保存キー限定（速度・ピッチ・可視化3項目）、欠落キーの既定値補完、未知キーの無視、version／型／0.5～2.0／NaN／inf検証、bool欄の厳密判定（0／1／文字列を拒否）、非UTF-8・不正JSON、fsync／replace失敗時の既存ファイル保持と一時ファイル回収。**schema version 1→2の移行**（v1の可視化設定を表示ONで補完し、同名v2キーがfalse／不正型でも未知キーとして無視すること、読み込みだけではファイルを書き換えないこと、変更後はv2で保存されること、v2の3項目の独立往復と厳密検証、未知versionの拒否）、`validate_settings`が適用前検証としてboolと値域を拒否すること |
 | `playlist/persistence.py` | `playlist.json` の往復（順序・entry_id・日本語パス）、未作成時の空リスト、ファイル状態を保存しないこと、アトミック書き込みと失敗時の既存ファイル保持、保存前のID重複検証、schema version の厳密な整数判定、非UTF-8を含む破損データごとの明示的エラー、未知キーの無視（将来は M3U8 も） |
 
 ## 3. Qt 統合テスト（pytest-qt、`QT_QPA_PLATFORM=offscreen`）
@@ -57,10 +57,13 @@
 | `QtMultimediaBackend` | Qt enum 写像の完全性（値が増えたら失敗する）、エラー変換、故障注入による変換失敗・再入ガード、状態通知の重複抑制、音を鳴らさない load・source差し替え・再ロード。所有する QMediaPlayer / QAudioOutput は `findChildren` で取得し、テストのために公開 API を増やさない |
 | `SingleInstanceService` | 同一プロセス内でサーバーとクライアントを往復させる |
 | `PlayerControls` | **FakeBackend + 実 PlaybackController** で、状態ごとのボタン活性、シーク（ドラッグ中の非同期更新の抑止、有効なpress/releaseでの1回だけのseek、source・duration変更による古い操作の取消）、音量・ミュートの往復とフィードバックループの不在を検証する。子ウィジェットは `objectName` で取得する |
-| `MainWindow` | `QFileDialog.getOpenFileName` を差し替え、キャンセル / 選択、ファイル名とタイトルの更新、`MediaStatus` とエラー表示（具体的エラーの優先、`detail` を出さないこと）、source解除、終了アクションを検証する |
+| `MainWindow` | `QFileDialog.getOpenFileName` を差し替え、キャンセル / 選択、ファイル名とタイトルの更新、`MediaStatus` とエラー表示（具体的エラーの優先、`detail` を出さないこと）、source解除、終了アクションを検証する。**設定アクションでダイアログが開くこと、二重に開かないこと、閉じた後に再度開けること、開き直しで最新設定が入ること、ダイアログの要求が調停サービス経由でControllerと各Panelへ届くこと、JSON・schema version・保存タイマーを持たないこと、復元済み表示設定をWindow表示前に反映すること、3つの可視化を個別にON/OFFできること、波形非表示中は位置追従を止め再表示で現在位置へ復帰すること**を検証する |
+| `app.py` の配線（設定） | AppSettingsControllerを保持しSettingsSessionと同じsnapshotを使うこと、保存済み表示設定をWindow表示前に反映すること、version 1設定から正常起動し起動だけでは書き換えないこと、初期読込で保存が走らないこと、設定ダイアログの変更がControllerと各Panelへ届くこと、終了時flushでversion 2として保存されること、設定保存失敗がプレイリスト保存と再生を妨げないこと、UI層が設定JSONを読み書きしないことを検証する |
 | `app.py` の配線 | Backend → Controller → PlaylistModel → 永続化サービス → MainWindow を組み立て、復元済みModelの前後曲可否をWindow構築時に反映できること。イベントループは起動しない。PcmTapを保持しBackendのQAudioBufferOutputへ接続されていること、SpectrumPanelが同じPcmTapを使うこと、**LevelMeterWidgetが1つでSpectrumPanel内にあり同じPcmTapを共有すること、mono／L／Rの3本が同じ固定容量であること、本番配線のPCM通知で3本が埋まること、MainWindowがLevelProcessorやリングバッファを持たないこと、UI層がQAudioBuffer系を参照しないこと**、SpectrumWidgetとWaveformWidgetが1つずつ共存すること、buildだけではタイマーを開始しないこと、source変更でPCMがclearされること、shutdownでタイマーとPCM受信が残らないこと、PlaybackBackend IF・FakeBackend・settings／playlist／波形cache schemaが不変であること |
 | `ShortcutManager` | 実QTestキー入力で全割当、auto repeat設定、相対値の境界、sourceなし、入力Widget・ボタンSpace・modalでの抑止、管理外のCtrl+O／Ctrl+Shift+O／Ctrl+C／Ctrl+Vの通過、QObject削除後の安全性を検証する |
-| `SettingsSession` | MainWindow構築前のController適用、build時未開始、start冪等、1.5秒相当のデバウンス、連続変更の最終snapshot、終了時flush、一時失敗後の1回自動再試行、破損時保存無効化、QObject削除時timer停止を検証する |
+| `SettingsSession` | MainWindow構築前のController適用、build時未開始、start冪等、1.5秒相当のデバウンス、連続変更の最終snapshot、終了時flush、一時失敗後の1回自動再試行、破損時保存無効化、QObject削除時timer停止を検証する。可視化設定の変更もデバウンス保存対象になること、復元した表示設定がstart前にsnapshotへ入り保存契機にならないこと、version 1ファイルが起動では書き換わらず次の変更でversion 2になることを検証する |
+| `AppSettingsController` | Controller現在値と可視化既定からの初期snapshot、applyでの差分適用と1回だけの通知、通知slot内でController実効値とsnapshotが一致すること、rate／pitch同時変更でも通知1回、Backendの実効読戻し採用、2つ目のsetter失敗時のrollbackと未適用snapshot・保存通知の抑止、同値applyでの無通知、表示ON/OFFだけの変更でControllerのsetterを呼ばないこと、SpeedPanel／ショートカット経由の変更をsnapshotへ取り込むこと（可視化設定を失わないこと）、不正値の拒否と既存設定の保持、shutdownの冪等性・監視解除・apply拒否を検証する |
+| `SettingsDialog` | objectName／accessibleName、速度入力の範囲・刻み・小数桁、OK／Cancel／Applyの存在、開いた時点の適用済み設定表示、編集だけでは要求しないこと、Applyで閉じずに要求すること、OKで要求して成功時だけ閉じること、調停側が成功通知しなければ適用済み扱いにせずエラーを表示すること、Cancel／EscがApply後の変更を戻さず未適用編集だけ破棄すること、同値Applyでも1回だけ要求すること、`set_settings`での再反映、開いたダイアログの再前面化で全入力の未適用編集を維持すること、プログラム経由の不正値を適用せず短いエラーを出すこと（不正・適用失敗のままOKで閉じないこと）、成功時のエラー消去、JSON・schema version・PlaybackControllerを参照しないこと、破棄後にcallbackを残さないことを検証する |
 | プレイリストの永続化ライフサイクル | 保存先の決定、ファイル未作成での空起動、順序・entry_id・重複行・日本語パス・欠損行の復元、並べ替え / 削除 / 全消去後の保存、読み書き I/O エラーのログ記録。**破損ファイルではクラッシュせず空で起動し、その起動の保存を無効化して既存ファイルを上書きしないこと** |
 | UI 層の依存 | `src/sdp/ui/` 配下を再帰走査し、`qt_backend` / `QMediaPlayer` / `QAudioOutput` / `QAudioBufferOutput` / `QAudioBuffer` / `QAudioDecoder` 自身またはその配下をimportしていないことを標準ライブラリの `ast` で検査する（親モジュール経由も完全修飾して判定し、新しい依存は追加しない） |
 | `MetadataReader` | 実ファイルに対する非同期完了、GUIスレッドでの反映、entry_id・token・path照合、削除・欠損・不適用結果のtoken回収、shutdown後の論理キャンセル、専用poolの並列上限。実行中の同期I/Oを強制停止できないことは協調的shutdownの制約として扱う |
@@ -73,6 +76,7 @@
 | `PcmTap` | sourceなし、有効buffer受信、sample rate公開と重複通知の抑制、リングバッファへのappendとmono化、**mono／L／R 3本への原子的append・format＋3配列を同一世代で返す統合snapshot・writer threadのformat切替途中を観測しないこと・`snapshot_mono`／`snapshot_stereo`・左右が混ざらないこと・mono入力の左右複製・channel count公開と重複通知の抑制・channel count変更での3本再構築・sample rate変更での3本再構築・source／stopでの3本clear・pauseでの3本保持・大量append後も3本の容量が固定・コールバック内でPeak／RMSを呼ばないこと**、sample rate変更でのclearと容量再構築、source変更／stopでのclear、pauseでの保持、無効buffer（終端の空buffer）の破棄と件数計上、未対応formatの無視、通常失敗と予期しない例外のログ間引き、コールバックから例外を漏らさないこと、PlaybackControllerを操作しないこと、FFT・QWidget・PlaylistModelを参照しないこと、QAudioBufferを保持しないこと、コールバック実行threadの記録、実QAudioBufferOutputでの接続／二重接続／切断、shutdownの冪等性と終端性（queue済み／直接入力の無視、再接続拒否）、破棄後のシグナルで落ちないこと。PCMは公開スロット `handle_audio_buffer` から注入する |
 | `SpectrumWidget` | objectName／accessibleName／minimumHeight／sizePolicy、初期プレースホルダー、empty／silence／96bandフレームの描画、resizeと幅0、bar数がband数とpixel幅以下であること、band毎の子Widgetを作らないこと、palette変更での再描画、db_floorの0以上／NaN／inf／bool拒否、clear_frameでの旧フレーム破棄、pause相当の再描画でのフレーム保持、マウス操作とフォーカスを持たないこと、破棄後の安全性。pixel完全一致は検証しない |
 | `LevelMeterWidget` | objectName／accessibleName／minimumHeight（70〜100px）／sizePolicy／NoFocus、初期プレースホルダー、状態文字がWidget内の1か所だけであること、無音フレーム・左右で異なるフレームの描画、RMSバー／Peak線／Peak hold線の本数、floor以下を描かないこと、LevelProcessor出力の描画、極端な幅・高さでのresize、palette変更での再描画、db_floorの変更と0以上／NaN／inf／boolの拒否、clear_frameでの旧レベル破棄、pause相当の再描画でのフレーム保持、チャンネルごとの子Widgetを作らないこと、マウス操作とフォーカスを持たないこと、破棄後の安全性。pixel完全一致は検証しない |
+| `SpectrumPanel`（表示ON/OFF） | 既定は両方表示であること、スペクトラム非表示でFFTとmono snapshotが止まりレベルは続くこと、レベル非表示でPeak／RMSとstereo snapshotが止まりスペクトラムは続くこと、非表示側へはframe数0でPCMを要求すること、両方非表示でタイマーが止まりPanelが畳まれてもPCMタップは受信を続けること、再表示で解析が再開すること、pause中・最小化中の表示ONではタイマーを開始しないこと、非表示だった実時間をPeak hold減衰へ加算しないこと、表示切替だけでは失敗状態を消さないこと、shutdown後の表示変更で再開しないことを検証する |
 | `SpectrumPanel` | ControllerとPcmTapだけを受け取ること、SpectrumWidgetとLevelMeterWidgetが1つずつ同一Panel内で共存すること、1tickで統合snapshot 1回・FFTとLevelが各最大1回、PLAYINGで両方更新（L／R一致・RMS≦Peak≦hold）、左右非対称PCMでのレベル差、PAUSEDで両方静止（Level計算も止まる）、STOPPED／source変更で両方即時clear、sample rate／channel count変更で両Processor reset（Peak hold破棄）、PCM到着前は両方プレースホルダー、hidden／最小化でFFTとLevelが止まり共有PCM受信は継続、**FFT失敗でもLevelが継続すること・Level失敗でもSpectrumが継続すること・両方失敗でだけタイマーが止まること・共通snapshot失敗で両方止まること・いずれもControllerへ何も要求せず再生を止めないこと**、Widgetが1つ、sourceなし／load直後／PAUSED／STOPPED／NO_MEDIAでタイマー停止、PLAYINGで開始、pausedでの最終フレーム保持とFFT停止、stop／PLAYINGを維持したsource変更でのフレーム即時reset、sample rate変更でのprocessor reset、1tickでsnapshot1回・FFT最大1回、Widgetのフレーム更新、PCM到着前はFFTしないこと、hidden／最小化でWidget固有タイマーを止めつつ共有PCM受信は継続すること、再表示／復帰での再開、再入防止、停止後の古いtimeoutの安全性、shutdown後はSignal・表示イベントでも再開・変更しない終端性、FFT失敗で再生を変更せずControllerへ何も要求しないこと、失敗後もsource変更で復帰できること、波形解析・PlaylistModel・cacheを参照しないこと。固定sleepを使わず状態変化とqtbotの待機で判定する |
 | スペクトラム・レベル性能 | 音声コールバック内でFFTもPeak／RMSも呼ばないこと、コールバックがリングバッファ追記だけで3本の容量を増やさないこと、リングバッファ合計メモリが固定であること、タイマー1tickで統合snapshot・FFT・Level計算が各1回を超えないこと、Peak＋RMSの所要時間の記録、連続更新中も別QTimerのGUI heartbeatが進むこと、幅を変えてもbar数が有界であること、コールバックとFFT＋band集約の所要時間の記録（**CIへ厳格な時間上限は設けない**） |
 | 可視化ウィジェットのライフサイクル | 表示 ON/OFF と最小化でWidget固有タイマーが停止し、共有PCMタップは固定容量で受信を継続すること（SPEC-04） |
@@ -277,7 +281,7 @@ P4-Aには表示Widgetがないため、ログと`%LOCALAPPDATA%\sdp\cache\wavef
 
 ## 6.10 P5-A 手動スモーク（PCMタップとリアルタイムスペクトラム）
 
-実画面・実マウス・実音で行う。自動テストでは代替できないため**リリース前ゲートとして残す**。
+実画面・実マウス・実音で行う。自動テストでは代替できない。**P5完了時に実施済み**。
 
 表示:
 
@@ -317,7 +321,7 @@ P4-Aには表示Widgetがないため、ログと`%LOCALAPPDATA%\sdp\cache\wavef
 
 ## 6.11 P5-B 手動スモーク（Peak／RMSレベルメーター）
 
-実画面・実音で行う。自動テストでは代替できないため**リリース前ゲートとして残す**。
+実画面・実音で行う。自動テストでは代替できない。**P5完了時に実施済み**。
 
 表示:
 
@@ -357,6 +361,26 @@ P4-Aには表示Widgetがないため、ログと`%LOCALAPPDATA%\sdp\cache\wavef
 PCMコールバック平均0.372ms／最大1.571ms、Peak＋RMS平均0.040ms、プロセスCPU 5.8%、
 RSSは60.9→65.5MBでt=30s以降横ばい、リングバッファ3本合計1,034KB固定、PCM破棄0件）。
 上記は「実際に目と耳で確認する」項目として残す。
+
+## 6.12 P6-A 手動スモーク（設定画面と可視化ON/OFF）
+
+実画面で行う。自動テストでは代替できないため**リリース前ゲートとして残す**。
+
+- [ ] 「ツール」→「設定...」で設定画面が開き、複数回開閉できる
+- [ ] 開いている状態でもう一度開くと、新しい窓ではなく前面へ出る
+- [ ] Applyで閉じずに反映され、OKで反映して閉じる
+- [ ] Apply後にCancelしても、適用済みの変更が戻らない
+- [ ] Applyしていない編集はCancel／Escで破棄される
+- [ ] 波形・スペクトラム・レベルメーターを個別にON/OFFできる
+- [ ] 3つすべてOFFでもプレイリストと再生操作が崩れない
+- [ ] 3つすべてONへ戻すと、現在再生中の曲へ追従して表示が再開する
+- [ ] 非表示にするとCPU負荷が下がる（タスクマネージャで目視）
+- [ ] 再起動後に設定（速度・ピッチ・表示ON/OFF）が復元される
+- [ ] 旧version 1の`settings.json`から正常起動し、可視化はすべて表示になる
+- [ ] version 1のファイルは起動しただけでは書き換わらず、設定変更後にversion 2になる
+- [ ] 破損した`settings.json`では既定値で起動し、元ファイルを上書きしない
+- [ ] 100%／可能なら150%表示倍率でダイアログが崩れない
+- [ ] Tab順が自然で、キーボードだけで操作でき、EscでCancelできる
 
 ## 7. 手動チェックリスト（リリース前）
 

@@ -4,6 +4,7 @@
 再生操作の細部は PlayerControls へ委譲する（god class にしない）。
 """
 
+import logging
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -22,13 +23,17 @@ from sdp.core.playback.types import MediaStatus, PlaybackError
 from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.services.pcm_tap import PcmTap
+from sdp.services.settings import AppSettings, AppSettingsController
 from sdp.services.waveform_analysis import WaveformAnalysisService
 from sdp.ui.player_controls import PlayerControls
 from sdp.ui.playlist_view import PlaylistView
+from sdp.ui.settings_dialog import SettingsDialog
 from sdp.ui.shortcuts import ShortcutManager
 from sdp.ui.spectrum_panel import SpectrumPanel
 from sdp.ui.speed_panel import SpeedPanel
 from sdp.ui.waveform_panel import WaveformPanel
+
+_logger = logging.getLogger(__name__)
 
 WINDOW_TITLE = "sdp"
 NO_FILE_TEXT = "ファイル未選択"
@@ -74,10 +79,13 @@ class MainWindow(QMainWindow):
         playlist_playback: PlaylistPlaybackController,
         waveform_analysis: WaveformAnalysisService,
         pcm_tap: PcmTap,
+        app_settings: AppSettingsController,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._controller = controller
+        self._app_settings = app_settings
+        self._settings_dialog: SettingsDialog | None = None
         self._has_current_source_error = False
 
         self.setWindowTitle(WINDOW_TITLE)
@@ -148,6 +156,10 @@ class MainWindow(QMainWindow):
             parent=self,
         )
 
+        # 復元済み設定を表示前に反映し、可視化が一瞬見えてから消えるのを防ぐ。
+        app_settings.settings_changed.connect(self._on_settings_changed)
+        self._apply_visualization_settings(app_settings.settings)
+
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("ファイル(&F)")
 
@@ -171,12 +183,42 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
+        tools_menu = self.menuBar().addMenu("ツール(&T)")
+        settings_action = QAction("設定...(&S)", self)
+        settings_action.setObjectName("openSettingsAction")
+        settings_action.triggered.connect(self.open_settings)
+        tools_menu.addAction(settings_action)
+
     # -- 操作 ---------------------------------------------------------------
 
     @property
     def spectrum_panel(self) -> SpectrumPanel:
         """終了処理でタイマーを止めるために composition root へ公開する。"""
         return self._spectrum_panel
+
+    @property
+    def waveform_panel(self) -> WaveformPanel:
+        """表示ON/OFFの検証のために公開する（Windowは配置だけを行う）。"""
+        return self._waveform_panel
+
+    @property
+    def settings_dialog(self) -> SettingsDialog | None:
+        """開いている設定ダイアログ（無ければ ``None``）。"""
+        return self._settings_dialog
+
+    def open_settings(self) -> None:
+        """設定ダイアログを開く。既に開いていれば前面へ出す（二重に開かない）。"""
+        dialog = self._settings_dialog
+        if dialog is not None:
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            return
+        dialog = SettingsDialog(self._app_settings.settings, self)
+        dialog.settings_requested.connect(self._on_settings_requested)
+        dialog.finished.connect(self._on_settings_dialog_finished)
+        self._settings_dialog = dialog
+        dialog.show()
 
     def show_status_message(self, message: str) -> None:
         """ステータスバーへ短いメッセージを表示する。"""
@@ -216,6 +258,45 @@ class MainWindow(QMainWindow):
         message = _MEDIA_STATUS_MESSAGES.get(status)
         if message is not None:
             self.statusBar().showMessage(message)
+
+    # -- 設定 ---------------------------------------------------------------
+
+    def _on_settings_requested(self, settings: object) -> None:
+        """ダイアログの適用要求を調停サービスへ渡すだけ（分岐も保存も持たない）。"""
+        if not isinstance(settings, AppSettings):
+            return
+        try:
+            self._app_settings.apply(settings)
+        except Exception:
+            # Qt slot境界から例外を漏らさず、ダイアログを閉じない。
+            _logger.exception("設定を適用できませんでした")
+            self.show_status_message("設定を適用できませんでした。")
+            dialog = self._settings_dialog
+            if dialog is not None:
+                dialog.show_apply_error()
+            return
+        dialog = self._settings_dialog
+        if dialog is not None:
+            dialog.mark_applied(self._app_settings.settings)
+
+    def _on_settings_dialog_finished(self, result: int) -> None:
+        del result
+        dialog = self._settings_dialog
+        self._settings_dialog = None
+        if dialog is not None:
+            dialog.deleteLater()
+
+    def _on_settings_changed(self, settings: object) -> None:
+        if isinstance(settings, AppSettings):
+            self._apply_visualization_settings(settings)
+
+    def _apply_visualization_settings(self, settings: AppSettings) -> None:
+        """可視化の表示ON/OFFを各Panelへ配る（解析停止は各Panelの責務）。"""
+        self._waveform_panel.setVisible(settings.waveform_visible)
+        self._spectrum_panel.set_spectrum_visible(settings.spectrum_visible)
+        self._spectrum_panel.set_level_meter_visible(settings.level_meter_visible)
+
+    # -- Controller からの通知（続き）---------------------------------------
 
     def _on_error_occurred(self, error: PlaybackError) -> None:
         # ユーザーへは message だけを見せる。detail は画面へ出さない。

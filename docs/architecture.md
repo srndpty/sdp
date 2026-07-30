@@ -1071,17 +1071,107 @@ Mutagen による非同期メタデータ取得と表示（P2-D）。
 
 ---
 
-## 9. 設定保存
+## 9. 設定保存と設定画面
 
-- P3-Bの保存先は`%LOCALAPPDATA%\sdp\settings.json`。schema version 1では
-  `playback_rate`と`pitch_compensation`だけを保存する。音量、mute、repeat、shuffle、
-  現在曲、再生位置、ウィンドウ状態などはP3-Bの対象外で、暗黙に保存しない。
+### 9.1 保存する設定と schema（P3-B / P6-A）
+
+- 保存先は`%LOCALAPPDATA%\sdp\settings.json`。**現在の schema version は 2**。
+  保存するのは次の5項目だけで、音量、mute、repeat、shuffle、現在曲、再生位置、
+  ウィンドウ状態などは暗黙に保存しない（ウィンドウ状態はP6-Bの対象）。
+
+  | キー | 追加 | 内容 |
+  |---|---|---|
+  | `playback_rate` | v1 | 0.50〜2.00 の再生速度 |
+  | `pitch_compensation` | v1 | ピッチ補正のON/OFF |
+  | `waveform_visible` | v2 | 波形の表示ON/OFF |
+  | `spectrum_visible` | v2 | スペクトラムの表示ON/OFF |
+  | `level_meter_visible` | v2 | Peak／RMSレベルメーターの表示ON/OFF |
+
+- 可視化の色、バンド数、FPS、窓長、Peak hold時間・減衰速度、ショートカット、
+  再生デバイス、キャッシュ容量は**保存対象へ入れない**（P6後半以降）。
 - Qt非依存の`AppSettings`と純粋なload／saveを`services/settings.py`へ置く。
   UI範囲外、NaN／inf、型不一致、非UTF-8、不正JSON、未知versionは復元エラーとする。
-- 読み込み時は未知のキーを無視し、欠落キーは既定値で補う。
-  実際の旧バージョンが生まれるまで migration を作り込まない（[AGENTS.md](../AGENTS.md) の方針）。
+  bool欄は`0`／`1`／文字列を受理しない。
+- 読み込み時は未知のキーを無視し、**欠落した既知キーは既定値で補い、値が不正な
+  既知キーは明示的に失敗させる**（両者を同じ扱いにしない）。
+
+### 9.2 schema version 1 → 2 の移行
+
+- **version 1 と 2 の両方を有効な入力として読み込む。** version 1 には可視化設定が
+  ないため、3項目とも既定値（表示ON）で補う。v1文書に同名のv2キーが混入していても
+  未知キーとして無視し、値の検証や復元には使わない。
+- **読み込みだけではファイルを書き換えない。** version 1 で起動しても、次に
+  設定が変わって通常の保存契機が来たときに初めて version 2 として保存する。
+- 未知の将来versionは version 2 として上書きせず、復元エラーとして扱う
+  （その起動では保存を無効化し、元ファイルを保護する）。
+
+### 9.3 適用の調停（AppSettingsController）
+
+`services/settings.py`。適用済み設定のsnapshotを1か所で持つ小さなQObject。
+
+- `apply(settings)` は検証してから**差分のある項目だけ**Controllerへ適用する。適用中の
+  Controller echoは集約し、全setter成功後に実効値を読み戻してsnapshotを1回だけ公開する。
+  途中で失敗した場合はControllerを直前値へ可能な限り戻し、未適用snapshotを公開・保存しない。
+  同値なら通知しない。
+- 再生速度とピッチ補正は`PlaybackController`へ適用する。可視化の表示ON/OFFは
+  `settings_changed` で公開するだけで、**どのWidgetをどう隠すかは知らない**。
+- SpeedPanelやショートカット経由でControllerが直接変更された場合もsnapshotへ
+  追従させ、保存対象を1か所に保つ（可視化設定は再生操作で失われない）。
+- shutdownは終端操作とし、以後のController通知を無視して`apply()`も拒否する。
+- JSON読み書き、QDialog、Backend具体型、PCM解析、FFT／レベル計算、プレイリスト操作は
+  持たない。`SettingsSession`はこのsnapshotだけを見て保存する。
+
+### 9.4 設定ダイアログ（P6-A）
+
+`ui/settings_dialog.py`。`QDialog` + `QDialogButtonBox`（OK / キャンセル / 適用）。
+objectNameは`settingsDialog`、各入力は`settingsPlaybackRateSpinBox`、
+`settingsPitchCompensationCheckBox`、`settingsWaveformVisibleCheckBox`、
+`settingsSpectrumVisibleCheckBox`、`settingsLevelMeterVisibleCheckBox`。
+
+| 操作 | 意味 |
+|---|---|
+| 開いた時点 | 現在の**適用済み設定snapshot**を各入力へ反映する |
+| Apply | 検証 → 適用要求 → **成功通知後だけ**適用済みsnapshot更新。閉じない |
+| OK | Applyと同じ処理が成功した場合だけ閉じる。失敗時は入力を維持してエラー表示 |
+| Cancel / Esc | **Apply後の変更は戻さず**、未適用の編集だけを破棄して閉じる |
+
+- ダイアログは設定ファイルもschema versionもPlaybackControllerも知らない。
+  `settings_requested` で要求を出し、MainWindowから`mark_applied`／`show_apply_error`で
+  結果だけを受け取る。適用そのものは調停サービスが行う。
+- 通常操作ではWidget制約により不正値にならないが、プログラム経由で不正値が入った
+  場合は適用せず、ダイアログ内へ短いエラーを表示する（例外を外へ漏らさない）。
+  不正なままOKしても閉じない。
+- MainWindowはツールメニューの「設定...」でダイアログを開き、**同時に2つ開かない**
+  （開いていれば入力を再設定せず前面へ出し、未適用編集を維持する）。開いている間の
+  外部設定変更は編集中入力へ自動反映しない。JSON処理、schema version分岐、保存タイマー、
+  設定項目ごとの巨大な分岐はMainWindowへ持ち込まない。
+
+### 9.5 可視化の表示ON/OFF（P6-A）
+
+**隠すだけでなく、その可視化固有の解析を止める。** ただし共有PCMタップは停止も
+切断もしない（複数の可視化が共用しているため。§6.10 / SPEC-04と同じ方針）。
+
+| 設定 | 非表示時の挙動 |
+|---|---|
+| `waveform_visible` | `WaveformPanel`を隠し、**位置追従の描画更新を止める**。解析結果とキャッシュは捨てず、バックグラウンド解析の可否は既存契約のまま。再表示時に現在sourceの位置・長さへ復帰する（非表示中のsource変更でも旧sourceを表示しない） |
+| `spectrum_visible` | `SpectrumWidget`を隠し、**mono snapshotとFFTを行わない**（frame数0で要求し、コピーもしない）。平滑化履歴と旧フレームは破棄する |
+| `level_meter_visible` | `LevelMeterWidget`を隠し、**L／R snapshotとPeak／RMSを行わない**。Peak holdも破棄する |
+| 両方OFF | `SpectrumPanel`ごと畳み、**タイマーを停止**する。PCMタップは固定容量bufferへの受信を継続する |
+
+- 再表示時は最新PCMから表示を再開する。**非表示だった実時間はPeak holdの減衰へ
+  加算しない**（タイマー停止時に経過時間の時計を無効化する）。
+- 非表示→再表示だけでは解析の失敗状態を消さない（復帰はsource変更・format変更のまま）。
+  非表示中は解析しないため、新たな失敗もログも生まれない。
+
+### 9.6 起動と保存のライフサイクル
+
+- 順序は「設定読込 → `AppSettings`生成 → Controllerへ速度・ピッチ適用 →
+  MainWindow構築 → **可視化表示設定の適用** → Window表示 → 監視開始」。
+  可視化が一瞬見えてから消えるフリッカーを避けるため、表示設定はWindow表示**前**に反映する。
 - `build_player()`はMainWindow構築前に設定をControllerへ適用し、構築だけでは監視を開始しない。
+  **起動時の適用をユーザー変更として保存しない。**
   `run()`が全構築後に監視を開始し、変更から1.5秒のデバウンスと正常終了時のflushで保存する。
+  変更がないApplyではファイルを書き換えない。
 - 書き込みは同一ディレクトリの一時ファイルへUTF-8で書き、flush／fsync後に`os.replace`で
   アトミックに置き換える。復元失敗時は既定値で起動して通知し、その起動では設定保存を
   無効化して破損ファイルを保護する。設定とプレイリストの障害・保存可否は互いに独立し、

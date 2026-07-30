@@ -20,7 +20,7 @@ from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.services import logging_setup
 from sdp.services.pcm_tap import PcmTap
 from sdp.services.playlist_session import PlaylistSession, default_playlist_path
-from sdp.services.settings import SettingsSession
+from sdp.services.settings import AppSettingsController, SettingsSession
 from sdp.services.user_paths import default_settings_path, default_waveform_cache_directory
 from sdp.services.waveform_analysis import WaveformAnalysisService
 from sdp.ui.main_window import MainWindow
@@ -48,6 +48,7 @@ class PlayerComposition:
     metadata_reader: MetadataReader
     waveform_analysis: WaveformAnalysisService
     pcm_tap: PcmTap
+    app_settings: AppSettingsController
     window: MainWindow
 
 
@@ -68,9 +69,12 @@ def build_player(
     """
     backend = QtMultimediaBackend()
     controller = PlaybackController(backend)
+    # 設定の適用先はControllerと可視化の2系統。調停はAppSettingsControllerが持ち、
+    # SettingsSessionはファイル復元とデバウンス保存だけを担う。
+    app_settings = AppSettingsController(controller)
     settings_session = SettingsSession(
         default_settings_path() if settings_file is None else settings_file,
-        controller,
+        app_settings,
     )
     settings_restore_message = settings_session.load()
     playlist_model = PlaylistModel()
@@ -89,12 +93,14 @@ def build_player(
     # QAudioBufferOutput を知る（PlaybackBackend の契約には含めない）。
     pcm_tap = PcmTap(controller)
     pcm_tap.connect_audio_buffer_output(backend.audio_buffer_output)
+    # MainWindowは復元済み設定を表示前に反映する（可視化のフリッカーを避ける）。
     window = MainWindow(
         controller,
         playlist_model,
         playlist_playback,
         waveform_analysis,
         pcm_tap,
+        app_settings,
     )
     restore_messages = [
         message for message in (restore_message, settings_restore_message) if message is not None
@@ -111,6 +117,7 @@ def build_player(
         metadata_reader=metadata_reader,
         waveform_analysis=waveform_analysis,
         pcm_tap=pcm_tap,
+        app_settings=app_settings,
         window=window,
     )
 
@@ -157,4 +164,5 @@ def run(argv: list[str] | None = None) -> int:
     composition.settings_session.flush()
     composition.playlist_session.save_from(composition.playlist_model)
     composition.settings_session.stop()
+    composition.app_settings.shutdown()
     return exit_code
