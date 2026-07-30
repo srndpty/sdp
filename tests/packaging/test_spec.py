@@ -53,3 +53,6 @@ def test_spec_collects_metadata_and_only_declared_resources() -> None:
     assert "collect_all" not in source
     assert "test_audio" not in source
     assert "assets" not in source
+    assert "if missing:" in source
+    assert "必須ライセンスファイルを検出できません" in source
+    assert "if not python_license.is_file():" in source

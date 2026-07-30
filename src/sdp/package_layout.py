@@ -29,7 +29,20 @@ def validate_package_layout(package_directory: Path) -> tuple[str, ...]:
         "Qt Network": "Qt6Network.dll",
         "Qt Multimedia": "Qt6Multimedia.dll",
         "Qt platform plugin": "qwindows.dll",
+        "Qt FFmpeg media plugin": "ffmpegmediaplugin.dll",
+        "Qt Windows media plugin": "windowsmediaplugin.dll",
+        "FFmpeg avcodec": "avcodec-*.dll",
+        "FFmpeg avformat": "avformat-*.dll",
+        "FFmpeg avutil": "avutil-*.dll",
+        "FFmpeg swresample": "swresample-*.dll",
         "Visual C++ Runtime": "VCRUNTIME*.dll",
+        "sdp license": "LICENSE",
+        "third-party notices": "THIRD_PARTY_NOTICES.txt",
+        "Python license": "licenses/Python/LICENSE.txt",
+        "PySide6 license notice": "licenses/PySide6/LicenseRef-Qt-Commercial.txt",
+        "NumPy license": "licenses/numpy/LICENSE.txt",
+        "Mutagen license": "licenses/mutagen/COPYING",
+        "PyInstaller bootloader license": "licenses/pyinstaller/COPYING.txt",
     }
     for label, pattern in required_patterns.items():
         if not any(root.rglob(pattern)):

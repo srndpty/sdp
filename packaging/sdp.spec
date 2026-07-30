@@ -12,7 +12,7 @@ REPO_ROOT = Path(SPECPATH).resolve().parent
 ENTRY_SCRIPT = REPO_ROOT / "src" / "sdp" / "__main__.py"
 
 
-def license_files(distribution_name, target_name):
+def license_files(distribution_name, target_name, required_names):
     """インストール済みwheelが提供するライセンス原文を収集する。"""
     package = distribution(distribution_name)
     collected = []
@@ -25,29 +25,38 @@ def license_files(distribution_name, target_name):
         collected.append(
             (str(Path(package.locate_file(item)).resolve()), f"licenses/{target_name}/{Path(relative).parent}")
         )
+    collected_names = {Path(source).name for source, _destination in collected}
+    missing = set(required_names) - collected_names
+    if missing:
+        raise RuntimeError(
+            f"{distribution_name}の必須ライセンスファイルを検出できません: {sorted(missing)}"
+        )
     return collected
 
 
 datas = copy_metadata("sdp")
-datas += [
-    (str(REPO_ROOT / "LICENSE"), "."),
-    (str(REPO_ROOT / "THIRD_PARTY_NOTICES.txt"), "."),
-]
+project_documents = (REPO_ROOT / "LICENSE", REPO_ROOT / "THIRD_PARTY_NOTICES.txt")
+for document in project_documents:
+    if not document.is_file():
+        raise RuntimeError(f"配布用文書がありません: {document.name}")
+    datas.append((str(document), "."))
 
-for package_name in (
-    "PySide6",
-    "PySide6-Essentials",
-    "PySide6-Addons",
-    "shiboken6",
-    "numpy",
-    "mutagen",
-    "pyinstaller",
-):
-    datas += license_files(package_name, package_name)
+required_licenses = {
+    "PySide6": {"LicenseRef-Qt-Commercial.txt"},
+    "PySide6-Essentials": {"LicenseRef-Qt-Commercial.txt"},
+    "PySide6-Addons": {"LicenseRef-Qt-Commercial.txt"},
+    "shiboken6": {"LicenseRef-Qt-Commercial.txt"},
+    "numpy": {"LICENSE.txt"},
+    "mutagen": {"COPYING"},
+    "pyinstaller": {"COPYING.txt"},
+}
+for package_name, required_names in required_licenses.items():
+    datas += license_files(package_name, package_name, required_names)
 
 python_license = Path(sys.base_prefix) / "LICENSE.txt"
-if python_license.is_file():
-    datas.append((str(python_license), "licenses/Python"))
+if not python_license.is_file():
+    raise RuntimeError("PythonのLICENSE.txtを検出できません")
+datas.append((str(python_license), "licenses/Python"))
 
 
 analysis = Analysis(
