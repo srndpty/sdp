@@ -479,9 +479,12 @@ def test_corrupted_playlist_does_not_disable_settings_saving(
     assert composition.playlist_session.is_save_enabled is False
     assert composition.settings_session.flush() is True
     assert json.loads(settings_file.read_text(encoding="utf-8")) == {
-        "schema_version": 1,
+        "schema_version": 2,
         "playback_rate": 1.2,
         "pitch_compensation": False,
+        "waveform_visible": True,
+        "spectrum_visible": True,
+        "level_meter_visible": True,
     }
 
 
@@ -997,7 +1000,16 @@ def test_visualization_schemas_are_unchanged(
     settings_document = json.loads(settings_file.read_text(encoding="utf-8"))
 
     assert set(playlist_document) == {"schema_version", "entries"}
-    assert set(settings_document) == {"schema_version", "playback_rate", "pitch_compensation"}
+    # 可視化の表示ON/OFFはP6-Aで設定schemaへ追加した。色・バンド数・FPS・
+    # Peak hold時間は追加していない。
+    assert set(settings_document) == {
+        "schema_version",
+        "playback_rate",
+        "pitch_compensation",
+        "waveform_visible",
+        "spectrum_visible",
+        "level_meter_visible",
+    }
 
     from sdp.core.analysis import waveform_cache
 

@@ -1,4 +1,4 @@
-"""settings.jsonのQt非依存なschema・検証・アトミック保存を検証する。"""
+"""settings.jsonのQt非依存なschema・検証・移行・アトミック保存を検証する。"""
 
 import json
 import math
@@ -13,6 +13,7 @@ from sdp.services.settings import (
     SettingsFileError,
     load_settings,
     save_settings,
+    validate_settings,
 )
 
 DEFAULTS = AppSettings(playback_rate=1.0, pitch_compensation=True)
@@ -22,11 +23,26 @@ def write_document(path: Path, document: object) -> None:
     path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
 
 
-def test_app_settings_is_immutable_and_has_only_two_fields() -> None:
-    """保存対象は速度とピッチ補正だけの不変値。"""
+def test_app_settings_is_immutable_and_holds_playback_and_visibility() -> None:
+    """保存対象は再生設定と可視化の表示ON/OFFだけの不変値。"""
     with pytest.raises(FrozenInstanceError):
         DEFAULTS.playback_rate = 1.5  # type: ignore[misc]
-    assert AppSettings.__match_args__ == ("playback_rate", "pitch_compensation")
+    assert AppSettings.__match_args__ == (
+        "playback_rate",
+        "pitch_compensation",
+        "waveform_visible",
+        "spectrum_visible",
+        "level_meter_visible",
+    )
+
+
+def test_visualization_defaults_to_visible() -> None:
+    """可視化の既定はすべて表示ON（旧versionからの補完値と一致する）。"""
+    settings = AppSettings(playback_rate=1.0, pitch_compensation=True)
+
+    assert settings.waveform_visible is True
+    assert settings.spectrum_visible is True
+    assert settings.level_meter_visible is True
 
 
 def test_missing_file_returns_controller_defaults(tmp_path: Path) -> None:
@@ -43,8 +59,15 @@ def test_round_trip_uses_utf8_and_only_settings_fields(tmp_path: Path) -> None:
 
     assert load_settings(path, DEFAULTS) == expected
     document = json.loads(path.read_text(encoding="utf-8"))
-    assert set(document) == {"schema_version", "playback_rate", "pitch_compensation"}
-    assert document["schema_version"] == SETTINGS_SCHEMA_VERSION
+    assert set(document) == {
+        "schema_version",
+        "playback_rate",
+        "pitch_compensation",
+        "waveform_visible",
+        "spectrum_visible",
+        "level_meter_visible",
+    }
+    assert document["schema_version"] == SETTINGS_SCHEMA_VERSION == 2
 
 
 def test_integer_rate_is_restored_as_float(tmp_path: Path) -> None:
@@ -89,9 +112,9 @@ def test_missing_known_keys_use_defaults(
     assert load_settings(path, DEFAULTS) == expected
 
 
-@pytest.mark.parametrize("version", [None, True, 1.0, "1", 2])
-def test_schema_version_requires_exact_integer_one(tmp_path: Path, version: object) -> None:
-    """versionはbool・float・文字列・欠落・未知値を拒否する。"""
+@pytest.mark.parametrize("version", [None, True, 1.0, "1", 0, 3, 99])
+def test_schema_version_requires_a_supported_integer(tmp_path: Path, version: object) -> None:
+    """versionはbool・float・文字列・欠落・未知値を拒否する（1と2だけ許可）。"""
     path = tmp_path / "settings.json"
     document: dict[str, object] = {
         "playback_rate": 1.0,
@@ -102,6 +125,122 @@ def test_schema_version_requires_exact_integer_one(tmp_path: Path, version: obje
     write_document(path, document)
     with pytest.raises(SettingsFileError, match="schema_version"):
         load_settings(path, DEFAULTS)
+
+
+# -- schema version 1 → 2 の移行 --------------------------------------------
+
+
+def test_version_one_fills_visualization_defaults(tmp_path: Path) -> None:
+    """可視化設定を持たないversion 1は、表示ONで補って読み込める。"""
+    path = tmp_path / "settings.json"
+    write_document(
+        path,
+        {"schema_version": 1, "playback_rate": 1.25, "pitch_compensation": False},
+    )
+
+    settings = load_settings(path, DEFAULTS)
+
+    assert settings == AppSettings(
+        playback_rate=1.25,
+        pitch_compensation=False,
+        waveform_visible=True,
+        spectrum_visible=True,
+        level_meter_visible=True,
+    )
+
+
+def test_loading_version_one_does_not_rewrite_the_file(tmp_path: Path) -> None:
+    """読み込みだけではversion 1のファイルを書き換えない。"""
+    path = tmp_path / "settings.json"
+    write_document(
+        path,
+        {"schema_version": 1, "playback_rate": 1.5, "pitch_compensation": True},
+    )
+    original = path.read_bytes()
+
+    load_settings(path, DEFAULTS)
+    load_settings(path, DEFAULTS)
+
+    assert path.read_bytes() == original
+
+
+def test_saving_after_a_version_one_load_writes_version_two(tmp_path: Path) -> None:
+    """変更後の保存はversion 2になり、可視化設定も含まれる。"""
+    path = tmp_path / "settings.json"
+    write_document(
+        path,
+        {"schema_version": 1, "playback_rate": 1.5, "pitch_compensation": True},
+    )
+    restored = load_settings(path, DEFAULTS)
+
+    save_settings(path, AppSettings(restored.playback_rate, restored.pitch_compensation, False))
+
+    document = json.loads(path.read_text(encoding="utf-8"))
+    assert document["schema_version"] == 2
+    assert document["waveform_visible"] is False
+    assert document["spectrum_visible"] is True
+    assert load_settings(path, DEFAULTS).waveform_visible is False
+
+
+def test_version_two_round_trip_keeps_every_visualization_flag(tmp_path: Path) -> None:
+    """version 2は3つの表示設定を独立に往復できる。"""
+    path = tmp_path / "settings.json"
+    expected = AppSettings(
+        playback_rate=0.75,
+        pitch_compensation=False,
+        waveform_visible=False,
+        spectrum_visible=True,
+        level_meter_visible=False,
+    )
+
+    save_settings(path, expected)
+
+    assert load_settings(path, DEFAULTS) == expected
+
+
+@pytest.mark.parametrize("name", ["waveform_visible", "spectrum_visible", "level_meter_visible"])
+@pytest.mark.parametrize("value", [0, 1, "true", None, [], 1.0])
+def test_visualization_flags_require_exact_bool(tmp_path: Path, name: str, value: object) -> None:
+    """表示設定も0／1／文字列を受理せず、厳密なboolだけを許可する。"""
+    path = tmp_path / "settings.json"
+    document: dict[str, object] = {
+        "schema_version": 2,
+        "playback_rate": 1.0,
+        "pitch_compensation": True,
+        name: value,
+    }
+    write_document(path, document)
+
+    with pytest.raises(SettingsFileError, match=name):
+        load_settings(path, DEFAULTS)
+
+
+@pytest.mark.parametrize("name", ["waveform_visible", "spectrum_visible", "level_meter_visible"])
+def test_missing_visualization_flags_use_defaults(tmp_path: Path, name: str) -> None:
+    """version 2で個別キーが欠落しても、既定値で補う（失敗にしない）。"""
+    path = tmp_path / "settings.json"
+    document: dict[str, object] = {
+        "schema_version": 2,
+        "playback_rate": 1.0,
+        "pitch_compensation": True,
+        "waveform_visible": False,
+        "spectrum_visible": False,
+        "level_meter_visible": False,
+    }
+    del document[name]
+    write_document(path, document)
+
+    settings = load_settings(path, DEFAULTS)
+
+    assert getattr(settings, name) is True
+
+
+def test_validate_settings_rejects_non_bool_visibility() -> None:
+    """適用前検証でも表示設定のboolを厳密に扱う。"""
+    validate_settings(DEFAULTS)
+
+    with pytest.raises(ValueError, match="spectrum_visible"):
+        validate_settings(AppSettings(1.0, True, True, 1, True))  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

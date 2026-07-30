@@ -1,4 +1,9 @@
-"""再生速度とピッチ補正の設定ファイル、および保存ライフサイクル。"""
+"""再生設定・可視化表示設定の設定ファイル、および保存ライフサイクル。
+
+- 設定の検証・JSON変換・schema移行はQt非依存な関数として置く。
+- :class:`SettingsSession` が復元とデバウンス保存を担う。
+- この層からUI（QWidget）とBackendの具体型は参照しない。
+"""
 
 import json
 import logging
@@ -16,7 +21,12 @@ from sdp.core.playback.preferences import MAX_PLAYBACK_RATE, MIN_PLAYBACK_RATE
 
 _logger = logging.getLogger(__name__)
 
-SETTINGS_SCHEMA_VERSION = 1
+SETTINGS_SCHEMA_VERSION = 2
+"""現在のschema version。version 1（可視化設定なし）も読み込める。"""
+
+SUPPORTED_SETTINGS_SCHEMA_VERSIONS = (1, 2)
+"""読み込みを許可するschema version。未知のversionは既定値へ丸めず失敗させる。"""
+
 DEFAULT_DEBOUNCE_MS = 1_500
 DEFAULT_RETRY_MS = 5_000
 RESTORE_FAILED_MESSAGE = "設定の復元に失敗しました。既定値で起動します。"
@@ -28,14 +38,28 @@ class SettingsFileError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class AppSettings:
-    """今回永続化する再生設定。"""
+    """永続化する設定一式（再生と可視化の表示ON/OFF）。
+
+    可視化の色・バンド数・FPS・Peak hold時間などは保存対象に含めない（P6-A範囲外）。
+    """
 
     playback_rate: float
     pitch_compensation: bool
+    waveform_visible: bool = True
+    spectrum_visible: bool = True
+    level_meter_visible: bool = True
+
+
+_VISIBILITY_FIELDS = ("waveform_visible", "spectrum_visible", "level_meter_visible")
 
 
 def load_settings(file_path: Path, defaults: AppSettings) -> AppSettings:
-    """設定を読み込む。未作成ならController由来の既定値をそのまま返す。"""
+    """設定を読み込む。未作成ならアプリ既定値をそのまま返す。
+
+    schema version 1 には可視化設定が存在しないため、``defaults`` の値
+    （通常はすべて表示ON）で補う。**読み込みだけでファイルは書き換えない。**
+    欠落した既知キーは既定値で補い、値が不正な既知キーは明示的に失敗させる。
+    """
     try:
         text = file_path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -51,25 +75,33 @@ def load_settings(file_path: Path, defaults: AppSettings) -> AppSettings:
     document = cast("dict[str, object]", parsed)
 
     version = document.get("schema_version")
-    if type(version) is not int or version != SETTINGS_SCHEMA_VERSION:
+    if type(version) is not int or version not in SUPPORTED_SETTINGS_SCHEMA_VERSIONS:
         raise SettingsFileError(
-            f"未対応の設定schema_versionです（期待 {SETTINGS_SCHEMA_VERSION}、実際 {version!r}）"
+            "未対応の設定schema_versionです"
+            f"（対応 {list(SUPPORTED_SETTINGS_SCHEMA_VERSIONS)}、実際 {version!r}）"
         )
 
     rate = _rate_from_json(document.get("playback_rate", defaults.playback_rate))
-    pitch = document.get("pitch_compensation", defaults.pitch_compensation)
-    if type(pitch) is not bool:
-        raise SettingsFileError(f"pitch_compensationがboolではありません: {pitch!r}")
-    return AppSettings(playback_rate=rate, pitch_compensation=pitch)
+    pitch = _bool_from_json(
+        "pitch_compensation", document.get("pitch_compensation", defaults.pitch_compensation)
+    )
+    visibility = {
+        name: _bool_from_json(name, document.get(name, getattr(defaults, name)))
+        for name in _VISIBILITY_FIELDS
+    }
+    return AppSettings(playback_rate=rate, pitch_compensation=pitch, **visibility)
 
 
 def save_settings(file_path: Path, settings: AppSettings) -> None:
     """検証済み設定を同一ディレクトリの一時ファイル経由でアトミック保存する。"""
-    _validate_settings_for_save(settings)
+    validate_settings(settings)
     document: dict[str, Any] = {
         "schema_version": SETTINGS_SCHEMA_VERSION,
         "playback_rate": float(settings.playback_rate),
         "pitch_compensation": settings.pitch_compensation,
+        "waveform_visible": settings.waveform_visible,
+        "spectrum_visible": settings.spectrum_visible,
+        "level_meter_visible": settings.level_meter_visible,
     }
     # 検証に成功するまでディレクトリも一時ファイルも作らない。
     file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -98,15 +130,23 @@ def _rate_from_json(value: object) -> float:
     return rate
 
 
-def _validate_settings_for_save(settings: AppSettings) -> None:
+def _bool_from_json(name: str, value: object) -> bool:
+    # 0／1／"true" を受理しない（bool欄は厳密に判定する）。
+    if type(value) is not bool:
+        raise SettingsFileError(f"{name}がboolではありません: {value!r}")
+    return value
+
+
+def validate_settings(settings: AppSettings) -> None:
+    """保存・適用の前に値域と型を検証する（不正なら :class:`ValueError`）。"""
     try:
         _rate_from_json(settings.playback_rate)
     except SettingsFileError as error:
         raise ValueError(str(error)) from error
-    if type(settings.pitch_compensation) is not bool:
-        raise ValueError(
-            f"pitch_compensationはboolで指定してください: {settings.pitch_compensation!r}"
-        )
+    for name in ("pitch_compensation", *_VISIBILITY_FIELDS):
+        value: object = getattr(settings, name)
+        if type(value) is not bool:
+            raise ValueError(f"{name}はboolで指定してください: {value!r}")
 
 
 class SettingsSession(QObject):
