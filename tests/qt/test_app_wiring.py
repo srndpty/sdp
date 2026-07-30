@@ -45,6 +45,23 @@ from sdp.services.settings import (
     SettingsSession,
     save_settings,
 )
+from sdp.services.ui_state import (
+    MINIMUM_SPLITTER_SIZE,
+    SplitterState,
+    UiState,
+    WindowState,
+    load_ui_state,
+    save_ui_state,
+)
+from sdp.services.ui_state import (
+    RESTORE_FAILED_MESSAGE as UI_STATE_RESTORE_FAILED_MESSAGE,
+)
+from sdp.services.ui_state_session import UiStateSession
+from sdp.services.user_paths import (
+    app_data_directory,
+    default_settings_path,
+    default_ui_state_path,
+)
 from sdp.services.waveform_analysis import WaveformAnalysisService
 from sdp.ui.level_meter_widget import NO_SOURCE_MESSAGE as LEVEL_NO_SOURCE_MESSAGE
 from sdp.ui.level_meter_widget import LevelMeterWidget
@@ -74,14 +91,21 @@ def waveform_cache_directory(tmp_path: Path) -> Path:
     return tmp_path / "waveform-cache"
 
 
+@pytest.fixture
+def ui_state_file(tmp_path: Path) -> Path:
+    return tmp_path / "ui-state.json"
+
+
 @pytest.fixture(autouse=True)
 def isolate_user_data_paths(
     settings_file: Path,
     waveform_cache_directory: Path,
+    ui_state_file: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """各テストが実ユーザーの設定・cacheを読み書きしないよう隔離する。"""
+    """各テストが実ユーザーの設定・UI状態・cacheを読み書きしないよう隔離する。"""
     monkeypatch.setattr(app_module, "default_settings_path", lambda: settings_file)
+    monkeypatch.setattr(app_module, "default_ui_state_path", lambda: ui_state_file)
     monkeypatch.setattr(
         app_module,
         "default_waveform_cache_directory",
@@ -94,9 +118,12 @@ def composition(
     playlist_file: Path,
     settings_file: Path,
     waveform_cache_directory: Path,
+    ui_state_file: Path,
     qtbot: QtBot,
 ) -> Iterator[app_module.PlayerComposition]:
-    built = app_module.build_player(playlist_file, settings_file, waveform_cache_directory)
+    built = app_module.build_player(
+        playlist_file, settings_file, waveform_cache_directory, ui_state_file
+    )
     qtbot.addWidget(built.window)
     yield built
 
@@ -1160,4 +1187,269 @@ def test_ui_layer_does_not_read_the_settings_file() -> None:
 
     for module in (main_window_module, settings_dialog_module):
         for forbidden in ("load_settings", "save_settings", "SettingsSession", "json"):
+            assert not hasattr(module, forbidden), f"{module.__name__}: {forbidden}"
+
+
+# -- UI状態の配線（P6-B）----------------------------------------------------
+
+
+def test_composition_holds_the_ui_state_session(
+    composition: app_module.PlayerComposition, ui_state_file: Path
+) -> None:
+    """UiStateSessionを保持し、build時点では監視を始めない。"""
+    session = composition.ui_state_session
+    assert isinstance(session, UiStateSession)
+    assert session.file_path == ui_state_file
+    assert session.is_running is False
+    assert session.is_save_enabled is True
+
+
+def test_default_ui_state_path_is_in_the_app_data_directory() -> None:
+    """既定の保存先は``%LOCALAPPDATA%\\sdp\\ui-state.json``。"""
+    path = default_ui_state_path()
+
+    assert path.name == "ui-state.json"
+    assert path.parent == app_data_directory()
+    assert path != default_settings_path()
+
+
+def test_ui_state_is_restored_before_the_window_is_shown(
+    playlist_file: Path, settings_file: Path, ui_state_file: Path, qtbot: QtBot
+) -> None:
+    """保存済みのgeometryと前回フォルダーは、表示前に適用される。"""
+    save_ui_state(
+        ui_state_file,
+        UiState(
+            window=WindowState(x=160, y=120, width=1100, height=760, maximized=False),
+            main_splitter=SplitterState(500, 300),
+            last_open_directory=Path("C:\\Music"),
+        ),
+    )
+
+    composition = app_module.build_player(playlist_file, settings_file, ui_state_file=ui_state_file)
+    qtbot.addWidget(composition.window)
+    window = composition.window
+
+    assert not window.isVisible()
+    assert window.geometry().x() == 160
+    assert window.geometry().y() == 120
+    assert window.last_open_directory == Path("C:\\Music")
+
+
+def test_splitter_is_restored_after_the_visualization_settings(
+    playlist_file: Path, settings_file: Path, ui_state_file: Path, qtbot: QtBot
+) -> None:
+    """可視化の表示設定を適用したあとでSplitterを復元する。"""
+    save_settings(
+        settings_file,
+        AppSettings(1.0, True, waveform_visible=False, spectrum_visible=False),
+    )
+    save_ui_state(ui_state_file, UiState(main_splitter=SplitterState(300, 500)))
+
+    composition = app_module.build_player(playlist_file, settings_file, ui_state_file=ui_state_file)
+    qtbot.addWidget(composition.window)
+    window = composition.window
+    window.show()
+    qtbot.waitExposed(window)
+
+    assert window.waveform_panel.isVisible() is False
+    splitter = window.capture_ui_state().main_splitter
+    assert splitter is not None
+    assert splitter.playlist_size >= MINIMUM_SPLITTER_SIZE
+    window.spectrum_panel.shutdown()
+
+
+def test_restore_alone_does_not_write_the_file(
+    playlist_file: Path, settings_file: Path, ui_state_file: Path, qtbot: QtBot
+) -> None:
+    """復元しただけではui-state.jsonを書き換えない。"""
+    save_ui_state(ui_state_file, UiState(window=WindowState(140, 100, 1100, 740, maximized=False)))
+    original = ui_state_file.read_bytes()
+
+    composition = app_module.build_player(playlist_file, settings_file, ui_state_file=ui_state_file)
+    qtbot.addWidget(composition.window)
+
+    assert ui_state_file.read_bytes() == original
+    assert composition.ui_state_session.is_running is False
+
+
+def test_ui_state_is_saved_on_shutdown(
+    composition: app_module.PlayerComposition, ui_state_file: Path, qtbot: QtBot
+) -> None:
+    """終了時のflushで最終状態が保存される。"""
+    window = composition.window
+    window.show()
+    qtbot.waitExposed(window)
+    composition.ui_state_session.start()
+    window.set_last_open_directory(Path("C:\\Music"))
+
+    assert composition.ui_state_session.flush() is True
+
+    restored = load_ui_state(ui_state_file)
+    assert restored.last_open_directory == Path("C:\\Music")
+    assert restored.window is not None
+    window.spectrum_panel.shutdown()
+
+
+def test_corrupted_ui_state_starts_with_defaults_and_is_not_overwritten(
+    playlist_file: Path,
+    settings_file: Path,
+    ui_state_file: Path,
+    qtbot: QtBot,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """破損したui-state.jsonでは既定位置で起動し、元ファイルを守る。"""
+    original = "{壊れた"
+    ui_state_file.write_text(original, encoding="utf-8")
+
+    with caplog.at_level(logging.ERROR):
+        composition = app_module.build_player(
+            playlist_file, settings_file, ui_state_file=ui_state_file
+        )
+    qtbot.addWidget(composition.window)
+
+    assert composition.ui_state_session.is_save_enabled is False
+    assert composition.ui_state_session.flush() is False
+    assert ui_state_file.read_text(encoding="utf-8") == original
+    assert UI_STATE_RESTORE_FAILED_MESSAGE in composition.window.statusBar().currentMessage()
+
+
+def test_corrupted_ui_state_does_not_disable_settings_or_playlist_saving(
+    playlist_file: Path,
+    settings_file: Path,
+    ui_state_file: Path,
+    audio_files: list[Path],
+    qtbot: QtBot,
+) -> None:
+    """3つの保存ファイルの障害は互いに独立している。"""
+    ui_state_file.write_text("{壊れた", encoding="utf-8")
+
+    composition = app_module.build_player(playlist_file, settings_file, ui_state_file=ui_state_file)
+    qtbot.addWidget(composition.window)
+    composition.settings_session.start()
+    composition.app_settings.apply(AppSettings(1.25, True))
+    composition.playlist_model.add_paths(audio_files)
+
+    assert composition.ui_state_session.is_save_enabled is False
+    assert composition.settings_session.flush() is True
+    assert composition.playlist_session.save_from(composition.playlist_model) is True
+    assert len(load_playlist(playlist_file)) == len(audio_files)
+
+
+def test_corrupted_settings_does_not_disable_ui_state_saving(
+    playlist_file: Path,
+    settings_file: Path,
+    ui_state_file: Path,
+    qtbot: QtBot,
+) -> None:
+    """settings.jsonの破損はUI状態の保存を止めない。"""
+    settings_file.write_text("{壊れた", encoding="utf-8")
+
+    composition = app_module.build_player(playlist_file, settings_file, ui_state_file=ui_state_file)
+    qtbot.addWidget(composition.window)
+    composition.window.set_last_open_directory(Path("C:\\Music"))
+
+    assert composition.settings_session.is_save_enabled is False
+    assert composition.ui_state_session.is_save_enabled is True
+    assert composition.ui_state_session.flush() is True
+    assert load_ui_state(ui_state_file).last_open_directory == Path("C:\\Music")
+
+
+def test_ui_state_schema_does_not_touch_the_other_schemas(
+    composition: app_module.PlayerComposition,
+    playlist_file: Path,
+    settings_file: Path,
+    ui_state_file: Path,
+    audio_files: list[Path],
+) -> None:
+    """UI状態は独立ファイルで、他のschemaへ混ざらない。"""
+    composition.playlist_model.add_paths(audio_files)
+    composition.playlist_session.save_from(composition.playlist_model)
+    composition.settings_session.start()
+    composition.app_settings.apply(AppSettings(1.25, True))
+    composition.settings_session.flush()
+    composition.window.set_last_open_directory(Path("C:\\Music"))
+    composition.ui_state_session.flush()
+
+    playlist_document = json.loads(playlist_file.read_text(encoding="utf-8"))
+    settings_document = json.loads(settings_file.read_text(encoding="utf-8"))
+    ui_state_document = json.loads(ui_state_file.read_text(encoding="utf-8"))
+
+    assert set(playlist_document) == {"schema_version", "entries"}
+    assert set(settings_document) == {
+        "schema_version",
+        "playback_rate",
+        "pitch_compensation",
+        "waveform_visible",
+        "spectrum_visible",
+        "level_meter_visible",
+    }
+    assert settings_document["schema_version"] == 2
+    assert ui_state_document["schema_version"] == 1
+    assert set(ui_state_document) <= {
+        "schema_version",
+        "window",
+        "main_splitter",
+        "last_open_directory",
+    }
+
+
+def test_run_saves_ui_state_before_stopping_sessions(
+    playlist_file: Path,
+    settings_file: Path,
+    ui_state_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot: QtBot,
+) -> None:
+    """終了処理はWindowが生きているあいだにUI状態をflushしてからstopする。"""
+    del qtbot
+    events: list[str] = []
+    original_flush = UiStateSession.flush
+    original_stop = UiStateSession.stop
+
+    def record_flush(session: UiStateSession) -> bool:
+        events.append("ui_state_flush")
+        return original_flush(session)
+
+    def record_stop(session: UiStateSession) -> None:
+        events.append("ui_state_stop")
+        original_stop(session)
+
+    def ignore_logging_setup() -> None:
+        return None
+
+    def skip_window_show(window: MainWindow) -> None:
+        del window
+
+    class ImmediateApplication:
+        def exec(self) -> int:
+            events.append("exec")
+            return 0
+
+    def create_immediate_application(argv: list[str]) -> QApplication:
+        del argv
+        return cast(QApplication, ImmediateApplication())
+
+    monkeypatch.setattr(UiStateSession, "flush", record_flush)
+    monkeypatch.setattr(UiStateSession, "stop", record_stop)
+    monkeypatch.setattr(app_module, "default_playlist_path", lambda: playlist_file)
+    monkeypatch.setattr(app_module, "default_settings_path", lambda: settings_file)
+    monkeypatch.setattr(app_module, "default_ui_state_path", lambda: ui_state_file)
+    monkeypatch.setattr(app_module, "create_application", create_immediate_application)
+    monkeypatch.setattr(MainWindow, "show", skip_window_show)
+    monkeypatch.setattr(app_module.logging_setup, "configure_logging", ignore_logging_setup)
+    monkeypatch.setattr(app_module.logging_setup, "install_excepthook", ignore_logging_setup)
+
+    assert app_module.run([]) == 0
+
+    assert events == ["exec", "ui_state_flush", "ui_state_stop"]
+
+
+def test_ui_layer_does_not_perform_ui_state_json_io() -> None:
+    """UI層はui-state.jsonの読み書きもschema versionも知らない。"""
+    from sdp.ui import main_window as main_window_module
+    from sdp.ui import settings_dialog as settings_dialog_module
+
+    for module in (main_window_module, settings_dialog_module):
+        for forbidden in ("load_ui_state", "save_ui_state", "UiStateSession", "json"):
             assert not hasattr(module, forbidden), f"{module.__name__}: {forbidden}"

@@ -21,7 +21,12 @@ from sdp.services import logging_setup
 from sdp.services.pcm_tap import PcmTap
 from sdp.services.playlist_session import PlaylistSession, default_playlist_path
 from sdp.services.settings import AppSettingsController, SettingsSession
-from sdp.services.user_paths import default_settings_path, default_waveform_cache_directory
+from sdp.services.ui_state_session import UiStateSession
+from sdp.services.user_paths import (
+    default_settings_path,
+    default_ui_state_path,
+    default_waveform_cache_directory,
+)
 from sdp.services.waveform_analysis import WaveformAnalysisService
 from sdp.ui.main_window import MainWindow
 
@@ -49,6 +54,7 @@ class PlayerComposition:
     waveform_analysis: WaveformAnalysisService
     pcm_tap: PcmTap
     app_settings: AppSettingsController
+    ui_state_session: UiStateSession
     window: MainWindow
 
 
@@ -56,14 +62,19 @@ def build_player(
     playlist_file: Path | None = None,
     settings_file: Path | None = None,
     waveform_cache_directory: Path | None = None,
+    ui_state_file: Path | None = None,
 ) -> PlayerComposition:
     """Backend → Controller → PlaylistModel → プレイリスト再生 → MainWindow の順に組み立てる。
 
     保存済み設定をControllerへ適用してから、プレイリストとUIを構築する
     （UI は永続化を知らない）。
     保存対象は ``PlaylistModel.entries()`` だけで、現在 entry や再生位置は保存しない。
-    ``playlist_file``、``settings_file``、``waveform_cache_directory``は
-    テストから保存先を差し替えるための入口。
+    ``playlist_file``、``settings_file``、``waveform_cache_directory``、
+    ``ui_state_file``はテストから保存先を差し替えるための入口。
+
+    UI状態（ウィンドウ位置・サイズ・最大化・Splitter比率・前回フォルダー）は
+    設定とは別ファイル（``ui-state.json``）とし、可視化の表示設定を適用したあと、
+    **Window表示前**に復元する。
 
     QApplication が既に存在していることが前提（ウィジェットの生成に必要）。
     """
@@ -102,8 +113,16 @@ def build_player(
         pcm_tap,
         app_settings,
     )
+    # 可視化の表示設定（AppSettings）を適用済みのWindowへ、UI状態を重ねて復元する。
+    ui_state_session = UiStateSession(
+        default_ui_state_path() if ui_state_file is None else ui_state_file,
+        window,
+    )
+    ui_state_restore_message = ui_state_session.load_into_window()
     restore_messages = [
-        message for message in (restore_message, settings_restore_message) if message is not None
+        message
+        for message in (restore_message, settings_restore_message, ui_state_restore_message)
+        if message is not None
     ]
     if restore_messages:
         window.show_status_message(" ".join(restore_messages))
@@ -118,6 +137,7 @@ def build_player(
         waveform_analysis=waveform_analysis,
         pcm_tap=pcm_tap,
         app_settings=app_settings,
+        ui_state_session=ui_state_session,
         window=window,
     )
 
@@ -153,6 +173,8 @@ def run(argv: list[str] | None = None) -> int:
     composition.metadata_reader.start()
     composition.waveform_analysis.start()
     composition.window.show()
+    # 表示で生じるmove／resizeを「ユーザー変更」として保存しないよう、show後に監視を始める。
+    composition.ui_state_session.start()
     exit_code = app.exec()
     # 可視化を先に止め、破棄済みQObjectへシグナルが飛ばないようにする。
     composition.window.spectrum_panel.shutdown()
@@ -161,8 +183,11 @@ def run(argv: list[str] | None = None) -> int:
     # （ウィンドウが閉じた後でユーザーへ提示できないため）。
     composition.waveform_analysis.shutdown()
     composition.metadata_reader.shutdown()
+    # Windowが生きているあいだにUI状態を確定させる（破棄後はgeometryを取得できない）。
+    composition.ui_state_session.flush()
     composition.settings_session.flush()
     composition.playlist_session.save_from(composition.playlist_model)
+    composition.ui_state_session.stop()
     composition.settings_session.stop()
     composition.app_settings.shutdown()
     return exit_code
