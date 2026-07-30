@@ -1,8 +1,9 @@
-"""QAudioBuffer → mono float32 の変換境界を検証する。
+"""QAudioBuffer → mono／L／R float32 の変換境界を検証する。
 
 正規化そのもののマトリクスは
 [test_waveform.py](./test_waveform.py) の ``pcm_bytes_to_mono`` 側で検証済み。
-ここは QAudioBuffer 固有の妥当性確認（format・byteCount・constData）を扱う。
+ここは QAudioBuffer 固有の妥当性確認（format・byteCount・constData）と、
+1 回の bytes 化から mono と L／R を派生させる契約（P5-B）を扱う。
 QAudioBuffer は値型のため QApplication を必要としない。
 """
 
@@ -13,7 +14,7 @@ import numpy as np
 import pytest
 from PySide6.QtMultimedia import QAudioBuffer, QAudioFormat
 
-from sdp.core.analysis.pcm import audio_buffer_to_mono
+from sdp.core.analysis.pcm import PcmChunk, audio_buffer_to_mono, audio_buffer_to_pcm_chunk
 
 
 class StubAudioBuffer:
@@ -270,3 +271,209 @@ def test_conversion_does_not_return_qt_types() -> None:
 
     assert isinstance(samples, np.ndarray)
     assert isinstance(sample_rate, int)
+
+
+# -- PcmChunk（mono／L／R）---------------------------------------------------
+
+
+def float_chunk(values: list[float], channels: int) -> PcmChunk:
+    data = struct.pack(f"<{len(values)}f", *values)
+    return audio_buffer_to_pcm_chunk(
+        stub_buffer(data, audio_format(QAudioFormat.SampleFormat.Float, channels=channels))
+    )
+
+
+def test_mono_source_duplicates_the_channel_into_left_and_right() -> None:
+    """mono音源ではleft == right == monoになる。"""
+    chunk = float_chunk([0.25, -0.5], channels=1)
+
+    assert chunk.channel_count == 1
+    assert chunk.mono.tolist() == pytest.approx([0.25, -0.5])
+    assert chunk.left.tolist() == chunk.mono.tolist()
+    assert chunk.right.tolist() == chunk.mono.tolist()
+
+
+def test_stereo_source_splits_channel_zero_and_one() -> None:
+    """stereoではleftがch0、rightがch1、monoが平均になる。"""
+    chunk = float_chunk([1.0, 0.0, -0.5, 0.5], channels=2)
+
+    assert chunk.channel_count == 2
+    assert chunk.left.tolist() == pytest.approx([1.0, -0.5])
+    assert chunk.right.tolist() == pytest.approx([0.0, 0.5])
+    assert chunk.mono.tolist() == pytest.approx([0.5, 0.0])
+
+
+def test_three_channels_use_the_first_two_for_left_and_right() -> None:
+    """3ch以上でもleft=ch0、right=ch1。monoだけが全channel平均になる。"""
+    chunk = float_chunk([0.3, 0.6, 0.9], channels=3)
+
+    assert chunk.channel_count == 3
+    assert chunk.left.tolist() == pytest.approx([0.3])
+    assert chunk.right.tolist() == pytest.approx([0.6])
+    assert chunk.mono.tolist() == pytest.approx([0.6])
+
+
+@pytest.mark.parametrize(
+    ("sample_format", "pack", "values", "expected_left", "expected_right"),
+    [
+        (QAudioFormat.SampleFormat.UInt8, "<4B", [255, 1, 128, 128], [0.99, 0.0], [-0.99, 0.0]),
+        (
+            QAudioFormat.SampleFormat.Int16,
+            "<4h",
+            [16384, -16384, 0, 32767],
+            [0.5, 0.0],
+            [-0.5, 1.0],
+        ),
+        (
+            QAudioFormat.SampleFormat.Int32,
+            "<4i",
+            [1073741824, -1073741824, 0, 0],
+            [0.5, 0.0],
+            [-0.5, 0.0],
+        ),
+        (
+            QAudioFormat.SampleFormat.Float,
+            "<4f",
+            [0.5, -0.25, 1.0, -1.0],
+            [0.5, 1.0],
+            [-0.25, -1.0],
+        ),
+    ],
+)
+def test_every_sample_format_produces_left_and_right(
+    sample_format: QAudioFormat.SampleFormat,
+    pack: str,
+    values: list[float],
+    expected_left: list[float],
+    expected_right: list[float],
+) -> None:
+    """UInt8／Int16／Int32／Floatのいずれでも左右を取り出せる。"""
+    data = struct.pack(pack, *values)
+
+    chunk = audio_buffer_to_pcm_chunk(stub_buffer(data, audio_format(sample_format)))
+
+    assert chunk.left.tolist() == pytest.approx(expected_left, abs=1e-2)
+    assert chunk.right.tolist() == pytest.approx(expected_right, abs=1e-2)
+
+
+def test_chunk_arrays_are_read_only_float32_and_aligned() -> None:
+    """3配列は1次元float32・同じ長さ・read-onlyになる。"""
+    chunk = float_chunk([0.5, -0.5, 0.25, -0.25], channels=2)
+
+    for array in (chunk.mono, chunk.left, chunk.right):
+        assert array.dtype == np.dtype(np.float32)
+        assert array.ndim == 1
+        assert array.size == chunk.frame_count == 2
+        assert not array.flags.writeable
+
+
+def test_chunk_arrays_do_not_share_memory_with_the_buffer() -> None:
+    """buffer破棄後も値が読める（viewではなくコピーである）。"""
+    data = struct.pack("<4h", 16384, -16384, 32767, 0)
+    buffer = buffer_of(data, audio_format(QAudioFormat.SampleFormat.Int16))
+
+    chunk = audio_buffer_to_pcm_chunk(buffer)
+    del buffer
+
+    assert chunk.left.tolist() == pytest.approx([0.5, 1.0], abs=1e-4)
+    assert chunk.right.tolist() == pytest.approx([-0.5, 0.0], abs=1e-4)
+
+
+def test_chunk_publishes_the_format() -> None:
+    """sample rateとchannel countを公開する。"""
+    chunk = audio_buffer_to_pcm_chunk(
+        stub_buffer(
+            struct.pack("<2h", 0, 0),
+            audio_format(QAudioFormat.SampleFormat.Int16, channels=2, sample_rate=44_100),
+        )
+    )
+
+    assert chunk.sample_rate == 44_100
+    assert chunk.channel_count == 2
+
+
+def test_empty_pcm_yields_three_empty_arrays() -> None:
+    """空PCMでも失敗させず、長さ0の3配列を返す。"""
+    chunk = audio_buffer_to_pcm_chunk(
+        stub_buffer(b"", audio_format(QAudioFormat.SampleFormat.Int16))
+    )
+
+    assert chunk.frame_count == 0
+    assert chunk.left.shape == chunk.right.shape == chunk.mono.shape == (0,)
+
+
+def test_partial_frame_is_rejected_for_chunks_too() -> None:
+    """frame境界で終わらないPCMはchunk変換でも失敗させる。"""
+    with pytest.raises(ValueError, match="frame境界"):
+        audio_buffer_to_pcm_chunk(
+            stub_buffer(struct.pack("<3h", 1, 2, 3), audio_format(QAudioFormat.SampleFormat.Int16))
+        )
+
+
+def test_non_finite_and_clipping_pcm_is_sanitized_per_channel() -> None:
+    """NaN／infと範囲外値をchannelごとに寄せる。"""
+    chunk = float_chunk([float("nan"), float("inf"), 3.0, -4.0], channels=2)
+
+    for array in (chunk.mono, chunk.left, chunk.right):
+        assert np.all(np.isfinite(array))
+        assert np.all(array >= -1.0)
+        assert np.all(array <= 1.0)
+    assert chunk.left.tolist() == pytest.approx([0.0, 1.0])
+    assert chunk.right.tolist() == pytest.approx([1.0, -1.0])
+
+
+def test_mono_wrapper_returns_the_same_mono_as_the_chunk() -> None:
+    """既存の``audio_buffer_to_mono``はchunkのmonoと一致する（互換wrapper）。"""
+    data = struct.pack("<4h", 16384, 0, -32768, -32768)
+    audio_format_value = audio_format(QAudioFormat.SampleFormat.Int16)
+
+    samples, sample_rate = audio_buffer_to_mono(buffer_of(data, audio_format_value))
+    chunk = audio_buffer_to_pcm_chunk(buffer_of(data, audio_format_value))
+
+    assert samples.tolist() == chunk.mono.tolist()
+    assert sample_rate == chunk.sample_rate
+
+
+def test_chunk_rejects_inconsistent_arrays() -> None:
+    """長さ違い・非有限・範囲外・不正formatのchunkは作れない。"""
+    ones = np.ones(2, dtype=np.float32)
+
+    with pytest.raises(ValueError, match="shape"):
+        PcmChunk(
+            mono=ones,
+            left=np.ones(3, dtype=np.float32),
+            right=ones,
+            sample_rate=48_000,
+            channel_count=2,
+        )
+    with pytest.raises(ValueError, match="NaN"):
+        PcmChunk(
+            mono=np.array([np.nan, 0.0], dtype=np.float32),
+            left=ones,
+            right=ones,
+            sample_rate=48_000,
+            channel_count=2,
+        )
+    with pytest.raises(ValueError, match="範囲外"):
+        PcmChunk(
+            mono=np.array([2.0, 0.0], dtype=np.float32),
+            left=ones,
+            right=ones,
+            sample_rate=48_000,
+            channel_count=2,
+        )
+    with pytest.raises(ValueError, match="sample_rate"):
+        PcmChunk(mono=ones, left=ones, right=ones, sample_rate=0, channel_count=2)
+    with pytest.raises(ValueError, match="channel_count"):
+        PcmChunk(mono=ones, left=ones, right=ones, sample_rate=48_000, channel_count=0)
+
+
+def test_chunk_copies_the_caller_arrays() -> None:
+    """呼び出し側の配列とメモリを共有しない。"""
+    mono = np.array([0.5, -0.5], dtype=np.float32)
+
+    chunk = PcmChunk(mono=mono, left=mono, right=mono, sample_rate=48_000, channel_count=1)
+    mono[0] = 0.0
+
+    assert chunk.mono.tolist() == pytest.approx([0.5, -0.5])
+    assert mono.flags.writeable
