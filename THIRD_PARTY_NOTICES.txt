@@ -1,0 +1,25 @@
+sdp 配布物の第三者ソフトウェア
+================================
+
+sdp の Windows onedir 配布物には、次のランタイムが含まれます。ライセンス原文は
+配布物の _internal/licenses/ 以下へ、インストール済みwheelまたはPython配布物からコピーします。
+本ファイルはライセンス原文の代替ではありません。
+
+- Python: Python Software Foundation License
+  _internal/licenses/Python/LICENSE.txt
+- PySide6 / Qt / Shiboken: Qt for Pythonが配布するライセンス通知
+  _internal/licenses/PySide6/、_internal/licenses/PySide6-Essentials/、
+  _internal/licenses/PySide6-Addons/、_internal/licenses/shiboken6/
+- NumPy: BSD-3-Clauseおよび同梱コンポーネントのライセンス
+  _internal/licenses/numpy/
+- Mutagen: GNU GPL version 2 or later
+  _internal/licenses/mutagen/
+
+PyInstallerはビルドツールであり、PyInstaller自体はsdpの実行時配布物へ含めません。
+ただし、PyInstallerのbootloaderには例外付きGPLライセンスが適用されます。
+
+注意:
+現在のPySide6 wheelに含まれるQt関連ファイルは、環境によって商用ライセンス参照文だけの
+場合があります。外部配布前には、採用するQt/PySide6ライセンス形態を確定し、その条件に
+必要なLGPL/GPL等の原文、著作権表示、再リンク可能性などを別途監査してください。
+P7-B1の成果物は開発・個人評価用であり、この監査完了をリリース準備完了とはみなしません。

@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-sdp = "sdp.__main__:main"
+sdp = "sdp.__main__:cli_main"
 
 [build-system]
 requires = ["hatchling"]
@@ -32,7 +32,7 @@ dev = [
     "pytest-cov>=6.0",
     "coverage>=7.6",
     "pre-commit>=4.0",
-    "pyinstaller>=6.11",
+    "pyinstaller>=6,<7",
 ]
 
 # ---------------------------------------------------------------------------
