@@ -32,7 +32,7 @@ from sdp.core.playback.backend import PlaybackBackend
 from sdp.core.playback.controller import PlaybackController
 from sdp.core.playback.qt_backend import QtMultimediaBackend
 from sdp.core.playback.types import PlaybackState
-from sdp.core.playlist.entry import PlaylistEntry, create_entry
+from sdp.core.playlist.entry import FileStatus, PlaylistEntry, create_entry
 from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.persistence import load_playlist, save_playlist
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
@@ -509,7 +509,10 @@ def test_restores_saved_playlist(
     assert [entry.path for entry in entries] == [entry.path for entry in saved]
     assert entries[1].path == entries[2].path
     assert entries[1].path.name == "テスト 音源.mp3"
-    assert entries[3].is_missing
+    # 復元直後は未確認。背景の確認サービスが確定させる（同期経路で待たずに確かめる）。
+    assert entries[3].file_status is FileStatus.UNKNOWN
+    composition.file_status_checker.run_pending_now()
+    assert composition.playlist_model.entry_at(3).is_missing
     assert composition.window.statusBar().currentMessage() == "プレイリストを復元しました（4件）。"
 
 

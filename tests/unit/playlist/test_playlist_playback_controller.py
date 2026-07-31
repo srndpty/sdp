@@ -754,6 +754,7 @@ def test_navigation_availability_ignores_missing_entries(
 ) -> None:
     """欠損しか残っていなければ次の曲は不可。"""
     entry_ids = playlist.add_paths([audio_files[0], tmp_path / "ない.wav"])
+    playlist.refresh_file_status()
     controller.play_entry(entry_ids[0])
 
     assert controller.can_play_next is False

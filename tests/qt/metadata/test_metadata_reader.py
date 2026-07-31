@@ -150,6 +150,7 @@ def test_missing_entries_are_not_scheduled(
 ) -> None:
     """欠損エントリは読み取らない。"""
     playlist.add_paths([tmp_path / "ない曲.wav"])
+    playlist.refresh_file_status()
 
     reader.start()
     qtbot.wait(50)
@@ -459,6 +460,7 @@ def test_restored_file_is_read_again(
     """欠損から復活したら再読み取りする。"""
     path = tmp_path / "戻る曲.wav"
     entry_ids = playlist.add_paths([path])
+    playlist.refresh_file_status()
     reader.start()
     qtbot.wait(20)
     assert read_function.calls == []

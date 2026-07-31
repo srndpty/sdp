@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from pytestqt.qtbot import QtBot
 
-from sdp.core.playlist.entry import PlaylistEntry, create_entry
+from sdp.core.playlist.entry import FileStatus, PlaylistEntry, create_entry
 from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.persistence import load_playlist, save_playlist
 from sdp.services.playlist_session import (
@@ -115,6 +115,9 @@ def test_restore_reevaluates_missing_files(
     audio_files[1].unlink()
 
     PlaylistSession(file_path).load_into(model)
+    # 復元は状態を判定しない。確定は背景の確認サービス（または明示的な再確認）が行う。
+    assert model.entry_at(1).file_status is FileStatus.UNKNOWN
+    model.refresh_file_status()
 
     assert model.rowCount() == 2
     assert not model.entry_at(0).is_missing

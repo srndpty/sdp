@@ -24,6 +24,7 @@ from sdp.launch import LaunchRequestHandler
 from sdp.services import logging_setup
 from sdp.services.launch_request import LaunchRequest, parse_launch_request
 from sdp.services.pcm_tap import PcmTap
+from sdp.services.playlist_file_status import PlaylistFileStatusChecker
 from sdp.services.playlist_session import PlaylistSession, default_playlist_path
 from sdp.services.save_status import SaveCategory, SaveStatusReporter, restore_failure_message
 from sdp.services.settings import AppSettingsController, SettingsSession
@@ -65,6 +66,7 @@ class PlayerComposition:
     playlist_session: PlaylistSession
     settings_session: SettingsSession
     metadata_reader: MetadataReader
+    file_status_checker: PlaylistFileStatusChecker
     waveform_analysis: WaveformAnalysisService
     pcm_tap: PcmTap
     app_settings: AppSettingsController
@@ -115,6 +117,8 @@ def build_player(
     playlist_restore_message = session.load_into(playlist_model)
     # 生成だけで読み取りは始めない（start() は run() が呼ぶ）。
     metadata_reader = MetadataReader(playlist_model)
+    # エントリ生成ではファイルへ触れない。欠損判定は背景で少しずつ確定させる。
+    file_status_checker = PlaylistFileStatusChecker(playlist_model)
     waveform_analysis = WaveformAnalysisService(
         controller,
         default_waveform_cache_directory()
@@ -191,6 +195,7 @@ def build_player(
         playlist_session=session,
         settings_session=settings_session,
         metadata_reader=metadata_reader,
+        file_status_checker=file_status_checker,
         waveform_analysis=waveform_analysis,
         pcm_tap=pcm_tap,
         app_settings=app_settings,
@@ -286,6 +291,7 @@ def shutdown(composition: PlayerComposition) -> None:
             ("PCMタップの停止", composition.pcm_tap.shutdown),
             ("波形解析の停止", composition.waveform_analysis.shutdown),
             ("メタデータ読み取りの停止", composition.metadata_reader.shutdown),
+            ("ファイル状態確認の停止", composition.file_status_checker.shutdown),
             # Windowが生きているあいだにUI状態を確定させる（破棄後はgeometryを取得できない）。
             ("ウィンドウ状態の保存", composition.ui_state_session.flush),
             ("設定の保存", composition.settings_session.flush),

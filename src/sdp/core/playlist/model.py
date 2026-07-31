@@ -7,7 +7,7 @@
 
 import json
 import logging
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from enum import IntEnum
 from pathlib import Path
 from typing import Any
@@ -553,6 +553,43 @@ class PlaylistModel(QAbstractTableModel):
             entry.entry_id for entry in self._entries if entry.file_status is FileStatus.MISSING
         )
 
+    def unchecked_entries(self, limit: int) -> tuple[tuple[str, Path], ...]:
+        """ファイル状態が未確認（``UNKNOWN``）のエントリを先頭から最大 ``limit`` 件返す。
+
+        背景の状態確認サービスが少しずつ処理するための取り出し口。
+        ここではファイルシステムへ触れない。
+        """
+        if limit <= 0:
+            return ()
+        found: list[tuple[str, Path]] = []
+        for entry in self._entries:
+            if entry.file_status is not FileStatus.UNKNOWN:
+                continue
+            found.append((entry.entry_id, entry.path))
+            if len(found) == limit:
+                break
+        return tuple(found)
+
+    def apply_file_statuses(self, statuses: Mapping[str, FileStatus]) -> int:
+        """調べ済みのファイル状態をまとめて反映し、変化した行数を返す。
+
+        ここでもファイルシステムへ触れない（呼び出し側が別スレッドで調べる）。
+        変化した行だけ ``dataChanged`` を出す。
+        """
+        changed = 0
+        for entry_id, status in statuses.items():
+            row = self._row_by_entry_id.get(entry_id)
+            if row is None:
+                continue
+            entry = self._entries[row]
+            updated = entry.with_file_status(status)
+            if updated is entry:
+                continue
+            self._entries[row] = updated
+            self._emit_file_status_changed(row)
+            changed += 1
+        return changed
+
     # -- 内部 ---------------------------------------------------------------
 
     def _refresh_row(self, row: int) -> bool:
@@ -562,6 +599,10 @@ class PlaylistModel(QAbstractTableModel):
         if refreshed is entry:
             return False
         self._entries[row] = refreshed
+        self._emit_file_status_changed(row)
+        return True
+
+    def _emit_file_status_changed(self, row: int) -> None:
         self.dataChanged.emit(
             self.index(row, Column.TITLE),
             self.index(row, Column.PATH),
@@ -572,7 +613,6 @@ class PlaylistModel(QAbstractTableModel):
                 int(Qt.ItemDataRole.ToolTipRole),
             ],
         )
-        return True
 
     def _rebuild_index(self) -> None:
         self._row_by_entry_id = {entry.entry_id: row for row, entry in enumerate(self._entries)}

@@ -412,6 +412,7 @@ def test_restored_file_becomes_requestable_again(model: PlaylistModel, tmp_path:
     """欠損から復活したら未要求へ戻る（再読み取りできる）。"""
     path = tmp_path / "戻る曲.wav"
     entry_ids = model.add_paths([path])
+    model.refresh_file_status()
     model.mark_metadata_failed(entry_ids[0])
     path.write_bytes(b"x")
 

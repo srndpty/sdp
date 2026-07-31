@@ -419,6 +419,7 @@ def test_missing_row_is_greyed_out(
 ) -> None:
     """欠損行は Disabled/Text の色で描かれ、利用可能な行とは異なる。"""
     model.add_paths([audio_files[0], tmp_path / "ない曲.wav"])
+    model.refresh_file_status()
     delegate = table_of(view).itemDelegate()
     assert isinstance(delegate, PlaylistEntryDelegate)
 
@@ -439,6 +440,7 @@ def test_missing_row_stays_selectable_and_removable(
 ) -> None:
     """欠損行も選択・削除でき、Model からは消えない。"""
     model.add_paths([tmp_path / "ない曲.wav"])
+    model.refresh_file_status()
     assert model.entry_at(0).is_missing
 
     select_rows(view, [0])

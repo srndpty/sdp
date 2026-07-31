@@ -266,6 +266,7 @@ def test_missing_file_dropped_becomes_a_missing_entry(model: PlaylistModel, tmp_
     path = tmp_path / "消えた曲.wav"
 
     assert drop(model, url_mime([path]), -1) is True
+    model.refresh_file_status()
 
     assert model.entry_at(0).is_missing
 
