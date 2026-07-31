@@ -655,6 +655,8 @@ pwsh -File scripts/installer-smoke.ps1 -ConfirmProfileChanges
 | uninstall後 | install先・shortcut・HKCU登録・processすべて消滅 |
 | ユーザーデータ | `%LOCALAPPDATA%\sdp`と中身が保持される |
 | UserChoice | 全工程で変化なし |
+| Defender（engine 1.1.26060.3008 / signature 1.455.438.0 / 2026-07-31） | setup exeのカスタムスキャンで検出0件 |
+| 再現性 | 同一の`dist/sdp`と`installer.iss`から2回compileしてsetup exeのSHA-256が一致 |
 
 **判明した落とし穴（実測で確認し、設計へ反映済み）**
 
@@ -682,8 +684,8 @@ pwsh -File scripts/installer-smoke.ps1 -ConfirmProfileChanges
 - [ ] 起動中にGUIでupgradeしたときの案内表示（silent経路は自動確認済み）
 - [ ] 100%／150%（可能なら200%）DPIでのwizard表示
 - [ ] Windows Sandboxまたは新規Windowsユーザーでのinstall→起動→uninstall
-- [ ] Defenderのスキャン結果
-- [ ] SmartScreenの表示（**未署名のため警告が出る想定。実機で記録する**）
+- [ ] SmartScreenの表示（**未署名のため、MOTW付きでダウンロードすると警告が出る想定。
+      実機で記録する。** ローカル生成物の直接実行では確認できない）
 - [ ] 日本語ユーザー名の環境
 - [ ] 標準ユーザー、read-onlyなinstall元、network share上のsetup exeからの実行
 
