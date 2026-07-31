@@ -52,7 +52,25 @@ def test_spec_collects_metadata_and_only_declared_resources() -> None:
     assert '"THIRD_PARTY_NOTICES.txt"' in source
     assert "collect_all" not in source
     assert "test_audio" not in source
-    assert "assets" not in source
+    # assetsを参照してよいのはアプリアイコンだけ。テスト音源を収集しない。
+    assert re.findall(r'"assets"[^\n]*', source) == ['"assets" / "sdp.ico"']
     assert "if missing:" in source
     assert "必須ライセンスファイルを検出できません" in source
     assert "if not python_license.is_file():" in source
+
+
+def test_spec_embeds_icon_and_generated_version_resource() -> None:
+    """exeへアプリアイコンとversion resourceを埋め込み、versionを二重管理しない。"""
+    source = _SPEC.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    executable = _call(tree, "EXE")
+
+    assert ast.unparse(_keyword(executable, "icon")) == "str(ICON_FILE)"
+    assert ast.unparse(_keyword(executable, "version")) == "str(VERSION_INFO_FILE)"
+    # versionはpyproject由来（sdp.__version__）だけを使い、specへ書かない。
+    assert "from sdp import __version__" in source
+    assert "render_version_info" in source
+    assert not re.search(r"\d+\.\d+\.\d+", source)
+    # 生成した一時ファイルはgit管理外のbuild/へ置く。
+    assert '"build" / "windows-version-info.generated.txt"' in source
+    assert "アプリアイコンがありません" in source

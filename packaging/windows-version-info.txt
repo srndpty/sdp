@@ -1,0 +1,41 @@
+# sdp.exe へ埋め込む Windows version resource のテンプレート。
+#
+# PyInstaller が読む VSVersionInfo 形式。version は pyproject.toml を唯一の source とし、
+# build 時に sdp.windows_version.render_version_info() が次の 2 か所だけを差し替える。
+#
+#   {version_tuple} : FILEVERSION / PRODUCTVERSION の 4 要素整数（例: (0, 0, 1, 0)）
+#   {version}       : 表示用の文字列（例: 0.0.1。pre-release 識別子はここにだけ残る）
+#
+# このファイルを直接 PyInstaller へ渡さないこと（プレースホルダのままになる）。
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers={version_tuple},
+    prodvers={version_tuple},
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo(
+      [
+        StringTable(
+          '040904B0',
+          [
+            StringStruct('CompanyName', 'sdp contributors'),
+            StringStruct('FileDescription', 'sdp'),
+            StringStruct('FileVersion', '{version}'),
+            StringStruct('InternalName', 'sdp'),
+            StringStruct('LegalCopyright', 'Copyright (c) sdp contributors. MIT License.'),
+            StringStruct('OriginalFilename', 'sdp.exe'),
+            StringStruct('ProductName', 'sdp'),
+            StringStruct('ProductVersion', '{version}')
+          ]
+        )
+      ]
+    ),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)

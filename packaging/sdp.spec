@@ -8,9 +8,35 @@ import sys
 
 from PyInstaller.utils.hooks import copy_metadata
 
+from sdp import __version__
+from sdp.windows_version import render_version_info
+
 
 REPO_ROOT = Path(SPECPATH).resolve().parent
 ENTRY_SCRIPT = REPO_ROOT / "src" / "sdp" / "__main__.py"
+ICON_FILE = REPO_ROOT / "assets" / "sdp.ico"
+VERSION_INFO_TEMPLATE = REPO_ROOT / "packaging" / "windows-version-info.txt"
+
+
+def generate_version_info():
+    """pyproject由来のversionをWindows version resourceへ展開する。
+
+    versionをspecやinstallerへ手書きしないための一時生成物。build directory
+    （git管理外）へ書き、source管理はしない。
+    """
+    if not ICON_FILE.is_file():
+        raise RuntimeError(
+            f"アプリアイコンがありません: {ICON_FILE.name}"
+            "（uv run python tools/gen_app_icon.py で生成する）"
+        )
+    template = VERSION_INFO_TEMPLATE.read_text(encoding="utf-8")
+    generated = REPO_ROOT / "build" / "windows-version-info.generated.txt"
+    generated.parent.mkdir(parents=True, exist_ok=True)
+    generated.write_text(render_version_info(template, __version__), encoding="utf-8")
+    return generated
+
+
+VERSION_INFO_FILE = generate_version_info()
 
 
 def license_files(distribution_name, target_name, required_names):
@@ -98,6 +124,8 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(ICON_FILE),
+    version=str(VERSION_INFO_FILE),
 )
 
 collect = COLLECT(
