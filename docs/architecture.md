@@ -57,9 +57,15 @@ sdp/
 │   │   ├── launch_request.py # Qt非依存の起動要求とargv変換
 │   │   ├── pcm_tap.py        # QAudioBufferOutput → 正規化 → mono 化 → リングバッファ
 │   │   ├── waveform_analysis.py # QAudioDecoder workerと現在sourceの解析調停
+│   │   ├── playlist_file_status.py # 欠損判定の背景確認（GUIスレッドでstatしない）
+│   │   ├── playlist_session.py # playlist.json の復元とデバウンス保存
 │   │   ├── settings.py       # 設定 dataclass と JSON 入出力、スキーマバージョン
+│   │   ├── ui_state.py       # ui-state.json の検証と画面外補正
+│   │   ├── ui_state_session.py # UI状態の復元とデバウンス保存
+│   │   ├── save_status.py    # 保存・復元失敗のカテゴリ別通知
 │   │   ├── single_instance.py# QLocalServer / QLocalSocket と QLockFile
-│   │   ├── win_integration.py# ms-settings の起動、対応形式のプローブ
+│   │   ├── thread_shutdown.py# 終了時のthread待機（上限つき、無期限待機しない）
+│   │   ├── user_paths.py     # ユーザーデータ置き場の決定
 │   │   └── logging_setup.py  # RotatingFileHandler、Qt ログ統合、未捕捉例外処理
 │   └── ui/
 │       ├── main_window.py    # レイアウト骨格・メニュー・ドック配置のみ（god class 禁止）
@@ -70,13 +76,16 @@ sdp/
 │       ├── waveform_panel.py # 再生・解析Signalと波形Widgetの調停
 │       ├── spectrum_widget.py# スペクトラム（QPainter 自前描画）
 │       ├── spectrum_panel.py # 再生状態・PCMタップ・スペクトラムWidgetの調停
-│       ├── level_meter.py    # Peak / RMS メーター（P5-B で追加）
+│       ├── level_meter_widget.py # Peak / RMS メーター（P5-B で追加）
+│       ├── settings_dialog.py# 設定ダイアログ（Apply / OK / Cancel）
 │       └── shortcuts.py      # QShortcut 定義の一元管理
 ├── tests/                    # テスト構成は testing-strategy.md を参照
 ├── assets/test_audio/        # 自作テスト音源（正弦波など、各形式数秒）
 ├── packaging/
 │   ├── sdp.spec              # PyInstaller
-│   └── installer.iss         # Inno Setup（ProgID / Capabilities の登録と削除）
+│   ├── installer.iss         # Inno Setup（ProgID / Capabilities の登録と削除）
+│   ├── windows-version-info.txt # version resource のテンプレート
+│   └── licenses-manifest.json# 同梱コンポーネントとライセンス資料の宣言
 ├── spike/                    # P0 検証スクリプト（本体から独立、lint / coverage 対象外）
 └── docs/
 ```

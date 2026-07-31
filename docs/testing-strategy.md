@@ -45,7 +45,7 @@
 | `services/logging_setup.py` | ログファイルの UTF-8 出力、多重初期化でハンドラーが増えないこと、出力先変更時のハンドラー置換、ローテーション設定、出力先の決定、未捕捉例外フックの記録と多重インストールの抑止 |
 | `ui/player_controls.py` の時間整形 | `m:ss` / `h:mm:ss` の境界値と負値の扱い |
 | `ui/speed_panel.py` | Slider整数値とrateの境界変換、Slider／SpinBoxの双方向同期、Controller同期Signalへの耐性、float32読み戻し時の要求表示維持、6プリセット、1.0倍reset、pitch補正ON/OFF、sourceなし操作、load／transport／seekを呼ばないこと |
-| `services/settings.py` | UTF-8往復、保存キー限定（速度・ピッチ・可視化3項目）、欠落キーの既定値補完、未知キーの無視、version／型／0.5～2.0／NaN／inf検証、bool欄の厳密判定（0／1／文字列を拒否）、非UTF-8・不正JSON、fsync／replace失敗時の既存ファイル保持と一時ファイル回収。**schema version 1→2の移行**（v1の可視化設定を表示ONで補完し、同名v2キーがfalse／不正型でも未知キーとして無視すること、読み込みだけではファイルを書き換えないこと、変更後はv2で保存されること、v2の3項目の独立往復と厳密検証、未知versionの拒否）、`validate_settings`が適用前検証としてboolと値域を拒否すること |
+| `services/settings.py`（P6-A時点の契約。現在のschemaは下のP6-C行を参照） | UTF-8往復、保存キー限定（速度・ピッチ・可視化3項目）、欠落キーの既定値補完、未知キーの無視、version／型／0.5～2.0／NaN／inf検証、bool欄の厳密判定（0／1／文字列を拒否）、非UTF-8・不正JSON、fsync／replace失敗時の既存ファイル保持と一時ファイル回収。**schema version 1→2の移行**（v1の可視化設定を表示ONで補完し、同名v2キーがfalse／不正型でも未知キーとして無視すること、読み込みだけではファイルを書き換えないこと、変更後はv2で保存されること、v2の3項目の独立往復と厳密検証、未知versionの拒否）、`validate_settings`が適用前検証としてboolと値域を拒否すること |
 | `services/settings.py`（P6-C） | schema v1／v2／v3の読み分けと既定補完、古いversionが後のversionのキーを未知キーとして無視すること、v3の往復、volumeの境界（0.0／1.0）とbool・文字列・NaN／inf・範囲外の拒否（暗黙clampしない）、mutedとshuffle_enabledの厳密bool、repeat_modeの全値往復と未知値拒否、core `RepeatMode` と保存用 `RepeatModeSetting` の1対1対応、`validate_settings` が適用前検証でも同じ規則を課すこと、再生位置・再生状態・entry_idを保存しないことを検証する |
 | `services/ui_state.py`（P6-B） | UiStateの既定値と不変性、schema version 1の往復、window／splitter／last_open_directoryの欠落を「未保存」として扱うこと、未知キーの無視、未知schema versionの拒否、boolをint欄で拒否、width／height=0や負値の拒否、負座標の受理、maximizedの厳密bool、splitterの0以上と合計0拒否、絶対パスのみ受理（相対パス拒否・Unicode／空白パス）、存在しないフォルダーでも読み込みを失敗させないこと、非UTF-8・不正JSON・非objectルート、atomic save（fsync／replace／json.dump失敗時の既存ファイル保持と一時ファイル回収）。**画面補正**は整数矩形を注入して、単一画面内・左/上モニターの負座標・一部だけ画面内・完全画面外のprimary中央復帰・タイトル帯／矩形の重なりによる所属画面選択・大小が異なるsecondary基準のサイズclamp・最小サイズ・極端な座標・screenなしのfallback・最大化フラグの保持を検証する。**Splitter**は比率での再配分、合計の一致、片側が潰れないこと、総量が小さい場合の下限、総量0での保存値維持を検証する |
 | `services/save_status.py`（P6-C） | 復元失敗メッセージの1〜3カテゴリ整形、重複排除と順序の安定、ステータスバーに収まる長さ、生の例外文とパスを含めないこと、SaveCategory以外の拒否、保存失敗・復旧メッセージがカテゴリを区別できること、通知が**状態変化のときだけ**出ること（連続失敗で溢れない・失敗していないカテゴリの成功では黙る・カテゴリごとに独立）を検証する |
@@ -225,7 +225,8 @@ D&D は実際のマウス操作でしか確認できないため自動化しな�
 - [ ] 履歴中の曲を削除してもクラッシュしない
 - [ ] Repeat ALLの2サイクル目で別の履歴曲を削除しても、previousが直前の実再生曲へ戻る
 - [ ] 現在曲を削除すると音は続き、履歴と強調が解除される
-- [ ] 再起動でリピートは オフ、シャッフルは OFF へ戻る
+- [ ] （P6-C以降）再起動でリピートとシャッフルは前回の値へ復元される
+      （復元される値の一覧は [README](../README.md) の「保存される項目」）
 
 ## 6.5 P2-D 手動スモーク（メタデータ）
 
@@ -268,7 +269,9 @@ D&D は実際のマウス操作でしか確認できないため自動化しな�
 - [ ] 数値入力中の文字キー、ボタン上のSpace、ファイル選択／確認dialog中のキー操作を奪わない
 - [ ] 速度とピッチを変更し、約1.5秒後の`settings.json`がその2項目だけを含む
 - [ ] 変更直後に終了しても値が保存され、再起動後のSpeedPanelへ復元される
-- [ ] 音量、mute、repeat、shuffle、現在曲、再生位置は再起動後に復元されない
+- [ ] 再生位置と「再生中だったか」は再起動後に復元されない
+      （音量・mute・repeat・shuffle・現在曲はP6-Cで復元対象になった。
+      復元される値の一覧は [README](../README.md) の「保存される項目」）
 - [ ] 破損した`settings.json`で既定値起動・通知・元ファイル保護が行われる
 
 ## 6.8 P4-A 手動スモーク（波形解析基盤）
@@ -785,3 +788,25 @@ CI（GitHub Actions、Windows のみ）の構成は `.github/workflows/ci.yml` �
 - 下限は **80%**。XML（`coverage.xml`）を生成し、CI では artifact として保存する。
 - 下限は「意味のあるテストの結果として満たす」ものとし、
   数値合わせのためのテストは書かない。
+
+### 実音再生経路の観測用ジョブ
+
+通常のPR CIは `pytest -m "not audio"` のため、QtMultimediaとWindowsの
+FFmpeg backendの組合せ、codec、実 `END_OF_MEDIA` の通知順序、PCMタップへの
+実buffer供給が壊れても気付けない。これを補うため、`audio-observation` ジョブを
+**週1回（月曜03:00 UTC）と手動実行のときだけ**動かす。
+
+- `--selftest`（Qt依存とplugin loadの確認）
+- `--codec-test` で6形式の実decode（出力デバイスが無くても確認できる）
+- `pytest -m audio`（runnerに音声出力デバイスが無ければ失敗しうる）
+
+音声デバイスの有無に左右されるため `continue-on-error: true` とし、
+required check にはしない。**まずは観測用**で、安定して意味のある失敗だけを
+出せると分かった時点で扱いを見直す。
+
+### 文書と実装の整合
+
+`tests/unit/test_docs_consistency.py` が、architecture.mdの構成図に実在しない
+モジュールが残っていないこと、`services/` と `ui/` の新しいモジュールを
+書き漏らしていないこと、READMEの「保存される項目」が実装のschema versionと
+一致することを検査する。文章の良し悪しは見ず、機械的に判定できる点だけを扱う。
