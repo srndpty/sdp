@@ -571,13 +571,132 @@ uv run python tools/license_audit.py dist/sdp
 - [ ] Windows Sandbox／Python未導入VM／新規ユーザーのいずれかで起動・再生・保存・再起動
       （**未実施。実施するまで「Python未導入環境対応済み」とは記載しない**）
 
-## 6.18 手動リリースゲート（ZIP配布）
+## 6.18 P7-C Windows installer
+
+### 自動検査（Inno Setup compiler不要）
+
+`sdp/inno_script.py`の限定parserで`packaging/installer.iss`を読み、次を検査する。
+文字列grepだけに頼らず、section・`#define`・パラメータ行として解釈したうえで判定する。
+
+- **scope**: `PrivilegesRequired=lowest`、`PrivilegesRequiredOverridesAllowed`が空、
+  install先が`{localappdata}\Programs\sdp`、`MinVersion`指定、Program Files非使用。
+- **upgrade**: AppIdが固定でversionを含まない、`OutputBaseFilename`へversionが入る、
+  upgrade前の`_internal`掃除、アンインストーラーの保護。
+- **version注入**: `AppVersion`／`VersionInfoVersion`／`SourceDir`を.iss内で定義せず、
+  参照だけしていること（二重管理の防止）。
+- **入力**: `[Files]`が外部注入の配布物1件だけで、settings／playlist／ui-state／
+  `*.py`を除外していること。テスト音源を含まないこと。
+- **registry**: RootがHKCUのみ。`UserChoice`・`FileExts`・`HKLM`・`HKCR`が
+  コメント以外に現れないこと。
+- **関連付け**: ProgID・Open With・SupportedTypes・Capabilitiesが7拡張子を覆い、
+  commandが`"{app}\sdp.exe" "%1"`（exeと`%1`の双方を引用）、iconが`sdp.exe,0`、
+  `OpenWithProgids`が`uninsdeletevalue`（`uninsdeletekey`ではない）であること。
+- **shortcut**: スタートメニューは標準作成、desktopは`unchecked`のtask経由。
+- **uninstall**: `[UninstallDelete]`／`[InstallDelete]`がinstall先の外を消さないこと、
+  `{localappdata}\sdp`を参照しないこと、確認文がユーザーデータ保持を伝えること。
+- **起動中の扱い**: `CloseApplications`／`RestartApplications`の明示、
+  `InitializeSetup`／`PrepareToInstall`／`InitializeUninstall`／`IsFileInUse`／
+  `CleanPreviousInstall`の宣言、`/FORCECLOSEAPPLICATIONS`を既定にしないこと。
+- **表示**: icon・`UninstallDisplayIcon`・`LicenseFile`・技術検証用である旨。
+
+契約が素通りしていないことを、実`installer.iss`へ意図的な違反を1か所入れた
+30通り以上の変異で確認する（per-machine化、HKLM化、UserChoice追加、
+ユーザーデータ削除の追加、versionの直書き、desktop iconの既定ON など）。
+
+version resource（`0.0.1`→`(0, 0, 1, 0)`、pre-release、4要素、不正version拒否、
+pyprojectとの一致）とinstaller manifest（schema・architecture・関連付け一覧・
+SHA-256・絶対path/username非混入・JSON往復・key順固定）も単体テストで検査する。
+
+build scriptとsmoke scriptは、実行せずに検証できる性質をテキストとして検査する
+（staging位置、失敗時の旧成果物の復元、compiler未導入時のエラー、exit code伝播、
+hash生成、命名、`-ConfirmProfileChanges`必須）。
+
+```powershell
+uv run pytest tests/packaging
+uv run python tools/installer_contract.py
+```
+
+### installer smoke（実プロファイルを変更する。手動実行のみ）
+
+```powershell
+pwsh -File scripts/build-installer.ps1
+pwsh -File scripts/installer-smoke.ps1 -ConfirmProfileChanges
+```
+
+`-ConfirmProfileChanges`が無ければ何もせず失敗する。**CIから実行しない。**
+既存installがあれば先に除去してクリーンな状態から始める。自動確認は111項目:
+
+1. silent install（`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`、終了コード0）
+2. install先のsdp.exe・`_internal`・LICENSE、ユーザーデータとPythonソースの非混入
+3. スタートメニューshortcut（重複なし）、desktop shortcutが既定では作られないこと
+4. ProgID・Open With・7拡張子の`OpenWithProgids`・Capabilities・RegisteredApplications
+5. HKLMへ書いていないこと、Apps & Featuresへの登録
+6. install済みexeの`--selftest`と6形式の`--codec-test`
+7. version resource（ProductName／InternalName／OriginalFilename／FileVersion）と
+   Apps & FeaturesのDisplayVersionの一致
+8. same-version reinstall（`/TASKS=desktopicon`）で重複shortcut・重複registryなし
+9. reinstallで不要になったファイルが残らないこと（探針ファイルを置いて確認）
+10. **起動中のupgrade・uninstallが中止され、起動中のsdpが強制終了されないこと**
+11. registryの`QuietUninstallString`から取得したuninstallerでのsilent uninstall
+12. uninstall後にinstall先・shortcut・registry・processが残らないこと
+13. **`%LOCALAPPDATA%\sdp`とその中のファイルが保持されること**
+14. 全工程で7拡張子の`UserChoice`（既定アプリ）が変化しないこと
+
+### 実測（Windows 11 build 26200 / Inno Setup 6.7.3）
+
+| 項目 | 結果 |
+|---|---|
+| installer smoke | 111項目すべて成功 |
+| setup exe | 47.0 MiB（49,330,218 byte）。ZIP版は67.7 MiB |
+| build時間 | compile 約32秒、`-SkipBuild`で約37秒、build-releaseから通しで約128秒 |
+| install済みselftest／codec test | いずれも成功（6形式） |
+| 起動中のupgrade | 中止（install先は無傷、sdpは生存） |
+| 起動中のuninstall | 中止（install先は無傷、sdpは生存） |
+| uninstall後 | install先・shortcut・HKCU登録・processすべて消滅 |
+| ユーザーデータ | `%LOCALAPPDATA%\sdp`と中身が保持される |
+| UserChoice | 全工程で変化なし |
+
+**判明した落とし穴（実測で確認し、設計へ反映済み）**
+
+- 実行中のexeは**読み取りでは開けてしまい**、`FILE_SHARE_DELETE`のため削除も通る。
+  in-use判定は書き込みアクセスで行う必要がある。
+- `CloseHandle`は無効handleに対しても成功を返すため、`CreateFileW`の成否判定に
+  使えない。`INVALID_HANDLE_VALUE`と直接比較する。
+- `CloseApplications=yes`のRestart Managerは**silent実行時に既定でアプリを閉じる**。
+  そのため in-use 判定は`PrepareToInstall`では遅く、`InitializeSetup`で行う。
+- Inno Setupはupgrade時に前回選んだtaskを引き継ぐ。「初回installでdesktop shortcutを
+  作らない」はクリーンな状態でしか判定できないため、smokeは先に既存installを除去する。
+
+### 手動ゲート（未完了）
+
+- [ ] 通常ユーザーでUACプロンプトが出ないこと
+- [ ] スタートメニューから起動できること
+- [ ] Apps & Featuresの表示名・version・アイコン
+- [ ] wizardでLICENSEが表示され、技術検証用である旨が読めること
+- [ ] 7形式それぞれで「プログラムから開く」にsdpが出ること
+- [ ] Windowsの設定から既定アプリとして選べること（installerが勝手に変えていないこと）
+- [ ] 関連付け経由のダブルクリックで既存instanceへ追加され、processが増え続けないこと
+- [ ] 日本語・空白を含むpath、長いpathの関連付け起動
+- [ ] 旧version→新versionのupgrade（同一versionのreinstallは自動確認済み）
+- [ ] upgrade後にsettings／playlist／ui-state／cacheが維持されること
+- [ ] 起動中にGUIでupgradeしたときの案内表示（silent経路は自動確認済み）
+- [ ] 100%／150%（可能なら200%）DPIでのwizard表示
+- [ ] Windows Sandboxまたは新規Windowsユーザーでのinstall→起動→uninstall
+- [ ] Defenderのスキャン結果
+- [ ] SmartScreenの表示（**未署名のため警告が出る想定。実機で記録する**）
+- [ ] 日本語ユーザー名の環境
+- [ ] 標準ユーザー、read-onlyなinstall元、network share上のsetup exeからの実行
+
+## 6.19 手動リリースゲート（ZIP配布とinstaller）
 
 - [ ] `scripts/build-release.ps1`が成功する
+- [ ] `scripts/build-installer.ps1`が成功する
+- [ ] `scripts/installer-smoke.ps1 -ConfirmProfileChanges`が成功する
 - [ ] SHA-256が`release/*.sha256`と一致する
 - [ ] manifestのversion・runtime・pluginが期待どおり
+- [ ] installer manifestのscope・privileges・関連付け・SHA-256が期待どおり
 - [ ] `docs/distribution-licenses.md`の未解決事項が更新されている
-- [ ] 未解決のライセンス事項がある間は外部公開しない
+- [ ] 未解決のライセンス事項がある間は外部公開しない（ZIP・installerとも）
 
 ## 7. 手動チェックリスト（リリース前）
 

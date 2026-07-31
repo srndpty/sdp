@@ -25,7 +25,12 @@ P7-B1（PyInstaller onedir配布ビルド）とP7-B2（配布版の実環境検�
 Defenderスキャンまで確認した。実音・実画面の受け入れ（可聴再生、150%DPI、SmartScreen、
 クリーン環境）と外部配布ライセンスの未解決事項は残っており、
 **外部公開可能な配布物とは扱わない**（[docs/distribution-licenses.md](./docs/distribution-licenses.md)）。
-インストーラーと関連付けはP7-Cで扱う。
+
+P7-C（Inno Setupのper-userインストーラーとWindows関連付け）は実装・自動検証済み。
+silent install／same-version reinstall／起動中のupgrade・uninstall中止／uninstallまでを
+実プロファイル上で通しで確認した（[installer smoke](#installerの動作確認)）。
+インストーラーも**ライセンスの未解決事項が残るあいだは技術検証用**であり、
+公開配布物として扱わない。
 
 `uv run python -m sdp` でウィンドウが起動し、次の操作ができる。
 
@@ -357,6 +362,102 @@ backendに含まれるcodec、Windows、driver等でも変わるため、WAV／M
 Opus／M4A／AACは対象Windows環境で実音確認する。
 （[Qt Multimediaのbackend説明](https://doc.qt.io/qt-6/qtmultimedia-index.html)、
 [Windows固有事項](https://doc.qt.io/qt-6/qtmultimedia-windows.html)）
+
+## Windowsインストーラーの作成（P7-C）
+
+```powershell
+pwsh -File scripts/build-installer.ps1
+```
+
+[Inno Setup 6.3以降](https://jrsoftware.org/isinfo.php)が必要
+（`winget install --id JRSoftware.InnoSetup -e`）。PATHに無い場合は
+`-InnoSetupCompiler <ISCC.exeのpath>` か環境変数`INNO_SETUP_COMPILER`で指定する。
+未導入なら対処方法つきのエラーで停止する。
+
+ZIPリリース生成 → **ZIP配布物とinstaller入力の内容一致検証** → layout検査 →
+ライセンス資料検査 → installer契約検査 → selftest・codec test →
+version resource確認 → compile → SHA-256とmanifest、までを1コマンドで行う。
+途中で失敗した場合、前回の正常なinstallerを`release\`から消さない。
+
+```text
+release/
+├─ sdp-0.0.1-windows-x64.zip                        （P7-B2）
+├─ sdp-0.0.1-windows-x64.zip.sha256
+├─ sdp-0.0.1-windows-x64.manifest.json
+├─ sdp-0.0.1-windows-x64-setup.exe                  （P7-C）
+├─ sdp-0.0.1-windows-x64-setup.exe.sha256
+└─ sdp-0.0.1-windows-x64-installer.manifest.json
+```
+
+**このインストーラーは技術検証用である。** コード署名を行っていないため、
+ダウンロードして実行するとSmartScreenの警告が出る想定であり、
+同梱ライブラリのライセンス条件も未解決である。外部公開・再頒布はしない
+（[docs/distribution-licenses.md](./docs/distribution-licenses.md)）。
+
+### インストールされるもの
+
+| 項目 | 内容 |
+|---|---|
+| 方式 | per-user（管理者権限・UAC昇格なし。Program Filesへ書かない） |
+| インストール先 | `%LOCALAPPDATA%\Programs\sdp` |
+| ユーザーデータ | `%LOCALAPPDATA%\sdp`（**インストール先とは別。上書きも削除もしない**） |
+| スタートメニュー | `sdp`（標準で作成） |
+| デスクトップ | 任意（インストーラーのチェックボックス。既定はオフ） |
+| レジストリ | HKCUのみ（`Software\Classes\sdp.AudioFile`、`Software\Classes\Applications\sdp.exe`、各拡張子の`OpenWithProgids`、`Software\sdp\Capabilities`、`Software\RegisteredApplications`） |
+| 関連付け候補 | `.wav` `.mp3` `.flac` `.ogg` `.opus` `.m4a` `.aac`（ProgIDは`sdp.AudioFile`の1つ） |
+
+### 既定のアプリは変更しない
+
+Windows 10/11では、既定のアプリ（`UserChoice`）をインストーラーから正しく変更できない。
+sdpは**「プログラムから開く」の候補として登録するだけ**で、`UserChoice`には一切触れない。
+既定にしたい場合は、利用者がWindowsの設定（`ms-settings:defaultapps`）から選ぶ。
+既存の関連付けを奪うことはない。
+
+### アンインストール
+
+「アプリと機能」または`%LOCALAPPDATA%\Programs\sdp\unins000.exe`から実行する。
+削除されるのはインストールしたファイル、ショートカット、インストーラーが作成した
+HKCUの登録、アンインストーラー自身だけである。
+
+**設定・プレイリスト・UI状態・波形キャッシュ・ログは削除しない。**
+再インストールするとそのまま引き継がれる。手動で消す場合は次を削除する。
+
+```text
+%LOCALAPPDATA%\sdp
+```
+
+sdpの起動中はインストールもアンインストールも中止される（無断で強制終了しない）。
+sdpを終了してからやり直すこと。
+
+### installerの動作確認
+
+```powershell
+pwsh -File scripts/installer-smoke.ps1 -ConfirmProfileChanges
+```
+
+silent install → install済みexeのselftestとcodec test → same-version reinstall →
+起動中のupgrade・uninstallが中止されること → uninstall → ユーザーデータ保持、までを
+自動で確認する。**実行ユーザーのプロファイル（`%LOCALAPPDATA%`、HKCU、
+スタートメニュー）を実際に変更する**ため`-ConfirmProfileChanges`を必須にしており、
+CIからは実行しない。可能ならWindows Sandboxか検証用の新規Windowsユーザーで実行する。
+
+Inno Setup compilerが無くても、installer scriptの契約（per-user、HKCUのみ、
+UserChoice非変更、対象7拡張子、uninstall時のユーザーデータ保持など）は
+pytestと次のコマンドで検査できる。
+
+```powershell
+uv run python tools/installer_contract.py
+```
+
+### アプリアイコン
+
+`assets/sdp.ico`（16／24／32／48／64／128／256px）はフォントやクリップアート等の
+第三者素材を使わず、`tools/gen_app_icon.py`の図形描画だけで生成した自作物で、
+sdp本体と同じMIT Licenseで扱える。再生成する場合のみ次を実行する（追加依存は不要）。
+
+```powershell
+uv run python tools/gen_app_icon.py
+```
 
 ## 開発コマンド
 

@@ -325,11 +325,10 @@ P6-C（UX仕上げと破損・失敗時の統合確認）**の3つへ分割す�
 
 **P6完了時点を、パッケージング前の機能完成版とする。**
 P7-A（起動引数と単一instance）は実装・自動テスト済みで、
-Windows上の手動受け入れを残している。P7-B1（PyInstaller onedirビルドとselftest）と
-P7-B2（配布版の実環境検証とZIPリリース生成）は実装・自動検証済みで、
-配布版の可聴再生・DPI・SmartScreen・クリーン環境の手動受け入れと、
-外部配布ライセンスの未解決事項を残している。
-P7-C（Inno Setupと関連付け）は未着手。
+Windows上の手動受け入れを残している。P7-B1（PyInstaller onedirビルドとselftest）、
+**P7-B2（配布版の実環境検証とZIPリリース生成）は完了**、
+**P7-C（Inno Setupのper-user installerとWindows関連付け）は実装・自動検証済み**で、
+いずれも実画面・実音の手動受け入れと、外部配布ライセンスの未解決事項を残している。
 
 ### P7: Windows 統合と配布（P7-A: 単一instanceと引数、P7-B: パッケージとインストーラー）
 
@@ -350,12 +349,31 @@ P7-C（Inno Setupと関連付け）は未着手。
   SmartScreen表示、Windows Sandbox等のクリーン環境、Python未導入環境。
   **外部配布ブロッカー**: Qt/PySide6のLGPL原文同梱と配布形態の決定、FFmpeg／OpenSSLの
   原文、MutagenのGPL波及範囲（[distribution-licenses.md](./distribution-licenses.md)）。
-- **P7-C（未着手）**: Inno Setupのper-user installer、アンインストーラー、スタートメニュー、
-  ファイル関連付け、app icon、version resource、上書き更新、uninstall時のユーザーデータ扱い。
+- **P7-C進捗**: Inno Setup 6のper-user installer（`packaging/installer.iss`）、
+  `scripts/{build-installer,installer-smoke}.ps1`、自作app icon（`assets/sdp.ico`、
+  7解像度）、Windows version resource、スタートメニューと任意のデスクトップ
+  ショートカット、「プログラムから開く」登録、7拡張子のProgID（`sdp.AudioFile`）、
+  installer manifest、Inno Setup compiler不要の契約検査（`sdp/inno_script.py` と
+  `sdp/installer_contract.py`）を実装した。
+  installer smokeで silent install／install済みselftest・codec test／
+  same-version reinstall／**起動中のupgrade・uninstallの中止**／uninstall／
+  **ユーザーデータ保持**／**UserChoice非変更**の111項目を実測した
+  （[architecture.md §11、§12.5](./architecture.md)、
+  [testing-strategy.md §6.18](./testing-strategy.md)）。
+  **未完了**: UAC非表示・Apps & Features表示・関連付け経由のダブルクリック・
+  旧version→新versionのupgrade・DPI・Sandbox／新規ユーザー・SmartScreenの手動確認。
   **ライセンスの未解決事項が残るあいだ、installerは技術検証用に留め、公開可能とは扱わない。**
-- **P7-B/C変更候補**: `src/sdp/services/win_integration.py`、
-  `src/sdp/__main__.py`（`--selftest`）、
-  `packaging/{sdp.spec,installer.iss}`、`docs/testing-strategy.md`（手動チェックリスト）
+- **残るreleaseブロッカー**: (1) Qt/PySide6のLGPL原文同梱と配布形態の決定、
+  FFmpeg／OpenSSLの原文、MutagenのGPL波及範囲
+  （[distribution-licenses.md](./distribution-licenses.md)）、
+  (2) P3・P4-B・P6-C・P7-A・P7-B2・P7-Cの手動受け入れ、
+  (3) コード署名なしによるSmartScreen警告の扱い。
+- **P7-B/C変更ファイル**: `src/sdp/{inno_script,installer_contract,installer_manifest,
+  windows_version}.py`、`src/sdp/__main__.py`（`--selftest`／`--codec-test`）、
+  `packaging/{sdp.spec,installer.iss,windows-version-info.txt}`、`assets/sdp.ico`、
+  `tools/{installer_contract,installer_manifest,gen_app_icon}.py`、
+  `scripts/{build-installer,installer-smoke}.ps1`、
+  `docs/testing-strategy.md`（手動チェックリスト）
 - **受け入れ条件**: exe へ複数パスを渡して再生でき、二重起動でパスが既存プロセスへ転送され
   前面化（不可の場合はタスクバー点滅）する。インストーラー実行後に「プログラムから開く」へ
   出現し、既定アプリ設定への導線が動作し、アンインストールで登録が消える。
