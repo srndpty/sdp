@@ -11,6 +11,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from PySide6.QtWidgets import QApplication
 
@@ -167,6 +168,20 @@ def build_player(
         SaveCategory.UI_STATE, ui_state_session.save_failed, ui_state_session.save_recovered
     )
     save_status.message_requested.connect(window.show_status_message)
+
+    # 設定適用の失敗後にrollbackもできなかった場合、公開snapshotは実状態へ
+    # 合わせ直される。利用者から見ると「操作していない設定が変わった」ので伝える。
+    def _report_rollback_failure(names: object) -> None:
+        if not isinstance(names, tuple):
+            return
+        items = cast("tuple[object, ...]", names)
+        if not items:
+            return
+        joined = "・".join(str(name) for name in items)
+        window.show_status_message(f"{joined}を元に戻せませんでした。設定画面で確認してください。")
+
+    app_settings.settings_rollback_failed.connect(_report_rollback_failure)
+
     launch_handler = LaunchRequestHandler(playlist_model, window)
     composition = PlayerComposition(
         backend=backend,
