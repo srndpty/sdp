@@ -101,7 +101,6 @@ class PlaylistPlaybackController(QObject):
         self._can_play_next = False
 
         playback.source_changed.connect(self._on_source_changed)
-        playback.position_changed.connect(self._on_position_changed)
         playback.media_status_changed.connect(self._on_media_status_changed)
         playlist.rowsInserted.connect(self._on_playlist_rows_changed)
         playlist.rowsRemoved.connect(self._on_playlist_rows_changed)
@@ -471,16 +470,14 @@ class PlaylistPlaybackController(QObject):
         self._current_generation_started = False
         self._set_current_entry_id(self._loading_entry_id)
 
-    def _on_position_changed(self, position_ms: int) -> None:
-        """現在sourceが実際に進み始めたことを記録する。"""
-        if position_ms > 0:
-            self._current_generation_started = True
-
     def _on_media_status_changed(self, status: MediaStatus) -> None:
         if status in _SOURCE_PROGRESS_STATUSES:
             # 新sourceの読み込みが進んだ証拠。ここで世代を「開始済み」とみなす。
-            # 正のpositionを待つと、0ms扱いの音源や数msの効果音のように
-            # 一度も正のpositionを通知しないまま終わる音源で次曲へ進めなくなる。
+            #
+            # **positionでは判定しない。** 前sourceの遅延positionでも、1度でも
+            # 正の値が届けば新世代を開始済みにしてしまい、続けて届く前source由来の
+            # 遅延ENDで1曲飛ばす。読み込み進行statusは新sourceしか出さないため、
+            # 世代の開始を表す根拠としてはこちらだけを使う。
             self._current_generation_started = True
             return
         if status is not MediaStatus.END_OF_MEDIA:

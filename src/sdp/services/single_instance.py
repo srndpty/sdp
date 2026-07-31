@@ -279,10 +279,12 @@ class SingleInstanceService(QObject):
         if thread is not None and thread.isRunning():
             thread.quit()
             # 上限つきで待つ。超えても無期限待機へ移らず、放棄して制御を返す。
+            # 放棄する場合は、thread内で使うendpointの所有者ごと生かしておく。
             stop_thread(
                 thread,
                 label="単一instance IPC thread",
                 soft_timeout_ms=self._startup_timeout_ms,
+                keepalive=(thread, self),
             )
         self._server_thread = None
         if self._primary:

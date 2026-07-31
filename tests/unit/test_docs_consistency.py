@@ -24,16 +24,37 @@ _DOCUMENTED_PACKAGES = ("services", "ui")
 
 
 def documented_modules() -> set[str]:
-    """architecture.mdの構成図に現れる ``*.py`` の名前。"""
-    text = _ARCHITECTURE.read_text(encoding="utf-8")
-    return set(re.findall(r"([a-z0-9_]+\.py)", text))
+    """architecture.mdの構成図が示す、``src/sdp`` からの相対path。
+
+    basenameだけで比べると、``services/foo.py`` の記載漏れを ``ui/foo.py`` の
+    記載が隠してしまう。構成図はpackageごとの節に分かれているので、
+    直前に現れたpackage名と組み合わせて相対pathへ復元する。
+    """
+    documented: set[str] = set()
+    package = ""
+    for line in _ARCHITECTURE.read_text(encoding="utf-8").splitlines():
+        directory = re.search(r"([a-z0-9_]+)/\s*$", line)
+        if directory is not None:
+            package = directory.group(1)
+            continue
+        module = re.search(r"([a-z0-9_]+\.py)", line)
+        if module is not None:
+            documented.add(f"{package}/{module.group(1)}" if package else module.group(1))
+    return documented
+
+
+def documented_module_names() -> set[str]:
+    """相対pathの末尾（実在確認用）。"""
+    return {path.rsplit("/", 1)[-1] for path in documented_modules()}
 
 
 @pytest.mark.parametrize("package", _DOCUMENTED_PACKAGES)
 def test_architecture_lists_every_module(package: str) -> None:
     """新しいモジュールを構成図へ書き漏らしていない。"""
     actual = {
-        path.name for path in (_SOURCE_ROOT / package).glob("*.py") if path.name != "__init__.py"
+        f"{package}/{path.name}"
+        for path in (_SOURCE_ROOT / package).glob("*.py")
+        if path.name != "__init__.py"
     }
 
     missing = sorted(actual - documented_modules())
@@ -48,8 +69,7 @@ def test_architecture_does_not_list_removed_modules() -> None:
         for root in (_SOURCE_ROOT, _REPO_ROOT / "tools", _REPO_ROOT / "tests")
         for path in root.rglob("*.py")
     }
-    # 構成図以外の本文にも .py 名は現れるため、実在確認だけを行う。
-    stale = sorted(name for name in documented_modules() if name not in existing)
+    stale = sorted(name for name in documented_module_names() if name not in existing)
 
     assert stale == [], f"architecture.mdが実在しないモジュールを記載しています: {stale}"
 

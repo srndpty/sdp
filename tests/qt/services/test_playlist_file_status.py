@@ -5,6 +5,7 @@ GUIスレッドを止めないことが目的なので、バッチ単位で直�
 古い世代の結果を捨てること、Modelを他スレッドから触らないことを確かめる。
 """
 
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from threading import Event
@@ -13,8 +14,9 @@ import pytest
 from PySide6.QtCore import QThreadPool
 from pytestqt.qtbot import QtBot
 
-from sdp.core.playlist.entry import FileStatus
+from sdp.core.playlist.entry import FileStatus, create_entry
 from sdp.core.playlist.model import PlaylistModel
+from sdp.services import playlist_file_status
 from sdp.services.playlist_file_status import PlaylistFileStatusChecker
 
 WAIT_TIMEOUT_MS = 5_000
@@ -177,3 +179,56 @@ def test_shutdown_returns_even_when_the_batch_does_not_finish(
     checker._batch_done = Event()  # pyright: ignore[reportPrivateUsage]
 
     assert checker.shutdown(wait_ms=20) is False
+
+
+def test_model_reset_during_a_batch_does_not_stall_further_checks(
+    playlist: PlaylistModel, tmp_path: Path, pool: QThreadPool, qtbot: QtBot
+) -> None:
+    """バッチ実行中のmodelResetで確認が止まらない。
+
+    古い結果を捨てるだけで次を予約しないと、以後のUNKNOWNが永久に未確認のまま残る。
+    """
+    blocked = threading.Event()
+    entered = threading.Event()
+    original = playlist_file_status.probe_file_status
+
+    def blocking_probe(path: Path) -> FileStatus:
+        entered.set()
+        blocked.wait(timeout=5)
+        return original(path)
+
+    first = tmp_path / "最初の曲.wav"
+    first.write_bytes(b"x")
+    playlist.add_paths([first])
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(playlist_file_status, "probe_file_status", blocking_probe)
+        checker = PlaylistFileStatusChecker(playlist, pool=pool)
+        assert entered.wait(timeout=5)
+
+        # 実行中に総入れ替えする（保存済みplaylistの復元と同じ経路）。
+        replaced = tmp_path / "差し替えた曲.wav"
+        replaced.write_bytes(b"x")
+        playlist.replace_entries([create_entry(replaced)])
+        blocked.set()
+
+    wait_until_checked(qtbot, playlist)
+
+    assert playlist.entry_at(0).file_status is FileStatus.AVAILABLE
+    checker.shutdown()
+
+
+def test_shutdown_does_not_rewrite_a_failed_result_as_success(
+    playlist: PlaylistModel, audio_files: list[Path], pool: QThreadPool
+) -> None:
+    """冪等なshutdownでも、初回の失敗を成功へ書き換えない。"""
+    playlist.add_paths(audio_files)
+    checker = PlaylistFileStatusChecker(playlist, pool=pool)
+    # 終わらないバッチを模し、初回shutdownを失敗させる。
+    checker._batch_done = threading.Event()  # pyright: ignore[reportPrivateUsage]
+
+    assert checker.shutdown(wait_ms=20) is False
+    assert checker.shutdown() is False
+
+    # 実際に終わったあとは成功へ更新してよい。
+    checker._batch_done.set()  # pyright: ignore[reportPrivateUsage]
+    assert checker.shutdown() is True

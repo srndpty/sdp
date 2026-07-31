@@ -1609,6 +1609,31 @@ P7-B2の要件にしない。
 
 ---
 
+## 12.6 終了処理の待機上限
+
+終了操作が返らないと「閉じるを押したのにプロセスが残る」状態になる。一方で、
+実行中の :class:`QThread` を親ごと破棄すると異常終了する。両立させるため、
+`services/thread_shutdown.py` の `stop_thread()` が次を担う。
+
+- soft上限（既定3秒）で警告し、hard上限（既定10秒）で待機を打ち切る。
+- 打ち切った場合はthreadと関連オブジェクト（worker QObjectなど）を引き取り、
+  制御を呼び出し側へ返す。`QThread.terminate` は使わない
+  （保存中のユーザーデータが壊れうるため）。
+- 回収は **Qtのevent loopに依存しない**。アプリの終了処理は `app.exec()` が
+  戻ったあとに走るため、queued connectionへ回収を任せると配送されない。
+  専用のreaper threadが `QThread.wait()` で待ち、戻ったところで参照を解放する。
+- 各サービスの `shutdown()` は冪等だが、**初回の結果を書き換えない**。
+  放棄したthreadが後から終了した場合だけ `STOPPED` へ更新する。
+
+**既知の制限**: `MetadataReader` は `QThreadPool` を使うため、この方式を適用できない
+（個々のrunnableを切り離せず、`QThreadPool` のデストラクタは全runnableの完了まで
+ブロックする）。`shutdown(timeout_ms)` は**メソッドの待機上限であって、
+プロセス終了の上限ではない**。厳密な上限が必要になったら、キャンセル不能な
+Mutagenの同期I/Oを別プロセスへ分離する。現状は「戻らないファイルは想定しない」
+という前提で運用し、超過時は `ABANDONED` を返してログへ残す。
+
+---
+
 ## 13. ログとエラー処理
 
 - `logging` で `%LOCALAPPDATA%\sdp\logs\sdp.log` へ出力する

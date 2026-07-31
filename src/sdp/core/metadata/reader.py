@@ -22,6 +22,7 @@ from PySide6.QtCore import QModelIndex, QObject, QRunnable, QThread, QThreadPool
 
 from sdp.core.metadata.types import MetadataStatus, TrackMetadata
 from sdp.core.playlist.model import FILE_STATUS_ROLE, PlaylistModel
+from sdp.services.thread_shutdown import ShutdownOutcome
 
 _logger = logging.getLogger(__name__)
 
@@ -237,6 +238,7 @@ class MetadataReader(QObject):
         self._next_token = 0
         self._started = False
         self._shutdown = False
+        self._shutdown_outcome: ShutdownOutcome | None = None
         # 投入待ちの entry_id（FIFO）。同じ entry を二重に積まない。
         self._pending: deque[str] = deque()
         self._pending_ids: set[str] = set()
@@ -253,8 +255,11 @@ class MetadataReader(QObject):
 
     @property
     def pending_count(self) -> int:
-        """まだ投入していない待ち件数（診断とテスト用）。"""
-        return len(self._pending)
+        """まだ投入していない待ち件数（診断とテスト用）。
+
+        取り消し済みの幽霊はdequeへ残るため、有効な件数は集合の側で数える。
+        """
+        return len(self._pending_ids)
 
     @property
     def in_flight_count(self) -> int:
@@ -278,16 +283,28 @@ class MetadataReader(QObject):
         self._playlist.modelReset.connect(self._on_model_reset)
         self._schedule_all()
 
-    def shutdown(self, timeout_ms: int = SHUTDOWN_TIMEOUT_MS) -> None:
+    def shutdown(self, timeout_ms: int = SHUTDOWN_TIMEOUT_MS) -> ShutdownOutcome:
         """新しい要求を止め、未開始のタスクを捨てて協調的に停止する。
 
         実行中の Mutagen の同期 I/O は強制終了しない。トークンを無効化して
-        結果を無視する論理キャンセルを行う。``timeout_ms`` はこのメソッド内での
-        待機上限であり、実行中I/Oが戻らなければ、後のQThreadPool破棄でプロセス終了が
-        遅れる可能性がある。厳密な終了時刻は保証しない。
+        結果を無視する論理キャンセルを行う。
+
+        **``timeout_ms`` はこのメソッドの待機上限であり、プロセス終了の上限ではない。**
+        ``QThreadPool`` のデストラクタは全runnableの完了までブロックする仕様のため、
+        実行中のI/Oが戻らなければ、このメソッドが戻ったあとのpool破棄で終了が
+        止まりうる。QThreadに対する :func:`sdp.services.thread_shutdown.stop_thread`
+        のような「放棄」はQThreadPoolでは行えない（個々のrunnableを切り離せない）。
+
+        厳密なプロセス終了上限が要るなら、キャンセル不能なMutagen I/Oを
+        別プロセスへ分離する必要がある。現状は「戻らないファイルは想定しない」
+        という前提で、待機上限だけを設けている
+        （[architecture.md](../../../docs/architecture.md) の終了処理の節）。
+
+        時間内に全runnableが終われば ``STOPPED``、そうでなければ ``ABANDONED``。
+        冪等だが、初回の結果は書き換えない。
         """
         if self._shutdown:
-            return
+            return self._recheck_shutdown_outcome(timeout_ms)
         self._shutdown = True
         self._tokens.clear()
         self._pending.clear()
@@ -298,10 +315,23 @@ class MetadataReader(QObject):
             self._playlist.dataChanged.disconnect(self._on_data_changed)
             self._playlist.modelReset.disconnect(self._on_model_reset)
         self._clear_pending_tasks()
-        if not self._pool.waitForDone(timeout_ms):
+        if self._pool.waitForDone(timeout_ms):
+            self._shutdown_outcome = ShutdownOutcome.STOPPED
+        else:
             _logger.warning(
-                "メタデータ読み取りの終了待ちがタイムアウトしました（%dms）。", timeout_ms
+                "メタデータ読み取りの終了待ちがタイムアウトしました（%dms）。"
+                "実行中のI/Oが戻るまで、後のQThreadPool破棄で終了が遅れます。",
+                timeout_ms,
             )
+            self._shutdown_outcome = ShutdownOutcome.ABANDONED
+        return self._shutdown_outcome
+
+    def _recheck_shutdown_outcome(self, timeout_ms: int) -> ShutdownOutcome:
+        """初回の結果を返す。その後に全runnableが終わっていれば STOPPED へ更新する。"""
+        del timeout_ms
+        if self._shutdown_outcome is ShutdownOutcome.ABANDONED and self._pool.waitForDone(0):
+            self._shutdown_outcome = ShutdownOutcome.STOPPED
+        return ShutdownOutcome.STOPPED if self._shutdown_outcome is None else self._shutdown_outcome
 
     def _clear_pending_tasks(self) -> None:
         """まだ開始していない読み取りtaskを破棄する。"""
@@ -322,10 +352,8 @@ class MetadataReader(QObject):
         self._tokens = {
             entry_id: token for entry_id, token in self._tokens.items() if entry_id in existing_ids
         }
+        # 取り消しはlazy deletion。dequeの再構築はここでも行わない。
         self._pending_ids &= existing_ids
-        self._pending = deque(
-            entry_id for entry_id in self._pending if entry_id in self._pending_ids
-        )
 
     def _on_data_changed(
         self, top_left: QModelIndex, bottom_right: QModelIndex, roles: list[int]
@@ -381,6 +409,10 @@ class MetadataReader(QObject):
         """投入枠が空いているあいだ、待ち行列から順に投入する。"""
         while not self._shutdown and self._in_flight < self.max_in_flight and self._pending:
             entry_id = self._pending.popleft()
+            # 取り消しはlazy deletion（_pending_idsから外すだけ）なので、
+            # dequeへ残った幽霊はここで読み飛ばす。
+            if entry_id not in self._pending_ids:
+                continue
             self._pending_ids.discard(entry_id)
             if self._start_read(entry_id):
                 self._in_flight += 1
@@ -412,10 +444,13 @@ class MetadataReader(QObject):
         return True
 
     def _discard_pending(self, entry_id: str) -> None:
-        if entry_id not in self._pending_ids:
-            return
+        """待ち行列から取り消す（deque本体からは消さないlazy deletion）。
+
+        ファイル状態の確認は1行ずつ ``dataChanged`` を出すため、大量の欠損では
+        取り消しが件数ぶん起きる。そのたびにdequeを作り直すとGUIスレッドで
+        O(N^2) になるので、集合から外すだけにして投入時に読み飛ばす。
+        """
         self._pending_ids.discard(entry_id)
-        self._pending = deque(pending for pending in self._pending if pending != entry_id)
 
     # -- 結果の反映（GUI スレッド） -----------------------------------------
 

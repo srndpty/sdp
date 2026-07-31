@@ -5,14 +5,21 @@
 上限超過時は放棄して制御だけ返す設計になっている。
 """
 
+import gc
 import threading
+import weakref
 from collections.abc import Iterator
 
 import pytest
-from PySide6.QtCore import QThread
+from PySide6.QtCore import QObject, QThread
 from pytestqt.qtbot import QtBot
 
-from sdp.services.thread_shutdown import ShutdownOutcome, abandoned_thread_count, stop_thread
+from sdp.services.thread_shutdown import (
+    ShutdownOutcome,
+    abandoned_thread_count,
+    stop_thread,
+    wait_for_abandoned_threads,
+)
 
 WAIT_TIMEOUT_MS = 5_000
 
@@ -83,7 +90,9 @@ def test_blocked_thread_is_abandoned_instead_of_waiting_forever(
     assert abandoned_thread_count() == before + 1
 
     release.set()
-    qtbot.waitUntil(lambda: abandoned_thread_count() == before, timeout=WAIT_TIMEOUT_MS)
+    # 回収はQtのevent loopに依存しない（実際の終了処理はexec()後に走るため）。
+    assert wait_for_abandoned_threads()
+    assert abandoned_thread_count() == before
     assert thread.wait(WAIT_TIMEOUT_MS)
 
 
@@ -99,5 +108,79 @@ def test_abandoned_thread_releases_itself_after_returning(
 
     release.set()
 
-    qtbot.waitUntil(lambda: abandoned_thread_count() == 0, timeout=WAIT_TIMEOUT_MS)
+    assert wait_for_abandoned_threads()
     assert thread.wait(WAIT_TIMEOUT_MS)
+
+
+def test_abandoned_thread_is_reaped_without_running_a_qt_event_loop(
+    release: threading.Event,
+) -> None:
+    """Qtのevent loopを回さなくても回収される。
+
+    実際の終了処理は ``app.exec()`` が戻ったあとに走るため、queued connectionへ
+    回収を任せると配送されない。ここではevent loopを一切回さずに確かめる。
+    """
+    thread = _BlockingThread(release)
+    thread.start()
+    assert thread.entered.wait(timeout=5)
+    before = abandoned_thread_count()
+
+    assert stop_thread(thread, label="テスト", soft_timeout_ms=1, hard_timeout_ms=5) is (
+        ShutdownOutcome.ABANDONED
+    )
+    assert abandoned_thread_count() == before + 1
+
+    release.set()
+
+    assert wait_for_abandoned_threads()
+    assert abandoned_thread_count() == before
+
+
+def test_thread_finishing_right_after_the_hard_timeout_is_still_reaped(
+    release: threading.Event,
+) -> None:
+    """hard timeout直後に終了しても取りこぼさない。
+
+    「wait()がFalseを返した直後にthreadが終わる」順序では、あとから接続する
+    signalは届かない。回収はsignalではなくwait()で行う。
+    """
+    thread = _BlockingThread(release)
+    thread.start()
+    assert thread.entered.wait(timeout=5)
+    before = abandoned_thread_count()
+
+    # 放棄の直前に解放し、finishedのemitと登録が競合する状況を作る。
+    release.set()
+    stop_thread(thread, label="テスト", soft_timeout_ms=0, hard_timeout_ms=0)
+
+    assert wait_for_abandoned_threads()
+    assert abandoned_thread_count() == before
+
+
+def test_keepalive_objects_survive_until_the_thread_returns(
+    release: threading.Event,
+) -> None:
+    """放棄したthreadが戻るまで、渡したオブジェクトを解放しない。
+
+    worker QObjectのPython参照が先に切れると、thread内でまだ動いている
+    コードの足元が崩れる。
+    """
+    thread = _BlockingThread(release)
+    thread.start()
+    assert thread.entered.wait(timeout=5)
+    keepalive = QObject()
+    reference = weakref.ref(keepalive)
+
+    stop_thread(
+        thread, label="テスト", soft_timeout_ms=1, hard_timeout_ms=5, keepalive=(keepalive,)
+    )
+    del keepalive
+    gc.collect()
+
+    # threadが動いているあいだは生きている。
+    assert reference() is not None
+
+    release.set()
+    assert wait_for_abandoned_threads()
+    gc.collect()
+    assert reference() is None

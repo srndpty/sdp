@@ -978,3 +978,30 @@ def test_entry_can_be_played_while_metadata_is_loading(
     playlist.mark_metadata_loading(entry_ids[0])
 
     assert controller.play_entry(entry_ids[0]) is True
+
+
+def test_stale_position_from_the_previous_source_does_not_arm_the_new_generation(
+    controller: PlaylistPlaybackController,
+    playlist: PlaylistModel,
+    backend: FakePlaybackBackend,
+    audio_files: list[Path],
+    qtbot: QtBot,
+) -> None:
+    """前sourceの遅延positionでは、新世代を「開始済み」にしない。
+
+    positionでarmingすると、A由来の遅延positionのあとにA由来の遅延ENDが届いた
+    だけでBを終了扱いにして、1曲飛ばしてしまう。
+    """
+    entry_ids = playlist.add_paths(audio_files[:3])
+    controller.play_entry(entry_ids[0])
+    backend.defer_load_status = True
+
+    finish_current_track(backend, qtbot)
+    assert controller.current_entry_id == entry_ids[1]
+
+    # Bがまだ何も通知していない間に届く、A由来の遅延position＋遅延END。
+    backend.emit_position(1_234)
+    backend.emit_media_status(MediaStatus.END_OF_MEDIA)
+    process_deferred_events(qtbot)
+
+    assert controller.current_entry_id == entry_ids[1]

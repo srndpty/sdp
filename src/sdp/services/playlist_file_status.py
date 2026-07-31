@@ -100,6 +100,7 @@ class PlaylistFileStatusChecker(QObject):
         self._generation = 0
         self._running = False
         self._shutdown = False
+        self._shutdown_stopped: bool | None = None
         self._batch_done: Event | None = None
 
         playlist.rowsInserted.connect(self._on_rows_inserted)
@@ -140,16 +141,29 @@ class PlaylistFileStatusChecker(QObject):
         実行中バッチの完了は ``wait_ms`` を上限に待つ。**上限を超えても
         無期限待機へは移らない**（終了操作が返らなくなるのを避ける）。
         時間内に止まれば ``True``。
+
+        冪等だが、**初回の失敗を成功へ書き換えない**。2回目以降は初回の結果を
+        返し、その後にバッチが実際に終わっていた場合だけ ``True`` へ更新する。
         """
         if self._shutdown:
-            return True
+            return self._recheck_shutdown_outcome()
         self._shutdown = True
         self._generation += 1
         done = self._batch_done
-        if done is None or done.wait(max(0, wait_ms) / 1_000.0):
+        stopped = done is None or done.wait(max(0, wait_ms) / 1_000.0)
+        if not stopped:
+            _logger.warning("ファイル状態確認のバッチが%dms以内に終わりませんでした", wait_ms)
+        self._shutdown_stopped = stopped
+        return stopped
+
+    def _recheck_shutdown_outcome(self) -> bool:
+        """初回の結果を返す。遅れて終わっていれば成功へ更新する。"""
+        if self._shutdown_stopped:
             return True
-        _logger.warning("ファイル状態確認のバッチが%dms以内に終わりませんでした", wait_ms)
-        return False
+        done = self._batch_done
+        if done is not None and done.is_set():
+            self._shutdown_stopped = True
+        return bool(self._shutdown_stopped)
 
     def _on_rows_inserted(self, *_arguments: object) -> None:
         self.schedule()
@@ -162,9 +176,11 @@ class PlaylistFileStatusChecker(QObject):
 
     def _on_batch_finished(self, generation: int, results: object) -> None:
         self._running = False
-        if self._shutdown or generation != self._generation:
+        if self._shutdown:
             return
-        if not isinstance(results, dict):
-            return
-        self._playlist.apply_file_statuses(cast("dict[str, FileStatus]", results))
+        # 結果を捨てる場合でも必ず次を予約する。捨てて return すると、
+        # 「バッチ実行中に modelReset が起きた」ときに誰も再開せず、
+        # 以後のUNKNOWNが永久に未確認のまま残る。
+        if generation == self._generation and isinstance(results, dict):
+            self._playlist.apply_file_statuses(cast("dict[str, FileStatus]", results))
         self.schedule()

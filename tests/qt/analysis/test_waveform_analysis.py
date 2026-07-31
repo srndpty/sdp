@@ -20,7 +20,7 @@ from sdp.core.analysis.waveform_cache import (
     WaveformCacheKey,
 )
 from sdp.core.playback.controller import PlaybackController
-from sdp.services.thread_shutdown import ShutdownOutcome
+from sdp.services.thread_shutdown import ShutdownOutcome, wait_for_abandoned_threads
 from sdp.services.waveform_analysis import (
     FILE_CHANGED_MESSAGE,
     DecodedChunk,
@@ -373,7 +373,11 @@ def test_file_identity_rechecks_run_only_on_worker_thread(
     qtbot: QtBot,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """要求生成後のstat再確認をGUI threadで実行しない。"""
+    """キャッシュキーの生成と再確認を、いずれもGUI threadで実行しない。
+
+    内容fingerprintの算出は最大192KiBの読み取りを伴う。GUIスレッドで作ると
+    NAS・休止ディスク・クラウドプレースホルダーでsource切替のたびにUIが止まる。
+    """
     source = make_audio_file(tmp_path)
     threads: list[QThread] = []
     original_from_path = WaveformCacheKey.from_path
@@ -402,12 +406,12 @@ def test_file_identity_rechecks_run_only_on_worker_thread(
     controller.load(source)
     qtbot.waitUntil(lambda: finished.count() == 1, timeout=5_000)
 
-    assert len(threads) >= 3
-    assert threads[0] is service.thread()
+    assert threads
     assert all(
         thread is service._thread  # pyright: ignore[reportPrivateUsage]
-        for thread in threads[1:]
+        for thread in threads
     )
+    assert service.thread() not in threads
     service.shutdown()
 
 
@@ -557,3 +561,34 @@ def test_gui_heartbeat_runs_while_worker_is_blocked(
     assert len(ticks) > ticks_before_reduction
     timer.stop()
     service.shutdown()
+
+
+def test_shutdown_does_not_rewrite_an_abandoned_result_as_stopped(
+    controller: PlaybackController, tmp_path: Path, qtbot: QtBot
+) -> None:
+    """冪等なshutdownでも、初回のABANDONEDを黙ってSTOPPEDへ書き換えない。"""
+    del qtbot
+    source = make_audio_file(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_decode(path: Path, cancelled: Callable[[], bool]) -> Iterator[DecodedChunk]:
+        del path, cancelled
+        entered.set()
+        release.wait(timeout=5)
+        yield DecodedChunk(np.zeros(20, dtype=np.float32), 1_000)
+
+    service = make_service(controller, tmp_path / "cache", blocked_decode)
+    service.start()
+    controller.load(source)
+    assert entered.wait(timeout=5)
+
+    # workerが戻らない状態で放棄させる。
+    assert service.shutdown(timeout_ms=0, hard_timeout_ms=0) is ShutdownOutcome.ABANDONED
+    assert service.shutdown() is ShutdownOutcome.ABANDONED
+
+    release.set()
+    assert wait_for_abandoned_threads()
+
+    # 実際に終わったあとは STOPPED へ更新してよい。
+    assert service.shutdown() is ShutdownOutcome.STOPPED
