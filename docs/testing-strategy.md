@@ -581,7 +581,8 @@ uv run python tools/license_audit.py dist/sdp
 - **scope**: `PrivilegesRequired=lowest`、`PrivilegesRequiredOverridesAllowed`が空、
   install先が`{localappdata}\Programs\sdp`、`MinVersion`指定、Program Files非使用。
 - **upgrade**: AppIdが固定でversionを含まない、`OutputBaseFilename`へversionが入る、
-  upgrade前の`_internal`掃除、アンインストーラーの保護。
+  cleanup対象を固定AppIdの登録済みinstall directoryに限定すること、旧runtimeを
+  backupへ退避して失敗時に復元すること、アンインストーラーの保護。
 - **version注入**: `AppVersion`／`VersionInfoVersion`／`SourceDir`を.iss内で定義せず、
   参照だけしていること（二重管理の防止）。
 - **入力**: `[Files]`が外部注入の配布物1件だけで、settings／playlist／ui-state／
@@ -595,8 +596,9 @@ uv run python tools/license_audit.py dist/sdp
 - **uninstall**: `[UninstallDelete]`／`[InstallDelete]`がinstall先の外を消さないこと、
   `{localappdata}\sdp`を参照しないこと、確認文がユーザーデータ保持を伝えること。
 - **起動中の扱い**: `CloseApplications`／`RestartApplications`の明示、
-  `InitializeSetup`／`PrepareToInstall`／`InitializeUninstall`／`IsFileInUse`／
-  `CleanPreviousInstall`の宣言、`/FORCECLOSEAPPLICATIONS`を既定にしないこと。
+  `InitializeSetup`／`PrepareToInstall`／`InitializeUninstall`／`FileUseState`／
+  `CleanPreviousInstall`の宣言、共有違反とその他のopen失敗を区別すること、
+  `/FORCECLOSEAPPLICATIONS`を既定にしないこと。
 - **表示**: icon・`UninstallDisplayIcon`・`LicenseFile`・技術検証用である旨。
 
 契約が素通りしていないことを、実`installer.iss`へ意図的な違反を1か所入れた
@@ -624,7 +626,7 @@ pwsh -File scripts/installer-smoke.ps1 -ConfirmProfileChanges
 ```
 
 `-ConfirmProfileChanges`が無ければ何もせず失敗する。**CIから実行しない。**
-既存installがあれば先に除去してクリーンな状態から始める。自動確認は111項目:
+既存installがあれば先に除去してクリーンな状態から始める。自動確認は136項目:
 
 1. silent install（`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`、終了コード0）
 2. install先のsdp.exe・`_internal`・LICENSE、ユーザーデータとPythonソースの非混入
@@ -636,20 +638,28 @@ pwsh -File scripts/installer-smoke.ps1 -ConfirmProfileChanges
    Apps & FeaturesのDisplayVersionの一致
 8. same-version reinstall（`/TASKS=desktopicon`）で重複shortcut・重複registryなし
 9. reinstallで不要になったファイルが残らないこと（探針ファイルを置いて確認）
-10. **起動中のupgrade・uninstallが中止され、起動中のsdpが強制終了されないこと**
-11. registryの`QuietUninstallString`から取得したuninstallerでのsilent uninstall
-12. uninstall後にinstall先・shortcut・registry・processが残らないこと
-13. **`%LOCALAPPDATA%\sdp`とその中のファイルが保持されること**
-14. 全工程で7拡張子の`UserChoice`（既定アプリ）が変化しないこと
+10. 初回installで既存directoryを指定し、そこに偶然`sdp.exe`や無関係ファイルがあっても、
+    cleanupで削除しないこと
+11. upgrade中の意図的な展開失敗でinstallerが非0終了し、旧`sdp.exe --selftest`、
+    settings／playlist／ui-state、uninstall情報が維持されること。失敗の注入には
+    installerの隠しパラメータ`/SDP_FAIL_AFTER_CLEANUP=1`を使う（退避直後・展開前に
+    中止するだけで、他の副作用は持たない）
+12. **起動中のupgrade・uninstallが中止され、起動中のsdpが強制終了されないこと**
+13. registryの`QuietUninstallString`から取得したuninstallerでのsilent uninstall
+14. uninstall後にinstall先・shortcut・registry・processが残らないこと
+15. **`%LOCALAPPDATA%\sdp`とその中のファイルが保持されること**
+16. 全工程で7拡張子の`UserChoice`（既定アプリ）が変化しないこと
 
 ### 実測（Windows 11 build 26200 / Inno Setup 6.7.3）
 
 | 項目 | 結果 |
 |---|---|
-| installer smoke | 111項目すべて成功 |
+| installer smoke | 136項目すべて成功 |
 | setup exe | 47.0 MiB（49,330,218 byte）。ZIP版は67.7 MiB |
-| build時間 | compile 約32秒、`-SkipBuild`で約37秒、build-releaseから通しで約128秒 |
+| build時間 | compile 約32〜38秒、`-SkipBuild`で約40秒、build-releaseから通しで約128秒 |
 | install済みselftest／codec test | いずれも成功（6形式） |
+| 既存`sdp.exe`を含むdirectoryへの初回install | 無関係なルートファイルと`_internal`内ファイルが残る（誤cleanupなし） |
+| cleanup後の意図的な展開失敗 | installerは非0終了。旧`_internal`とルートファイルが復元され、`--selftest`成功。uninstall情報とユーザーデータも不変 |
 | 起動中のupgrade | 中止（install先は無傷、sdpは生存） |
 | 起動中のuninstall | 中止（install先は無傷、sdpは生存） |
 | uninstall後 | install先・shortcut・HKCU登録・processすべて消滅 |
@@ -661,13 +671,19 @@ pwsh -File scripts/installer-smoke.ps1 -ConfirmProfileChanges
 **判明した落とし穴（実測で確認し、設計へ反映済み）**
 
 - 実行中のexeは**読み取りでは開けてしまい**、`FILE_SHARE_DELETE`のため削除も通る。
-  in-use判定は書き込みアクセスで行う必要がある。
+  in-use判定は書き込みアクセスで行う必要がある。ただし、open失敗をすべて
+  「実行中」とは扱わず、共有違反・ロック違反だけを実行中として、それ以外は
+  アクセス不能エラーとして中止する。
 - `CloseHandle`は無効handleに対しても成功を返すため、`CreateFileW`の成否判定に
   使えない。`INVALID_HANDLE_VALUE`と直接比較する。
 - `CloseApplications=yes`のRestart Managerは**silent実行時に既定でアプリを閉じる**。
   そのため in-use 判定は`PrepareToInstall`では遅く、`InitializeSetup`で行う。
 - Inno Setupはupgrade時に前回選んだtaskを引き継ぐ。「初回installでdesktop shortcutを
   作らない」はクリーンな状態でしか判定できないため、smokeは先に既存installを除去する。
+- ISPPは**行頭の`#`を前処理ディレクティブと解釈する**。`[Code]`内で改行定数を
+  `#13#10`から書き始めるとcompileが失敗する（`Unknown preprocessor directive`）。
+- Pascalのブロックコメントは**最初の`}`で終わる**。`{ ... {app} ... }`のように
+  Inno定数を波括弧付きでコメントへ書くと、そこから後ろがコードとして解釈される。
 
 ### 手動ゲート（未完了）
 

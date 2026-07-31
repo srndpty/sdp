@@ -12,6 +12,7 @@ from sdp.inno_script import InnoScript, parse_inno_script, registry_roots
 from sdp.installer_contract import (
     APP_ID,
     AUDIO_FILE_EXTENSIONS,
+    CONTRACT_CODE_SYMBOLS,
     EXTERNAL_DEFINES,
     ICON_REFERENCE,
     INSTALL_DIRECTORY,
@@ -251,11 +252,42 @@ def test_uninstall_keeps_user_data(script: InnoScript) -> None:
     assert "保持" in confirm
 
 
-def test_upgrade_removes_obsolete_runtime_files(script: InnoScript) -> None:
-    """upgrade前にinstall先を掃除し、旧DLLやpluginを残さない。"""
-    assert r"DelTree(Target + '\_internal'" in script.code
+def test_cleanup_only_touches_a_registered_previous_install(script: InnoScript) -> None:
+    """cleanupは所有権判定を通ってからでないと走らない。
+
+    退避の方法（rename／copy／obsolete一覧）は契約に含めない。実際に無関係な
+    directoryを壊さないことは `scripts/installer-smoke.ps1` が実インストールで確かめる。
+    """
+    assert "function IsRegisteredPreviousInstall" in script.code
+    assert "if not IsRegisteredPreviousInstall(" in script.code
     assert "unins" in script.code
-    assert "if not FileExists(Target + '\\sdp.exe') then" in script.code
+
+
+def test_cleanup_failure_stops_the_install(script: InnoScript) -> None:
+    """退避に失敗したら展開へ進まない（新旧runtimeを混在させない）。"""
+    assert "function CleanPreviousInstall(): Boolean" in script.code
+    assert "if not CleanPreviousInstall() then" in script.code
+
+
+def test_upgrade_failure_can_restore_the_previous_runtime(script: InnoScript) -> None:
+    """展開失敗・中止からの復元経路がある。"""
+    assert "function RestoreUpgradeBackup" in script.code
+    assert "procedure DeinitializeSetup" in script.code
+
+
+def test_file_use_state_distinguishes_other_open_failures(script: InnoScript) -> None:
+    """共有違反だけを実行中扱いにし、ACL等の失敗は別エラーにする。"""
+    assert "function FileUseState" in script.code
+    assert "GetLastError" in script.code
+    assert "ERROR_SHARING_VIOLATION" in script.code
+    assert "ERROR_LOCK_VIOLATION" in script.code
+    assert "アクセスできないため" in script.code
+
+
+def test_contract_code_symbols_are_all_declared(script: InnoScript) -> None:
+    """契約が依存する関数名がすべて宣言されている。"""
+    for declaration in CONTRACT_CODE_SYMBOLS:
+        assert declaration in script.code
 
 
 def test_running_instance_is_asked_to_exit_but_never_force_killed(script: InnoScript) -> None:
@@ -323,7 +355,20 @@ def _mutate(source: str, old: str, new: str) -> tuple[str, ...]:
             "OutputBaseFilename",
         ),
         ("RestartApplications=yes", "RestartApplicationsDisabled=yes", "RestartApplications"),
-        (r"DelTree(Target + '\_internal', True, True, True);", "", "_internal"),
+        # 所有権判定を通さないcleanupは、無関係なdirectoryを壊し得る。
+        (
+            "if not IsRegisteredPreviousInstall(Target) then",
+            "if False then",
+            "IsRegisteredPreviousInstall",
+        ),
+        # 退避の失敗を無視すると新旧runtimeが混ざる。
+        (
+            "if not CleanPreviousInstall() then",
+            "if False then",
+            "退避の失敗",
+        ),
+        ("function RestoreUpgradeBackup", "function IgnoreUpgradeBackup", "RestoreUpgradeBackup"),
+        ("procedure DeinitializeSetup", "procedure IgnoreDeinitializeSetup", "DeinitializeSetup"),
         ("function PrepareToInstall", "function OnPrepare", "function PrepareToInstall"),
         # 入力配布物
         ('Source: "{#SourceDir}\\*"', 'Source: "..\\dist\\sdp\\*"', "Source"),
@@ -396,3 +441,17 @@ def test_user_data_deletion_is_reported() -> None:
     assert any("install先の外" in failure for failure in failures) or any(
         "{localappdata}\\sdp" in failure for failure in failures
     )
+
+
+def test_treating_every_open_failure_as_running_is_reported() -> None:
+    """open失敗の理由を区別しない実装は検査で落ちる。
+
+    区別をやめるとACL・read-only・セキュリティ製品のブロックでも「実行中」と誤表示し、
+    sdpが停止していてもupgrade／uninstallが永久にできなくなる。
+    """
+    source = _INSTALLER.read_text(encoding="utf-8")
+    stripped = source.replace("ERROR_SHARING_VIOLATION", "SHARING_CODE")
+
+    failures = validate_installer_contract(parse_inno_script(stripped))
+
+    assert any("open失敗の理由" in failure for failure in failures)

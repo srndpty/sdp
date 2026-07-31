@@ -27,8 +27,9 @@ Defenderスキャンまで確認した。実音・実画面の受け入れ（可
 **外部公開可能な配布物とは扱わない**（[docs/distribution-licenses.md](./docs/distribution-licenses.md)）。
 
 P7-C（Inno Setupのper-userインストーラーとWindows関連付け）は実装・自動検証済み。
-silent install／same-version reinstall／起動中のupgrade・uninstall中止／uninstallまでを
-実プロファイル上で通しで確認した（[installer smoke](#installerの動作確認)）。
+silent install／same-version reinstall／upgrade失敗時の旧版復元／起動中の
+upgrade・uninstall中止／uninstallまでを実プロファイル上で通しで確認した
+（[installer smoke](#installerの動作確認)）。
 インストーラーも**ライセンスの未解決事項が残るあいだは技術検証用**であり、
 公開配布物として扱わない。
 
@@ -427,7 +428,20 @@ HKCUの登録、アンインストーラー自身だけである。
 ```
 
 sdpの起動中はインストールもアンインストールも中止される（無断で強制終了しない）。
-sdpを終了してからやり直すこと。
+sdpを終了してからやり直すこと。ファイルの権限やセキュリティ製品のブロックで
+`sdp.exe`へアクセスできない場合も、「実行中」ではなく別のエラーとして中止する。
+
+### 更新（upgrade）
+
+同じインストール先へ上書きすると、古いランタイムを消してから新しいものを展開する
+（onedirの単純上書きでは不要になったDLLやプラグインが残るため）。
+
+- 掃除の対象は、**このインストーラーが登録した既存インストール先だけ**である。
+  初回インストール時にインストール先を変更し、そこに偶然`sdp.exe`があっても、
+  無関係なファイルは削除しない。
+- 古いランタイムは削除ではなく`.upgrade-backup`へ退避する。展開が成功したら破棄し、
+  途中で失敗・中止された場合は元へ戻す。**更新に失敗しても、以前のsdpは起動できる。**
+- 設定・プレイリスト・UI状態・キャッシュは更新の影響を受けない。
 
 ### installerの動作確認
 
@@ -435,9 +449,11 @@ sdpを終了してからやり直すこと。
 pwsh -File scripts/installer-smoke.ps1 -ConfirmProfileChanges
 ```
 
-silent install → install済みexeのselftestとcodec test → same-version reinstall →
-起動中のupgrade・uninstallが中止されること → uninstall → ユーザーデータ保持、までを
-自動で確認する。**実行ユーザーのプロファイル（`%LOCALAPPDATA%`、HKCU、
+既存sdp.exeを含むディレクトリへの初回install（誤削除しないこと）→ silent install →
+install済みexeのselftestとcodec test → same-version reinstall →
+更新失敗時の旧版復元 → 起動中のupgrade・uninstallが中止されること → uninstall →
+ユーザーデータ保持、までを自動で確認する（136項目）。
+**実行ユーザーのプロファイル（`%LOCALAPPDATA%`、HKCU、
 スタートメニュー）を実際に変更する**ため`-ConfirmProfileChanges`を必須にしており、
 CIからは実行しない。可能ならWindows Sandboxか検証用の新規Windowsユーザーで実行する。
 

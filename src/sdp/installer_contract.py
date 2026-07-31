@@ -11,6 +11,11 @@
 - 「プログラムから開く」候補として登録するが、既定アプリは変更しない
 - uninstallでユーザーデータ（``%LOCALAPPDATA%\\sdp``）を削除しない
 - versionと入力配布物を外部から注入し、.issへ手書きしない
+
+``[Code]`` については、**特定の実装を必須にしない**。所有権判定・退避の失敗検出・
+復元経路・in-use判定の理由区別という性質を、:data:`CONTRACT_CODE_SYMBOLS` という
+粗い単位で確認するに留める。実際の挙動（誤cleanupしない、失敗しても旧版が動く）は
+`scripts/installer-smoke.ps1` が実インストールで担保する。
 """
 
 from collections.abc import Sequence
@@ -33,6 +38,25 @@ AUDIO_FILE_EXTENSIONS: Final = (".wav", ".mp3", ".flac", ".ogg", ".opus", ".m4a"
 
 EXTERNAL_DEFINES: Final = ("AppVersion", "VersionInfoVersion", "SourceDir")
 """build scriptが ``/D`` で注入し、.iss側で定義してはならないもの。"""
+
+CONTRACT_CODE_SYMBOLS: Final = (
+    "function FileUseState",
+    "function IsRegisteredPreviousInstall",
+    "function CleanPreviousInstall(): Boolean",
+    "function RestoreUpgradeBackup",
+    "function InitializeSetup",
+    "function PrepareToInstall",
+    "function InitializeUninstall",
+    "procedure DeinitializeSetup",
+)
+"""``[Code]`` のうち、契約の担い手として名前を固定した関数。
+
+**実装そのものを固定するものではない。** 「所有権を確認してから退避する」
+「失敗を戻り値で返せる」「復元経路がある」「in-use判定が三値を返せる」といった
+性質を、名前という粗い単位で確認するための最小の接点である。退避方法（rename／
+copy／obsolete一覧）や中間ファイル名は契約に含めない。ここを変えるときは、
+`scripts/installer-smoke.ps1` の実挙動確認とあわせて更新する。
+"""
 
 _APPLICATIONS_KEY: Final = r"Software\Classes\Applications\sdp.exe"
 _CAPABILITIES_KEY: Final = r"Software\sdp\Capabilities"
@@ -346,23 +370,25 @@ def _check_running_instance(script: InnoScript) -> list[str]:
         failures.append("CloseApplications=yes ではありません（起動中upgradeを検出できない）")
     if not script.setup("RestartApplications"):
         failures.append("RestartApplicationsを明示していません")
-    # InitializeSetupはRestart Managerがアプリを閉じる前に走る唯一の入口なので、
-    # 「起動中なら中止する」契約はここが本命。PrepareToInstallは二段目の防波堤。
-    # コメントでの言及ではなく、実際の宣言があることを見る。
-    required_code = (
-        "function IsFileInUse",
-        "function InitializeSetup",
-        "function PrepareToInstall",
-        "function InitializeUninstall",
-        "procedure CleanPreviousInstall",
-    )
-    for declaration in required_code:
-        if declaration not in script.code:
-            failures.append(f"[Code]に{declaration}がありません")
     if "FORCECLOSEAPPLICATIONS" in non_comment_source(script).upper():
         failures.append("強制終了（/FORCECLOSEAPPLICATIONS）を既定にしています")
-    if r"DelTree(Target + '\_internal'" not in script.code:
-        failures.append("upgrade前に旧_internalを掃除していません（旧DLLが残る）")
+
+    # `[Code]`のうち、契約が依存する関数だけを必須にする（CONTRACT_CODE_SYMBOLS）。
+    # 退避方法や中間ファイル名といった実装の内側は見ない。
+    for declaration in CONTRACT_CODE_SYMBOLS:
+        if declaration not in script.code:
+            failures.append(f"[Code]に{declaration}がありません")
+
+    # 呼び出し関係だけは、抜けると契約が無効化されるため確認する。
+    if "if not IsRegisteredPreviousInstall(" not in script.code:
+        failures.append(
+            "cleanupが所有権判定（IsRegisteredPreviousInstall）を通っていません"
+            "（無関係なdirectoryを壊し得る）"
+        )
+    if "if not CleanPreviousInstall() then" not in script.code:
+        failures.append("退避の失敗でinstallを中止していません（新旧runtimeが混在し得る）")
+    if "GetLastError" not in script.code or "ERROR_SHARING_VIOLATION" not in script.code:
+        failures.append("open失敗の理由を区別していません（ACL・I/O errorを実行中と誤判定し得る）")
     if "unins" not in script.code:
         failures.append("掃除処理がアンインストーラーを保護していません")
     return failures

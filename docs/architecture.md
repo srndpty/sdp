@@ -1539,20 +1539,33 @@ P7-B2の要件にしない。
 
 #### upgrade
 
-- ファイル展開の直前（`CurStepChanged(ssInstall)`）に`{app}\_internal`を削除し、
-  `unins*`以外の直下ファイルも消す。onedirの単純上書きでは旧runtime DLLや
-  不要になったpluginが残るため。**アンインストーラーは消さない。**
-- 掃除は`{app}\sdp.exe`が存在するとき（＝以前のsdp install先だと確認できるとき）だけ行う。
+- ファイル展開の直前（`CurStepChanged(ssInstall)`）に、旧runtimeを同一volume上の
+  `{app}\.upgrade-backup`へ移動する。対象は`{app}\_internal`と、`unins*`以外の
+  直下ファイル。onedirの単純上書きでは旧runtime DLLや不要になったpluginが残るため。
+  **アンインストーラーは消さない。**
+- cleanup対象は、固定AppIdのHKCU uninstall登録が存在し、その
+  `Inno Setup: App Path`と現在の`{app}`が一致し、かつ`{app}\sdp.exe`が存在する場合だけ。
+  初回installで利用者が既存directoryを指定し、偶然`sdp.exe`があっても旧sdpと誤認しない。
+- 展開が成功して`ssPostInstall`へ進んだらbackupを削除する。展開中の失敗や中止で
+  `DeinitializeSetup`へ到達した場合は、backupから旧runtimeを復元して、旧版の起動可能性を
+  できるだけ保つ。
+- 旧runtimeの退避、rollback前の部分展開ファイル削除、backupからの復元が失敗した場合は
+  ログへ原因を残し、ファイル展開前ならinstallを中止する。削除失敗を無視して新旧runtimeを
+  混在させない。
 
 #### 起動中の install / uninstall
 
 - 起動中のsdpを**無断で強制終了しない**。起動中なら install も uninstall も中止する。
-- 判定は`IsFileInUse`（`CreateFileW`をGENERIC_WRITE・共有なしで開く）で行う。
+- 判定は`FileUseState`（`CreateFileW`をGENERIC_WRITE・共有なしで開く）で行う。
   実行中のexeはimage sectionのため書き込みで開けない。
   **読み取りで開く判定は使えない**（実行中でも読み取りは成功し、
   `FILE_SHARE_DELETE`により削除すら通る。実測で確認済み）。
   `CloseHandle`は無効handleでも成功を返すため、成否判定には使わず
   `INVALID_HANDLE_VALUE`と直接比較する（同じく実測で確認済み）。
+- open失敗時は`GetLastError()`を見て、`ERROR_SHARING_VIOLATION`／
+  `ERROR_LOCK_VIOLATION`だけを「実行中」とする。ACL、read-only属性、
+  セキュリティ製品、I/O errorなどの別理由では「アクセスできないため中止」として
+  実行中とは別の案内を出す。
 - 判定は`InitializeSetup`で行う。`CloseApplications=yes`のRestart Managerは
   **silent実行時に既定でアプリを閉じてしまい、それは`PrepareToInstall`より前に起きる**。
   `InitializeSetup`はRestart Managerより前に走る唯一の入口である。

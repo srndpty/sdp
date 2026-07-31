@@ -355,9 +355,12 @@ Windows上の手動受け入れを残している。P7-B1（PyInstaller onedir�
   ショートカット、「プログラムから開く」登録、7拡張子のProgID（`sdp.AudioFile`）、
   installer manifest、Inno Setup compiler不要の契約検査（`sdp/inno_script.py` と
   `sdp/installer_contract.py`）を実装した。
+  upgradeのcleanupは固定AppIdの登録済みinstall先に限定し、旧runtimeは削除ではなく
+  `.upgrade-backup`へ退避して、展開失敗・中止時に復元する。
   installer smokeで silent install／install済みselftest・codec test／
-  same-version reinstall／**起動中のupgrade・uninstallの中止**／uninstall／
-  **ユーザーデータ保持**／**UserChoice非変更**の111項目を実測した
+  same-version reinstall／**既存sdp.exeを含むdirectoryへの初回installで誤削除しないこと**／
+  **cleanup後の展開失敗からの旧版復元**／**起動中のupgrade・uninstallの中止**／uninstall／
+  **ユーザーデータ保持**／**UserChoice非変更**の136項目を実測した
   （[architecture.md §11、§12.5](./architecture.md)、
   [testing-strategy.md §6.18](./testing-strategy.md)）。
   **未完了**: UAC非表示・Apps & Features表示・関連付け経由のダブルクリック・

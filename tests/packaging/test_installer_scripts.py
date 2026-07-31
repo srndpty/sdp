@@ -133,6 +133,12 @@ def test_smoke_script_checks_the_full_install_lifecycle(smoke_script: str) -> No
         "sdp processが残っていない",
         "HKLMへ書いていない",
         "upgrade時に不要になったファイルが残らない",
+        "初回install先の無関係ファイルが保持されている",
+        "既存sdp.exeを含むdirectoryへの初回install",
+        "cleanup後に意図的に展開失敗するとinstallerが非0終了",
+        "upgrade失敗後のselftest",
+        "upgrade失敗時にユーザーデータ",
+        "upgrade失敗後もuninstall情報が残っている",
         "既存installを除去できた",
     ):
         assert expectation in smoke_script

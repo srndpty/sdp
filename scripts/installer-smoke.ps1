@@ -35,7 +35,12 @@ $progId = 'sdp.AudioFile'
 $extensions = @('.wav', '.mp3', '.flac', '.ogg', '.opus', '.m4a', '.aac')
 $installDirectory = Join-Path $env:LOCALAPPDATA 'Programs\sdp'
 $userDataDirectory = Join-Path $env:LOCALAPPDATA 'sdp'
-$markerFile = Join-Path $userDataDirectory 'installer-smoke-marker.txt'
+# 実行ごとに固有名にして、途中終了した過去の実行の残骸と取り違えないようにする。
+$smokeRunId = [Guid]::NewGuid().ToString('N')
+$markerFileName = "installer-smoke-marker-$smokeRunId.txt"
+$rollbackMarkerFileName = "installer-smoke-rollback-marker-$smokeRunId.txt"
+$markerFile = Join-Path $userDataDirectory $markerFileName
+$rollbackMarkerFile = Join-Path $userDataDirectory $rollbackMarkerFileName
 $startMenuShortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\sdp\sdp.lnk'
 $desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'sdp.lnk'
 $uninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\${appId}_is1"
@@ -155,6 +160,32 @@ function Assert-NoUserChoiceChange {
     }
 }
 
+function Get-UserDataFileSnapshot {
+    $names = @('settings.json', 'playlist.json', 'ui-state.json', $rollbackMarkerFileName)
+    $snapshot = @{}
+    foreach ($name in $names) {
+        $path = Join-Path $userDataDirectory $name
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+            $snapshot[$name] = "$((Get-Item -LiteralPath $path).Length):$hash"
+        }
+        else {
+            $snapshot[$name] = '<missing>'
+        }
+    }
+    return $snapshot
+}
+
+function Assert-UserDataFileSnapshot {
+    param([Parameter(Mandatory)][hashtable]$Before)
+
+    $after = Get-UserDataFileSnapshot
+    foreach ($name in $Before.Keys) {
+        Assert-True -Condition ($Before[$name] -eq $after[$name]) `
+            -Label "upgrade失敗時にユーザーデータ $name が不変"
+    }
+}
+
 function Get-Uninstaller {
     # uninstaller pathは推測せず、Inno Setupの契約どおりregistryから取得する。
     $quiet = Get-RegistryValue -Path $uninstallKey -Name 'QuietUninstallString'
@@ -177,6 +208,19 @@ function Wait-ForRemoval {
     $deadline = (Get-Date).AddSeconds(60)
     while ((Test-Path -LiteralPath $Path) -and (Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 500
+    }
+}
+
+function Remove-SmokeTempDirectory {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+    if (-not $fullPath.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "安全でない一時directory削除を拒否しました: $fullPath"
+    }
+    if (Test-Path -LiteralPath $fullPath) {
+        Remove-Item -LiteralPath $fullPath -Recurse -Force
     }
 }
 
@@ -229,6 +273,38 @@ if (Test-Path -LiteralPath $uninstallKey) {
         -Label '既存installを除去できた'
 }
 
+# --- 0.5 初回install先の誤cleanup防止 ---------------------------------------
+# uninstall登録が無いdirectoryに偶然 sdp.exe があっても、旧sdp install先と誤認して
+# 無関係なファイルを消さないことを確認する。
+Write-Host '=== 0.5 初回install先の誤cleanup防止 ===' -ForegroundColor Cyan
+$trapDirectory = Join-Path ([IO.Path]::GetTempPath()) "sdp-smoke-first-install-trap-$([Guid]::NewGuid())"
+$trapInternal = Join-Path $trapDirectory '_internal'
+$trapRootMarker = Join-Path $trapDirectory 'unrelated-root-file.txt'
+$trapInternalMarker = Join-Path $trapInternal 'unrelated-runtime-file.dll'
+New-Item -ItemType Directory -Path $trapInternal -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $trapDirectory 'sdp.exe') -Value 'not sdp' -Encoding ASCII
+Set-Content -LiteralPath $trapRootMarker -Value 'keep root' -Encoding UTF8
+Set-Content -LiteralPath $trapInternalMarker -Value 'keep internal' -Encoding UTF8
+try {
+    Invoke-Executable -FilePath $setupPath -Label '既存sdp.exeを含むdirectoryへの初回install' `
+        -Arguments @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$trapDirectory")
+    Assert-True -Condition (Test-Path -LiteralPath $trapRootMarker -PathType Leaf) `
+        -Label '初回install先の無関係ファイルが保持されている'
+    Assert-True -Condition (Test-Path -LiteralPath $trapInternalMarker -PathType Leaf) `
+        -Label '初回install先の無関係_internalファイルが保持されている'
+    Assert-NoUserChoiceChange -Before $userChoiceBefore
+
+    $trapUninstall = Get-Uninstaller
+    Invoke-Executable -FilePath $trapUninstall.Path -Label '初回install誤cleanup検査後のuninstall' `
+        -Arguments ($trapUninstall.Arguments + @('/SUPPRESSMSGBOXES', '/NORESTART'))
+    Assert-True -Condition (-not (Test-Path -LiteralPath $uninstallKey)) `
+        -Label '初回install誤cleanup検査後にuninstall登録が消えている'
+    Assert-NoUserChoiceChange -Before $userChoiceBefore
+}
+finally {
+    Remove-SmokeTempDirectory -Path $trapDirectory
+}
+
 # --- 1. silent install ------------------------------------------------------
 Write-Host '=== 1. silent install ===' -ForegroundColor Cyan
 Invoke-Executable -FilePath $setupPath -Label 'silent install' `
@@ -269,6 +345,41 @@ Assert-NoUserChoiceChange -Before $userChoiceBefore
 Invoke-Executable -FilePath $installedExecutable -Arguments @('--selftest') `
     -Label 'reinstall後のselftest'
 Write-Host '  [OK] reinstall後のselftest' -ForegroundColor DarkGray
+
+# --- 3.5 cleanup後のupgrade失敗rollback -------------------------------------
+Write-Host '=== 3.5 cleanup後のupgrade失敗rollback ===' -ForegroundColor Cyan
+New-Item -ItemType Directory -Path $userDataDirectory -Force | Out-Null
+Set-Content -LiteralPath $rollbackMarkerFile -Value 'installer smoke rollback marker' -Encoding UTF8
+$userDataBeforeRollback = Get-UserDataFileSnapshot
+$rollbackInternalProbe = Join-Path $installDirectory '_internal\sdp-rollback-probe.dll'
+$rollbackRootProbe = Join-Path $installDirectory 'sdp-rollback-probe.txt'
+Set-Content -LiteralPath $rollbackInternalProbe -Value 'restore internal' -Encoding ASCII
+Set-Content -LiteralPath $rollbackRootProbe -Value 'restore root' -Encoding ASCII
+
+$failedUpgrade = Start-Process -FilePath $setupPath -PassThru -Wait `
+    -ArgumentList @(
+        '/VERYSILENT',
+        '/SUPPRESSMSGBOXES',
+        '/NORESTART',
+        '/SDP_FAIL_AFTER_CLEANUP=1'
+    )
+Assert-True -Condition ($failedUpgrade.ExitCode -ne 0) `
+    -Label 'cleanup後に意図的に展開失敗するとinstallerが非0終了'
+Assert-True -Condition (Test-Path -LiteralPath $rollbackInternalProbe -PathType Leaf) `
+    -Label 'upgrade失敗後に旧_internalが復元されている'
+Assert-True -Condition (Test-Path -LiteralPath $rollbackRootProbe -PathType Leaf) `
+    -Label 'upgrade失敗後に旧ルートファイルが復元されている'
+Assert-True -Condition (Test-Path -LiteralPath $uninstallKey) `
+    -Label 'upgrade失敗後もuninstall情報が残っている'
+Assert-True -Condition ((Get-RegistryValue -Path $uninstallKey -Name 'Inno Setup: App Path') -eq $installDirectory) `
+    -Label 'upgrade失敗後もuninstall情報のinstall directoryが不変'
+Assert-UserDataFileSnapshot -Before $userDataBeforeRollback
+Invoke-Executable -FilePath $installedExecutable -Arguments @('--selftest') `
+    -Label 'upgrade失敗後のselftest'
+Write-Host '  [OK] upgrade失敗後のselftest' -ForegroundColor DarkGray
+
+# rollback検査用のinstall先probeはuninstaller管理外なので、最終uninstall前に片付ける。
+Remove-Item -LiteralPath @($rollbackInternalProbe, $rollbackRootProbe) -Force -ErrorAction SilentlyContinue
 
 # --- 4. 起動中のupgrade／uninstall -------------------------------------------
 # 起動中のsdpを無断で強制終了せず、旧exeと新DLLが混ざった状態も作らないこと。
@@ -347,6 +458,9 @@ Assert-True -Condition (Test-Path -LiteralPath $markerFile -PathType Leaf) `
 
 # smoke専用のmarkerだけ片付ける。%LOCALAPPDATA%\sdp 自体は残す（uninstall契約と同じ）。
 Remove-Item -LiteralPath $markerFile -Force
+if (Test-Path -LiteralPath $rollbackMarkerFile -PathType Leaf) {
+    Remove-Item -LiteralPath $rollbackMarkerFile -Force
+}
 if (-not $userDataExistedBefore) {
     Write-Host "  注意: 検査のため $userDataDirectory を作成しました（削除していません）。" `
         -ForegroundColor Yellow
