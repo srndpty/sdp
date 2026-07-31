@@ -1398,19 +1398,33 @@ Pathに変換できない引数だけを無視する。
 
 ---
 
-## 11. Windows ファイル関連付け
+## 11. Windows ファイル関連付け（P7-C で実装）
 
-インストーラー（Inno Setup、per-user / HKCU）で以下を登録する。
+インストーラー（Inno Setup、per-user）で登録する。**書き込み先は HKCU だけ**で、
+HKLM へは一切書かない。ProgID は形式ごとに分けず `sdp.AudioFile` の 1 つにまとめる
+（sdp は 7 形式をすべて同じ「音声ファイル」として開くため、形式別に分ける利点がない）。
 
-- `HKCU\Software\sdp\Capabilities`
-  （ApplicationName / ApplicationDescription と FileAssociations:
-  `.wav` `.mp3` `.ogg` `.opus` `.flac` `.m4a` `.aac` → `sdp.audiofile`）
-- `HKCU\Software\Classes\sdp.audiofile\shell\open\command` = `"...\sdp.exe" "%1"`
-- `HKCU\Software\RegisteredApplications` への登録
+| キー | 内容 | uninstall |
+|---|---|---|
+| `HKCU\Software\Classes\sdp.AudioFile` | 表示名、`DefaultIcon`＝`sdp.exe,0`、`shell\open\command`＝`"<install>\sdp.exe" "%1"`、`FriendlyAppName` | `uninsdeletekey`（自分のキーごと削除） |
+| `HKCU\Software\Classes\Applications\sdp.exe` | `FriendlyAppName`、`DefaultIcon`、`shell\open\command`、`SupportedTypes`（7 拡張子） | `uninsdeletekey` |
+| `HKCU\Software\Classes\<ext>\OpenWithProgids` | 値名 `sdp.AudioFile` | `uninsdeletevalue`（**自分の値だけ**。他アプリの登録を壊さない） |
+| `HKCU\Software\sdp\Capabilities` | ApplicationName / ApplicationDescription と FileAssociations（7 拡張子 → `sdp.AudioFile`） | `uninsdeletekey` |
+| `HKCU\Software\RegisteredApplications` | 値名 `sdp` → `Software\sdp\Capabilities` | `uninsdeletevalue` |
 
-既定アプリは強制変更しない（WIN-03）。アプリ内のメニューから
-`ms-settings:defaultapps` を起動して Windows の設定へ誘導する。
-アンインストール時は Inno Setup の `[Registry]` の `uninsdeletekey` で上記を削除する。
+対象拡張子は `.wav` `.mp3` `.flac` `.ogg` `.opus` `.m4a` `.aac` の 7 種類。
+一覧の source of truth は `packaging/installer.iss` で、installer manifest も
+`sdp/inno_script.py` で読み取って生成する（二重管理しない）。
+
+**既定アプリは強制変更しない**（WIN-03）。Windows 10/11 では `UserChoice` を
+インストーラーから正当に書き換える手段が無く、hash を偽装する行為は取らない。
+sdp が行うのは「プログラムから開く」候補への登録と Capabilities の宣言までで、
+既定にするかどうかは利用者が Windows の設定から選ぶ。アプリ内のメニューからは
+`ms-settings:defaultapps` を起動して設定へ誘導する。
+`ChangesAssociations=yes` により、登録・削除後にシェルへ通知する。
+
+複数ファイルを Explorer から開くと Windows が複数プロセスを起動し得るが、
+P7-A の単一 instance 転送により既存 Window のプレイリストへ追加される（§10）。
 
 ---
 
@@ -1499,11 +1513,90 @@ P7-B2の要件にしない。
 未解決が残るあいだは「外部配布可能」と結論づけない。詳細と根拠は
 [distribution-licenses.md](./distribution-licenses.md)。
 
-### 12.5 P7-C以降
+### 12.5 Windows installer（P7-C）
 
-Inno Setupのper-user installer、ファイル関連付け、スタートメニュー、アプリアイコン、
-Windows version resource、コード署名はP7-B2に含めない。**ライセンスの未解決事項が
-残っている間は、installerも技術検証用に留め、公開可能な配布物として扱わない。**
+#### 責務の境界
+
+- **onedir配布物**（`dist/sdp`）が「動くもの」を作り、**installer**は
+  「それをWindowsへ安全に置く・更新する・消す」だけを担う。installerは
+  ファイル構成を組み替えず、`dist/sdp`をそのまま`{app}`へ展開する。
+- `scripts/build-installer.ps1`は**未検証のsource treeを詰めない**。
+  P7-B2の`build-release.ps1`を通し、`dist/sdp`のcontent hashが
+  release manifestの`contents.content_sha256`と一致することを確かめてからcompileする
+  （ZIP配布物とinstaller入力が同一内容であることの担保）。
+- `packaging/installer.iss`がinstaller仕様のsource of truthで、Inno Setup GUIの
+  ローカル状態には依存しない。versionと入力配布物は`/D`で外部注入し、
+  未定義なら`#error`でcompileを止める。
+
+#### scope とユーザーデータ
+
+- per-user。`PrivilegesRequired=lowest`、`PrivilegesRequiredOverridesAllowed=`（空）で
+  コマンドラインからの昇格指定も許さない。install先は`{localappdata}\Programs\sdp`。
+- **install先（`%LOCALAPPDATA%\Programs\sdp`）とユーザーデータ
+  （`%LOCALAPPDATA%\sdp`）は別directory**。installerはユーザーデータへ書かず、
+  uninstallでも消さない。install先へはsettings／playlist／ui-state／cacheを置かない。
+- AppIdはversionを含まない固定GUID。upgradeで同じ登録を引き継ぐ。
+
+#### upgrade
+
+- ファイル展開の直前（`CurStepChanged(ssInstall)`）に、旧runtimeを同一volume上の
+  `{app}\.upgrade-backup`へ移動する。対象は`{app}\_internal`と、`unins*`以外の
+  直下ファイル。onedirの単純上書きでは旧runtime DLLや不要になったpluginが残るため。
+  **アンインストーラーは消さない。**
+- cleanup対象は、固定AppIdのHKCU uninstall登録が存在し、その
+  `Inno Setup: App Path`と現在の`{app}`が一致し、かつ`{app}\sdp.exe`が存在する場合だけ。
+  初回installで利用者が既存directoryを指定し、偶然`sdp.exe`があっても旧sdpと誤認しない。
+- 展開が成功して`ssPostInstall`へ進んだらbackupを削除する。展開中の失敗や中止で
+  `DeinitializeSetup`へ到達した場合は、backupから旧runtimeを復元して、旧版の起動可能性を
+  できるだけ保つ。
+- 旧runtimeの退避、rollback前の部分展開ファイル削除、backupからの復元が失敗した場合は
+  ログへ原因を残し、ファイル展開前ならinstallを中止する。削除失敗を無視して新旧runtimeを
+  混在させない。
+
+#### 起動中の install / uninstall
+
+- 起動中のsdpを**無断で強制終了しない**。起動中なら install も uninstall も中止する。
+- 判定は`FileUseState`（`CreateFileW`をGENERIC_WRITE・共有なしで開く）で行う。
+  実行中のexeはimage sectionのため書き込みで開けない。
+  **読み取りで開く判定は使えない**（実行中でも読み取りは成功し、
+  `FILE_SHARE_DELETE`により削除すら通る。実測で確認済み）。
+  `CloseHandle`は無効handleでも成功を返すため、成否判定には使わず
+  `INVALID_HANDLE_VALUE`と直接比較する（同じく実測で確認済み）。
+- open失敗時は`GetLastError()`を見て、`ERROR_SHARING_VIOLATION`／
+  `ERROR_LOCK_VIOLATION`だけを「実行中」とする。ACL、read-only属性、
+  セキュリティ製品、I/O errorなどの別理由では「アクセスできないため中止」として
+  実行中とは別の案内を出す。
+- 判定は`InitializeSetup`で行う。`CloseApplications=yes`のRestart Managerは
+  **silent実行時に既定でアプリを閉じてしまい、それは`PrepareToInstall`より前に起きる**。
+  `InitializeSetup`はRestart Managerより前に走る唯一の入口である。
+  `PrepareToInstall`はウィザード操作中に起動された場合の二段目の防波堤として残す。
+- `/FORCECLOSEAPPLICATIONS`は使わない。
+
+#### version と icon
+
+- versionのsourceは`pyproject.toml`ひとつ。`sdp/windows_version.py`が
+  semantic versionをWindowsの4要素整数へ変換する（`0.0.1`→`(0, 0, 1, 0)`。
+  第4要素はbuild番号用に予約し常に0）。pre-release識別子は数値へ反映せず、
+  `FileVersion`／`ProductVersion`の文字列にだけ残す（Windowsの数値比較で
+  pre-releaseを正式版より小さく見せる方法が無いため）。解釈できないversionは例外。
+- specは`packaging/windows-version-info.txt`をbuild時に展開して
+  `build/`（git管理外）へ書き、`EXE(version=...)`へ渡す。
+- `assets/sdp.ico`は7解像度を持つ自作アイコン（`tools/gen_app_icon.py`が
+  標準ライブラリだけで生成。第三者素材なし、MIT）。exe・installer・uninstaller・
+  ショートカット・Apps & Featuresの表示に使う。
+
+#### 検査
+
+- `sdp/inno_script.py`（Inno Setup scriptの限定parser）と
+  `sdp/installer_contract.py`が、compilerなしでも契約を検査する。完全な
+  Inno言語のparserではなく、section／`#define`／`key=value`／`Name: Value`と
+  引用符だけを扱う。
+- installer manifestは`sdp/installer_manifest.py`が組み立てる。ZIPのmanifestと
+  同じ方針で、timestampを持たず、絶対path・username・build hostを含めない。
+  `distribution: technical-verification-only`を明示的に記録する。
+
+**ライセンスの未解決事項が残っている間は、installerも技術検証用に留め、
+公開可能な配布物として扱わない。** コード署名も行っていない。
 
 ---
 

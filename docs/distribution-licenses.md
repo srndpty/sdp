@@ -1,7 +1,8 @@
-# 配布物のライセンス状況（P7-B2 時点）
+# 配布物のライセンス状況（P7-C 時点）
 
-Windows onedir 配布物（`dist/sdp` と ZIP release）へ**実際に含まれている**
-コンポーネントと、外部配布に必要な資料の状態をまとめる。
+Windows onedir 配布物（`dist/sdp`、ZIP release、および同一内容を収めた
+インストーラー）へ**実際に含まれている**コンポーネントと、
+外部配布に必要な資料の状態をまとめる。
 
 **この文書は法務判断ではない。** 確認できた事実と、まだ決めていないことを分けて記録し、
 未解決が残っているあいだは「外部配布可能」とは扱わない。機械的な検査は
@@ -69,8 +70,19 @@ Windows onedir 配布物（`dist/sdp` と ZIP release）へ**実際に含まれ�
 3. OpenSSL の Apache-2.0 原文の同梱、または OpenSSL 自体の除外
 4. Mutagen の GPL 波及範囲の判断
 
-P7-C（インストーラーと関連付け）へ進むこと自体は技術的に可能だが、上記が解決するまでは
+## インストーラー（P7-C）の扱い
+
+P7-C で Inno Setup の per-user インストーラーを実装したが、上記が解決するまでは
 **インストーラーも技術検証用**と位置づけ、公開配布物として扱わない。
+
+- インストーラーは ZIP 配布物と同一内容の `dist/sdp` を収めるため、
+  `LICENSE`・`THIRD_PARTY_NOTICES.txt`・`_internal/licenses/` はそのまま含まれる。
+  インストールウィザードでは sdp の `LICENSE` を表示する。
+- ウィザードの説明文と `README.md` に「技術検証用であり公開配布物ではない」旨を明記し、
+  「公開配布可能」と読める表現は置かない。
+- installer manifest は `distribution: technical-verification-only` を記録する。
+- 不足している原文（Qt / FFmpeg / OpenSSL）を「同梱済み」と書かない。
+- **コード署名は行っていない。** ダウンロード実行時は SmartScreen の警告が出る想定である。
 
 ## 検査の実行
 
@@ -80,4 +92,5 @@ uv run python tools/license_audit.py dist/sdp
 
 - 宣言した原文が配布物に無い場合は **exit 1**（機械的な不備）。
 - 未解決事項が残る場合は一覧を表示し、「外部配布可能とは判断できない」旨を明示する。
-- `scripts/build-release.ps1` はこの検査を必ず通す。
+- `scripts/build-release.ps1` と `scripts/build-installer.ps1` はこの検査を必ず通す。
+  未解決事項が残っていても技術検証用ビルドは通すが、宣言した原文の欠落では失敗させる。
