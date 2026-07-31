@@ -10,6 +10,7 @@
 
 import logging
 import math
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,15 @@ MAX_WORKER_THREADS = 4
 """メタデータ読み取りの最大並列数の上限。ファイル I/O なので過度に増やさない。"""
 
 SHUTDOWN_TIMEOUT_MS = 3_000
+
+BACKLOG_SLOTS = 4
+"""実行中スレッド数へ上乗せする投入枠。
+
+これ以上は待機キューへ積まず、``MetadataReader`` 内の待ち行列に留める。
+1000曲を追加しても、QThreadPool へ積まれる worker と Signal object は
+``max_thread_count + BACKLOG_SLOTS`` 件で頭打ちになり、起動直後のメモリと
+I/O量が件数に比例しなくなる。
+"""
 
 
 class MetadataReadError(Exception):
@@ -227,10 +237,29 @@ class MetadataReader(QObject):
         self._next_token = 0
         self._started = False
         self._shutdown = False
+        # 投入待ちの entry_id（FIFO）。同じ entry を二重に積まない。
+        self._pending: deque[str] = deque()
+        self._pending_ids: set[str] = set()
+        self._in_flight = 0
 
     @property
     def max_thread_count(self) -> int:
         return self._pool.maxThreadCount()
+
+    @property
+    def max_in_flight(self) -> int:
+        """同時に QThreadPool へ積む上限。"""
+        return self._pool.maxThreadCount() + BACKLOG_SLOTS
+
+    @property
+    def pending_count(self) -> int:
+        """まだ投入していない待ち件数（診断とテスト用）。"""
+        return len(self._pending)
+
+    @property
+    def in_flight_count(self) -> int:
+        """投入済みで結果待ちの件数（診断とテスト用）。"""
+        return self._in_flight
 
     @property
     def is_running(self) -> bool:
@@ -261,6 +290,8 @@ class MetadataReader(QObject):
             return
         self._shutdown = True
         self._tokens.clear()
+        self._pending.clear()
+        self._pending_ids.clear()
         if self._started:
             self._playlist.rowsInserted.disconnect(self._on_rows_inserted)
             self._playlist.rowsRemoved.disconnect(self._on_rows_removed)
@@ -291,6 +322,10 @@ class MetadataReader(QObject):
         self._tokens = {
             entry_id: token for entry_id, token in self._tokens.items() if entry_id in existing_ids
         }
+        self._pending_ids &= existing_ids
+        self._pending = deque(
+            entry_id for entry_id in self._pending if entry_id in self._pending_ids
+        )
 
     def _on_data_changed(
         self, top_left: QModelIndex, bottom_right: QModelIndex, roles: list[int]
@@ -307,24 +342,61 @@ class MetadataReader(QObject):
                 self._schedule_entry(row)
 
     def _on_model_reset(self) -> None:
+        # 行が総入れ替えされた。積んだだけの要求は捨て、投入済みの結果は
+        # token 不一致で無視される。投入済みは上限件数で頭打ちなので、
+        # ここで pool.clear() はしない（投入枠のカウントが戻らなくなる）。
         self._tokens.clear()
+        self._pending.clear()
+        self._pending_ids.clear()
         self._schedule_all()
 
     def _schedule_all(self) -> None:
         for row in range(self._playlist.rowCount()):
             self._schedule_entry(row)
+        self._pump()
 
     def _schedule_entry(self, row: int) -> None:
-        """1 行の読み取りを投入する。欠損・取得済み・要求中は何もしない。"""
+        """1 行を待ち行列へ積む。欠損・取得済み・要求中・積み済みは何もしない。
+
+        ここでは QThreadPool へ投入しない。1000曲を追加しても worker と Signal
+        object が件数ぶん作られないよう、投入は :meth:`_pump` が上限つきで行う。
+        """
         if self._shutdown:
             return
         entry = self._playlist.entry_at(row)
         if entry.is_missing:
             # 欠損中は要求しない。復活したときの dataChanged で改めて要求する。
             self._tokens.pop(entry.entry_id, None)
+            self._discard_pending(entry.entry_id)
             return
         if entry.metadata_status is not MetadataStatus.NOT_REQUESTED:
             return
+        if entry.entry_id in self._pending_ids:
+            return
+        self._pending.append(entry.entry_id)
+        self._pending_ids.add(entry.entry_id)
+        self._pump()
+
+    def _pump(self) -> None:
+        """投入枠が空いているあいだ、待ち行列から順に投入する。"""
+        while not self._shutdown and self._in_flight < self.max_in_flight and self._pending:
+            entry_id = self._pending.popleft()
+            self._pending_ids.discard(entry_id)
+            if self._start_read(entry_id):
+                self._in_flight += 1
+
+    def _start_read(self, entry_id: str) -> bool:
+        """1 件を実際に投入する。投入しなかった場合は ``False``。
+
+        待ち行列に積んでから投入するまでの間に、削除・欠損・別経路での取得が
+        起こりうるため、ここで状態を確認し直す。
+        """
+        row = self._playlist.row_of_entry_id(entry_id)
+        if row is None:
+            return False
+        entry = self._playlist.entry_at(row)
+        if entry.is_missing or entry.metadata_status is not MetadataStatus.NOT_REQUESTED:
+            return False
 
         self._next_token += 1
         token = self._next_token
@@ -337,12 +409,27 @@ class MetadataReader(QObject):
         )
         worker.signals.finished.connect(self._on_result)
         self._pool.start(worker)
+        return True
+
+    def _discard_pending(self, entry_id: str) -> None:
+        if entry_id not in self._pending_ids:
+            return
+        self._pending_ids.discard(entry_id)
+        self._pending = deque(pending for pending in self._pending if pending != entry_id)
 
     # -- 結果の反映（GUI スレッド） -----------------------------------------
 
     def _on_result(self, result: object) -> None:
         if not isinstance(result, MetadataResult):
             return
+        # 適用可否に関わらず投入枠を返す（返し忘れると読み取りが止まる）。
+        self._in_flight = max(0, self._in_flight - 1)
+        try:
+            self._apply_result(result)
+        finally:
+            self._pump()
+
+    def _apply_result(self, result: MetadataResult) -> None:
         if not self._is_applicable(result):
             # 同じentryの新しい要求がある場合は、そのtokenを古い結果で消さない。
             if self._tokens.get(result.entry_id) == result.token:

@@ -336,11 +336,14 @@ def test_removing_many_loading_entries_reclaims_tokens(
     playlist.add_paths(paths)
     reader.start()
     qtbot.waitUntil(lambda: read_function.started.is_set(), timeout=WAIT_TIMEOUT_MS)
-    assert len(reader._tokens) == 100  # pyright: ignore[reportPrivateUsage]
+    # 投入は上限つき。tokenも投入済みの件数までしか作らない。
+    assert len(reader._tokens) <= reader.max_in_flight  # pyright: ignore[reportPrivateUsage]
+    assert reader.pending_count > 0
 
     assert playlist.removeRows(0, 100) is True
 
     assert reader._tokens == {}  # pyright: ignore[reportPrivateUsage]
+    assert reader.pending_count == 0
     read_function.release()
     qtbot.wait(50)
     assert playlist.rowCount() == 0
@@ -681,9 +684,108 @@ def test_scheduling_1000_entries_does_not_read_synchronously(
     reader.start()
 
     assert read_function.call_count() < len(paths)
-    assert all(entry.metadata_status is MetadataStatus.LOADING for entry in playlist.entries())
     read_function.release()
     reader.shutdown(timeout_ms=2_000)
 
 
+def test_scheduling_1000_entries_bounds_the_submitted_work(
+    playlist: PlaylistModel, tmp_path: Path
+) -> None:
+    """1000曲でもQThreadPoolへ積む件数は上限で頭打ちになる。
+
+    全件を即座に投入すると、worker・Signal object・requestが件数ぶん作られ、
+    起動直後のメモリとI/O量が予測できなくなる。
+    """
+    paths = [tmp_path / f"曲 {index:04d}.wav" for index in range(1000)]
+    for path in paths:
+        path.write_bytes(b"x")
+    read_function = RecordingReader()
+    read_function.hold()
+    reader = MetadataReader(playlist, read_function=read_function, max_threads=2)
+    playlist.add_paths(paths)
+
+    reader.start()
+
+    assert reader.in_flight_count <= reader.max_in_flight
+    assert reader.pending_count == len(paths) - reader.in_flight_count
+    loading = [
+        entry for entry in playlist.entries() if entry.metadata_status is MetadataStatus.LOADING
+    ]
+    assert len(loading) == reader.in_flight_count
+    # 残りは未要求のまま待機する（LOADINGへ固着させない）。
+    assert all(
+        entry.metadata_status is MetadataStatus.NOT_REQUESTED
+        for entry in playlist.entries()[reader.in_flight_count :]
+    )
+    read_function.release()
+    reader.shutdown(timeout_ms=2_000)
+
+
+def test_all_entries_are_eventually_read_through_the_bounded_queue(
+    playlist: PlaylistModel, tmp_path: Path, qtbot: QtBot
+) -> None:
+    """上限つき投入でも、待ち行列を消化して全件が読まれる。"""
+    paths = [tmp_path / f"曲 {index:03d}.wav" for index in range(50)]
+    for path in paths:
+        path.write_bytes(b"x")
+    read_function = RecordingReader()
+    reader = MetadataReader(playlist, read_function=read_function, max_threads=2)
+    playlist.add_paths(paths)
+
+    reader.start()
+
+    qtbot.waitUntil(lambda: read_function.call_count() == len(paths), timeout=WAIT_TIMEOUT_MS)
+    qtbot.waitUntil(lambda: reader.pending_count == 0, timeout=WAIT_TIMEOUT_MS)
+    assert reader.in_flight_count == 0
+    reader.shutdown(timeout_ms=2_000)
+
+
 ReadCallable = Callable[[Path], TrackMetadata]
+
+
+def test_model_reset_discards_queued_requests(
+    playlist: PlaylistModel, tmp_path: Path, qtbot: QtBot
+) -> None:
+    """resetで積んだだけの要求を捨て、古いI/Oが新しいI/Oへ上乗せされない。
+
+    投入済みは上限件数で頭打ちなので、reset を繰り返しても同時に走る読み取りは
+    ``max_in_flight`` を超えない。
+    """
+    paths = [tmp_path / f"曲 {index:03d}.wav" for index in range(200)]
+    for path in paths:
+        path.write_bytes(b"x")
+    read_function = RecordingReader()
+    read_function.hold()
+    reader = MetadataReader(playlist, read_function=read_function, max_threads=1)
+    playlist.add_paths(paths)
+    reader.start()
+    qtbot.waitUntil(lambda: read_function.started.is_set(), timeout=WAIT_TIMEOUT_MS)
+    assert reader.pending_count > 0
+
+    playlist.replace_entries([])
+
+    assert reader.pending_count == 0
+    assert reader.in_flight_count <= reader.max_in_flight
+    read_function.release()
+    reader.shutdown(timeout_ms=2_000)
+
+
+def test_the_same_entry_is_not_queued_twice(
+    playlist: PlaylistModel, tmp_path: Path, audio_files: list[Path]
+) -> None:
+    """同じ entry を重複して積まない。"""
+    del tmp_path
+    read_function = RecordingReader()
+    read_function.hold()
+    # 投入枠を使い切らせて、待ち行列へ積まれる状況を作る。
+    reader = MetadataReader(playlist, read_function=read_function, max_threads=1)
+    playlist.add_paths(audio_files)
+    reader.start()
+    pending_before = reader.pending_count
+
+    # 同じ行に対して重ねて要求しても待ち行列は増えない。
+    reader._schedule_all()  # pyright: ignore[reportPrivateUsage]
+
+    assert reader.pending_count == pending_before
+    read_function.release()
+    reader.shutdown(timeout_ms=2_000)
