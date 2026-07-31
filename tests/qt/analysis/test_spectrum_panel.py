@@ -33,6 +33,7 @@ from sdp.ui.level_meter_widget import LevelMeterWidget
 from sdp.ui.spectrum_panel import (
     FAILED_MESSAGE,
     LEVEL_FAILED_MESSAGE,
+    SNAPSHOT_RETRY_DELAYS_MS,
     STOPPED_MESSAGE,
     WAITING_MESSAGE,
     SpectrumPanel,
@@ -803,7 +804,7 @@ def test_snapshot_failure_stops_both_visualizations(
     monkeypatch: pytest.MonkeyPatch,
     qtbot: QtBot,
 ) -> None:
-    """共通のsnapshot失敗では両方を止め、短い失敗表示へ切り替える。"""
+    """snapshot失敗が続いたときだけ両方を止め、短い失敗表示へ切り替える。"""
 
     def explode(*args: object, **kwargs: object) -> object:
         raise RuntimeError("想定外のsnapshot失敗")
@@ -812,14 +813,81 @@ def test_snapshot_failure_stops_both_visualizations(
     start_playing(controller, tap, sources[0])
     calls_before = list(backend.calls)
 
-    qtbot.waitUntil(lambda: not panel.is_timer_active, timeout=3_000)
+    # 1回目の失敗では失敗表示にしない（回復可能な障害として再試行する）。
+    qtbot.wait(50)
+    assert widget_of(panel).status_text != FAILED_MESSAGE
 
-    assert widget_of(panel).status_text == FAILED_MESSAGE
+    qtbot.waitUntil(
+        lambda: widget_of(panel).status_text == FAILED_MESSAGE,
+        timeout=sum(SNAPSHOT_RETRY_DELAYS_MS) + 3_000,
+    )
+
     assert level_of(panel).status_text == LEVEL_FAILED_MESSAGE
     assert widget_of(panel).frame is None
     assert level_of(panel).frame is None
+    assert not panel.is_timer_active
     assert backend.calls == calls_before
     assert controller.state is PlaybackState.PLAYING
+
+
+def test_transient_snapshot_failure_is_retried_without_stopping(
+    panel: SpectrumPanel,
+    controller: PlaybackController,
+    tap: PcmTap,
+    sources: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot: QtBot,
+) -> None:
+    """一時的なsnapshot失敗では止まらず、回復したら表示が戻る。
+
+    一度の失敗でその曲の可視化を最後まで止めてしまうと、競合や一時的な
+    メモリ確保失敗だけでSpectrumとLevel Meterが死んだままになる。
+    """
+    original = PcmTap.snapshot_visualization
+    failures = {"count": 0}
+
+    def flaky(self: PcmTap, *args: object, **kwargs: object) -> object:
+        if failures["count"] < 1:
+            failures["count"] += 1
+            raise RuntimeError("一時的なsnapshot失敗")
+        return original(self, *args, **kwargs)  # pyright: ignore[reportCallIssue]
+
+    monkeypatch.setattr(PcmTap, "snapshot_visualization", flaky)
+    start_playing(controller, tap, sources[0])
+
+    qtbot.waitUntil(lambda: failures["count"] == 1, timeout=3_000)
+    qtbot.waitUntil(lambda: panel.is_timer_active, timeout=3_000)
+
+    assert widget_of(panel).status_text != FAILED_MESSAGE
+    assert level_of(panel).status_text != LEVEL_FAILED_MESSAGE
+
+
+def test_pause_and_resume_clears_a_snapshot_failure_latch(
+    panel: SpectrumPanel,
+    controller: PlaybackController,
+    tap: PcmTap,
+    sources: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot: QtBot,
+) -> None:
+    """失敗表示のあとでも、再生を止めて再開すれば改めて試す。"""
+
+    def explode(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("想定外のsnapshot失敗")
+
+    monkeypatch.setattr(PcmTap, "snapshot_visualization", explode)
+    start_playing(controller, tap, sources[0])
+    qtbot.waitUntil(
+        lambda: widget_of(panel).status_text == FAILED_MESSAGE,
+        timeout=sum(SNAPSHOT_RETRY_DELAYS_MS) + 3_000,
+    )
+
+    monkeypatch.undo()
+    controller.pause()
+    controller.play()
+
+    assert panel.is_timer_active
+    qtbot.waitUntil(lambda: widget_of(panel).frame is not None, timeout=3_000)
 
 
 def test_source_change_recovers_from_a_failed_state(
