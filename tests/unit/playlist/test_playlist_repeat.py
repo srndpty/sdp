@@ -331,10 +331,13 @@ def test_stale_end_of_media_after_one_replay_does_not_advance(
     entry_ids = playlist.add_paths(audio_files)
     controller.set_repeat_mode(RepeatMode.ONE)
     controller.play_entry(entry_ids[0])
+    # 実backendはsetSource直後に同期でLOADEDを返さない。再読み込み後・新世代が
+    # 何も通知していない時点へ古いENDが届く順序を再現する。
+    backend.defer_load_status = True
     finish_track(backend, qtbot)
     backend.calls.clear()
 
-    # 新しい source 世代はまだ再生が始まっていない（position が 0 のまま）。
+    # 新しい source 世代はまだ何も通知していない。
     backend.emit_media_status(MediaStatus.END_OF_MEDIA)
     qtbot.wait(1)
 

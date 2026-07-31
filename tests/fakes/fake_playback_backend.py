@@ -61,6 +61,17 @@ class FakePlaybackBackend(PlaybackBackend):
         self.setter_errors: dict[str, Exception] = {}
         """操作名に対応する setter から送出するテスト用例外。"""
 
+        self.setter_error_skips: dict[str, int] = {}
+        """例外を出す前に成功させる回数。適用は通し rollback だけ失敗させる等に使う。"""
+
+        self.defer_load_status = False
+        """True にすると load 時に LOADED を通知せず、テストが明示的に発火する。
+
+        実際の QMediaPlayer は setSource 直後に同期で LOADED を返さない。
+        「新 source がまだ何も通知していない時点へ、前 source の END が遅れて届く」
+        という順序を再現するために使う。
+        """
+
     # -- 記録の参照 ---------------------------------------------------------
 
     def call_names(self) -> list[str]:
@@ -77,7 +88,8 @@ class FakePlaybackBackend(PlaybackBackend):
             self.error_occurred.emit(self.load_error)
             return
         self._state = PlaybackState.STOPPED
-        self.media_status_changed.emit(MediaStatus.LOADED)
+        if not self.defer_load_status:
+            self.media_status_changed.emit(MediaStatus.LOADED)
         self.state_changed.emit(self._state)
 
     def play(self) -> None:
@@ -189,5 +201,10 @@ class FakePlaybackBackend(PlaybackBackend):
 
     def _raise_setter_error(self, operation: str) -> None:
         error = self.setter_errors.get(operation)
-        if error is not None:
-            raise error
+        if error is None:
+            return
+        remaining = self.setter_error_skips.get(operation, 0)
+        if remaining > 0:
+            self.setter_error_skips[operation] = remaining - 1
+            return
+        raise error

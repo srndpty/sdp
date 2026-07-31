@@ -476,21 +476,84 @@ def test_late_duplicate_end_is_ignored_until_the_new_source_starts(
     """A終了後の遅延重複ENDはBを飛ばさず、B自身の終了ならCへ進む。"""
     entry_ids = playlist.add_paths(audio_files[:3])
     controller.play_entry(entry_ids[0])
+    # 実backendはsetSource直後に同期でLOADEDを返さない。B読み込み後・B無通知の
+    # 時点へA由来のENDが届く順序を再現する。
+    backend.defer_load_status = True
 
     finish_current_track(backend, qtbot)
     assert controller.current_entry_id == entry_ids[1]
 
-    # Bのpositionが未確定の間に届くA由来の重複通知。
+    # Bがまだ何も通知していない間に届くA由来の重複通知。
     backend.emit_position(0)
     backend.emit_media_status(MediaStatus.END_OF_MEDIA)
     process_deferred_events(qtbot)
     assert controller.current_entry_id == entry_ids[1]
 
-    # Bが進み始めた後の正規の終了通知は、Bの世代として1回だけ消費する。
-    backend.emit_position(1)
+    # Bの読み込みが進んだ後の正規の終了通知は、Bの世代として1回だけ消費する。
+    backend.emit_media_status(MediaStatus.LOADED)
     backend.emit_media_status(MediaStatus.END_OF_MEDIA)
     process_deferred_events(qtbot)
     assert controller.current_entry_id == entry_ids[2]
+
+
+def test_zero_length_source_still_advances_to_the_next_entry(
+    controller: PlaylistPlaybackController,
+    playlist: PlaylistModel,
+    backend: FakePlaybackBackend,
+    audio_files: list[Path],
+    qtbot: QtBot,
+) -> None:
+    """正のpositionを一度も通知しない音源でも次曲へ進む。
+
+    0ms扱いの音源や数msの効果音では、positionが0のまま終了しうる。
+    読み込みが進んだstatusを世代開始の根拠にすることで、これを取りこぼさない。
+    """
+    entry_ids = playlist.add_paths(audio_files[:2])
+    controller.play_entry(entry_ids[0])
+
+    backend.emit_media_status(MediaStatus.END_OF_MEDIA)
+    process_deferred_events(qtbot)
+
+    assert controller.current_entry_id == entry_ids[1]
+
+
+def test_zero_length_source_repeats_with_repeat_one(
+    controller: PlaylistPlaybackController,
+    playlist: PlaylistModel,
+    backend: FakePlaybackBackend,
+    audio_files: list[Path],
+    qtbot: QtBot,
+) -> None:
+    """Repeat ONEでも、正のpositionを通知しない音源が再読み込みされる。"""
+    entry_ids = playlist.add_paths(audio_files[:2])
+    controller.set_repeat_mode(RepeatMode.ONE)
+    controller.play_entry(entry_ids[0])
+    load_count = len(backend.call_args("load"))
+
+    backend.emit_media_status(MediaStatus.END_OF_MEDIA)
+    process_deferred_events(qtbot)
+
+    assert controller.current_entry_id == entry_ids[0]
+    assert len(backend.call_args("load")) == load_count + 1
+
+
+def test_buffered_status_alone_marks_the_source_as_started(
+    controller: PlaylistPlaybackController,
+    playlist: PlaylistModel,
+    backend: FakePlaybackBackend,
+    audio_files: list[Path],
+    qtbot: QtBot,
+) -> None:
+    """LOADEDを取りこぼしてもBUFFEREDだけで世代開始とみなせる。"""
+    entry_ids = playlist.add_paths(audio_files[:2])
+    backend.defer_load_status = True
+    controller.play_entry(entry_ids[0])
+
+    backend.emit_media_status(MediaStatus.BUFFERED)
+    backend.emit_media_status(MediaStatus.END_OF_MEDIA)
+    process_deferred_events(qtbot)
+
+    assert controller.current_entry_id == entry_ids[1]
 
 
 def test_late_duplicate_end_after_auto_advance_does_not_skip_another_entry(
@@ -503,6 +566,7 @@ def test_late_duplicate_end_after_auto_advance_does_not_skip_another_entry(
     """イベントループをまたいだ前sourceの重複ENDでも1曲だけ進む。"""
     entry_ids = playlist.add_paths(audio_files[:3])
     controller.play_entry(entry_ids[0])
+    backend.defer_load_status = True
 
     finish_current_track(backend, qtbot)
     backend.emit_media_status(MediaStatus.END_OF_MEDIA)

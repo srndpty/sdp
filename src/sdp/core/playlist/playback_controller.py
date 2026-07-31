@@ -24,6 +24,21 @@ from sdp.core.playlist.types import RepeatMode, next_repeat_mode
 MISSING_FILE_MESSAGE = "ファイルが見つからないため再生できません。"
 END_OF_PLAYLIST_MESSAGE = "プレイリストの最後まで再生しました。"
 
+_SOURCE_PROGRESS_STATUSES = frozenset(
+    {
+        MediaStatus.LOADING,
+        MediaStatus.LOADED,
+        MediaStatus.BUFFERING,
+        MediaStatus.BUFFERED,
+    }
+)
+"""新sourceの読み込みが進んだことを示すstatus。
+
+``END_OF_MEDIA`` は必ずこれらのあとに来るため、「この世代のsourceが自分で
+何かを通知した」ことの根拠になる。source切替直後に前sourceから遅れて届く
+``END_OF_MEDIA`` は、これらより前に来るので除外できる。
+"""
+
 
 class _PlayAttempt(Enum):
     """曲送り候補への再生要求結果。"""
@@ -462,13 +477,20 @@ class PlaylistPlaybackController(QObject):
             self._current_generation_started = True
 
     def _on_media_status_changed(self, status: MediaStatus) -> None:
+        if status in _SOURCE_PROGRESS_STATUSES:
+            # 新sourceの読み込みが進んだ証拠。ここで世代を「開始済み」とみなす。
+            # 正のpositionを待つと、0ms扱いの音源や数msの効果音のように
+            # 一度も正のpositionを通知しないまま終わる音源で次曲へ進めなくなる。
+            self._current_generation_started = True
+            return
         if status is not MediaStatus.END_OF_MEDIA:
             return
         if self._current_entry_id is None:
             # 「開く...」で直接開いた単曲。プレイリストへ勝手に移らない。
             return
         if not self._current_generation_started:
-            # source切替直後の未開始状態へ届いた、前source由来の通知を無視する。
+            # source切替直後、新sourceがまだ何も通知していない時点へ届いた
+            # 前source由来の通知を無視する。
             return
         generation = self._source_generation
         if self._end_consumed_generation == generation:
