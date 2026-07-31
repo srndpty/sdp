@@ -283,9 +283,14 @@ def test_failure_is_separate_from_playback_and_shutdown_is_idempotent(
 
 
 def test_missing_source_request_fails_without_starting_decode(
-    controller: PlaybackController, tmp_path: Path
+    controller: PlaybackController, tmp_path: Path, qtbot: QtBot
 ) -> None:
-    """解析直前に欠損したpathは専用失敗Signalとなり、decodeを投入しない。"""
+    """解析直前に欠損したsourceはworkerが失敗Signalへ終端し、decodeを投入しない。
+
+    存在確認はGUIスレッドで行わない（重複I/Oを避ける）。現在のplayback source が
+    解析時に欠損していれば、worker側の ``WaveformCacheKey.from_path`` が失敗し、
+    decodeを投入せずに ``analysis_failed`` で終端する。
+    """
     calls: list[Path] = []
 
     def counting_decode(path: Path, cancelled: Callable[[], bool]) -> Iterator[DecodedChunk]:
@@ -293,14 +298,16 @@ def test_missing_source_request_fails_without_starting_decode(
         calls.append(path)
         yield DecodedChunk(np.zeros(20, dtype=np.float32), 1_000)
 
+    source = make_audio_file(tmp_path)
+    controller.load(source)
     service = make_service(controller, tmp_path / "cache", counting_decode)
     started = QSignalSpy(service.analysis_started)
     failed = QSignalSpy(service.analysis_failed)
+    # 解析対象は現在のplayback source。start前に消し、worker側の欠損検出を誘発する。
+    source.unlink()
     service.start()
-    missing = tmp_path / "missing.wav"
-    service._on_source_changed(missing)  # pyright: ignore[reportPrivateUsage]
+    qtbot.waitUntil(lambda: failed.count() == 1, timeout=5_000)
     assert started.count() == 1
-    assert failed.count() == 1
     assert started.at(0)[:2] == failed.at(0)[:2]
     assert calls == []
     service.shutdown()

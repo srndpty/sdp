@@ -18,9 +18,20 @@ _REPO_ROOT = Path(__file__).parents[2]
 _ARCHITECTURE = _REPO_ROOT / "docs" / "architecture.md"
 _README = _REPO_ROOT / "README.md"
 _SOURCE_ROOT = _REPO_ROOT / "src" / "sdp"
+_TESTING_STRATEGY = _REPO_ROOT / "docs" / "testing-strategy.md"
+_CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 # 構成図へ列挙する対象（責務の入口になるpackage）。
 _DOCUMENTED_PACKAGES = ("services", "ui")
+
+
+def _source_packages() -> set[str]:
+    """``src/sdp`` 直下のpackage名。構成図parserのdirectory誤検出を防ぐ。"""
+    return {
+        path.name
+        for path in _SOURCE_ROOT.iterdir()
+        if path.is_dir() and (path / "__init__.py").is_file()
+    }
 
 
 def documented_modules() -> set[str]:
@@ -29,13 +40,18 @@ def documented_modules() -> set[str]:
     basenameだけで比べると、``services/foo.py`` の記載漏れを ``ui/foo.py`` の
     記載が隠してしまう。構成図はpackageごとの節に分かれているので、
     直前に現れたpackage名と組み合わせて相対pathへ復元する。
+
+    直前の ``xxx/`` は ``src/sdp`` 直下に実在するpackageのときだけpackageとして
+    採用する。構成図外の本文にある ``docs/`` などを誤ってpackageにしない。
     """
+    packages = _source_packages()
     documented: set[str] = set()
     package = ""
     for line in _ARCHITECTURE.read_text(encoding="utf-8").splitlines():
         directory = re.search(r"([a-z0-9_]+)/\s*$", line)
         if directory is not None:
-            package = directory.group(1)
+            token = directory.group(1)
+            package = token if token in packages else ""
             continue
         module = re.search(r"([a-z0-9_]+\.py)", line)
         if module is not None:
@@ -63,15 +79,44 @@ def test_architecture_lists_every_module(package: str) -> None:
 
 
 def test_architecture_does_not_list_removed_modules() -> None:
-    """存在しないモジュールを構成図へ残していない。"""
-    existing = {
-        path.name
-        for root in (_SOURCE_ROOT, _REPO_ROOT / "tools", _REPO_ROOT / "tests")
-        for path in root.rglob("*.py")
-    }
-    stale = sorted(name for name in documented_module_names() if name not in existing)
+    """存在しないモジュールを構成図へ残していない。
 
-    assert stale == [], f"architecture.mdが実在しないモジュールを記載しています: {stale}"
+    package付きの記載（``services/foo.py`` など）は **完全な相対path** で実在を
+    確認する。basenameだけで比べると、``services/foo.py`` を消しても
+    ``tests/foo.py`` が残っていれば見逃してしまう。
+
+    package未特定の記載（構成図外の本文で触れる ``tools/gen_app_icon.py`` など）は
+    どのpackageの話か決められないため、repository内のどこかに実在すればよい。
+    """
+    other_roots = (_REPO_ROOT / "tools", _REPO_ROOT / "tests", _REPO_ROOT / "spike")
+    stale: list[str] = []
+    for relative in documented_modules():
+        if "/" in relative:
+            if not (_SOURCE_ROOT / relative).is_file():
+                stale.append(relative)
+            continue
+        found = any(_SOURCE_ROOT.rglob(relative)) or any(
+            any(root.rglob(relative)) for root in other_roots if root.is_dir()
+        )
+        if not found:
+            stale.append(relative)
+
+    assert sorted(stale) == [], (
+        f"architecture.mdが実在しないモジュールを記載しています: {sorted(stale)}"
+    )
+
+
+def test_testing_strategy_matches_the_audio_ci_jobs() -> None:
+    """testing-strategy.mdのCI記述が、実際のworkflowのjob IDと一致する。"""
+    workflow = _CI_WORKFLOW.read_text(encoding="utf-8")
+    strategy = _TESTING_STRATEGY.read_text(encoding="utf-8")
+
+    job_ids = set(re.findall(r"^  ([a-z0-9-]+):$", workflow, flags=re.MULTILINE))
+    assert {"audio-codec-check", "audio-device-observation"} <= job_ids
+    # 分割前の単一ジョブ名を文書へ残していない。
+    assert "audio-observation" not in strategy
+    for job in ("audio-codec-check", "audio-device-observation"):
+        assert job in strategy, f"testing-strategy.mdがCIジョブ {job} を記載していません"
 
 
 def test_readme_saved_values_table_matches_the_schema_versions() -> None:

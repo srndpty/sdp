@@ -530,7 +530,7 @@ def test_initial_launch_paths_are_appended_after_restored_playlist(
 
     assert [entry.entry_id for entry in entries[:1]] == [restored[0].entry_id]
     assert [entry.path for entry in entries] == [
-        audio_files[0].resolve(),
+        audio_files[0],
         audio_files[1].resolve(),
         audio_files[1].resolve(),
     ]

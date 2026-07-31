@@ -144,6 +144,12 @@ class PlaylistFileStatusChecker(QObject):
 
         冪等だが、**初回の失敗を成功へ書き換えない**。2回目以降は初回の結果を
         返し、その後にバッチが実際に終わっていた場合だけ ``True`` へ更新する。
+
+        既知の制限: 本checkerは ``QThreadPool``（既定で global instance）で
+        runnableを走らせるため、個々のrunnableを切り離せない。``wait_ms`` は
+        **このメソッドの待機上限であって、プロセス終了の上限ではない**。切断された
+        NASなどで ``is_file()`` が戻らない場合、QApplication・global poolの破棄時に
+        ブロックしうる（``MetadataReader`` と同じ制約。docs/architecture.md 参照）。
         """
         if self._shutdown:
             return self._recheck_shutdown_outcome()

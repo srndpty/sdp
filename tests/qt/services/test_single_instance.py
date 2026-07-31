@@ -7,9 +7,12 @@ import sys
 import uuid
 from pathlib import Path
 
+import pytest
+from PySide6.QtCore import QThread
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from pytestqt.qtbot import QtBot
 
+from sdp.services import single_instance
 from sdp.services.launch_request import LaunchRequest
 from sdp.services.single_instance import (
     IPC_VERSION,
@@ -18,6 +21,7 @@ from sdp.services.single_instance import (
     SingleInstanceService,
     _encode_frame,  # pyright: ignore[reportPrivateUsage]
 )
+from sdp.services.thread_shutdown import ShutdownOutcome
 
 
 def unique_server_name() -> str:
@@ -306,3 +310,71 @@ def test_each_test_can_inject_an_independent_name() -> None:
     names = {unique_server_name() for _ in range(10)}
 
     assert len(names) == 10
+
+
+def test_abandoned_server_thread_keeps_the_lock_and_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """IPC threadを停止できなかった場合、lockとserver名を解放しない。
+
+    旧server threadが動いたままlockを手放すと、新しいsdpがprimaryとして起動でき、
+    さらに旧serverが一時的に接続を受けても要求がUIへ渡らず消失しうる。
+    """
+    name = unique_server_name()
+    service = SingleInstanceService(name, connect_timeout_ms=20, startup_timeout_ms=50)
+    assert service.start_or_forward(LaunchRequest()) is InstanceOutcome.PRIMARY
+    thread = service._server_thread  # pyright: ignore[reportPrivateUsage]
+    assert thread is not None
+    lock = service._lock  # pyright: ignore[reportPrivateUsage]
+    real_remove_server = QLocalServer.removeServer
+
+    removed: list[str] = []
+
+    def abandon(*_args: object, **_kwargs: object) -> ShutdownOutcome:
+        return ShutdownOutcome.ABANDONED
+
+    monkeypatch.setattr(single_instance, "stop_thread", abandon)
+    monkeypatch.setattr(QLocalServer, "removeServer", staticmethod(removed.append))
+    try:
+        service.shutdown()
+
+        assert removed == []
+        assert lock.isLocked()
+    finally:
+        # stop_threadを差し替えているため、放棄したthreadはテスト側で確実に止める。
+        thread.quit()
+        assert thread.wait(5_000)
+        real_remove_server(name)
+        lock.unlock()
+
+
+def test_shutdown_waits_even_when_the_thread_already_left_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """isRunning()がFalseでもstop_thread（=wait）を必ず通す。
+
+    run()から戻った直後はisRunning()がFalseでも、OSスレッドの後始末が残っている。
+    wait()せずに参照を捨てると、QThread破棄でheap corruptionになる。
+    """
+    name = unique_server_name()
+    service = SingleInstanceService(name, connect_timeout_ms=20, startup_timeout_ms=50)
+    assert service.start_or_forward(LaunchRequest()) is InstanceOutcome.PRIMARY
+    thread = service._server_thread  # pyright: ignore[reportPrivateUsage]
+    assert thread is not None
+
+    def already_finished(_self: QThread) -> bool:
+        return False
+
+    monkeypatch.setattr(type(thread), "isRunning", already_finished)
+    stopped: list[object] = []
+    real_stop_thread = single_instance.stop_thread
+
+    def recording_stop(target: QThread, **kwargs: object) -> ShutdownOutcome:
+        stopped.append(target)
+        return real_stop_thread(target, **kwargs)  # pyright: ignore[reportArgumentType]
+
+    monkeypatch.setattr(single_instance, "stop_thread", recording_stop)
+
+    service.shutdown()
+
+    assert stopped == [thread]

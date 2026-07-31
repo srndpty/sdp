@@ -1621,16 +1621,23 @@ P7-B2の要件にしない。
   （保存中のユーザーデータが壊れうるため）。
 - 回収は **Qtのevent loopに依存しない**。アプリの終了処理は `app.exec()` が
   戻ったあとに走るため、queued connectionへ回収を任せると配送されない。
-  専用のreaper threadが `QThread.wait()` で待ち、戻ったところで参照を解放する。
+  専用のreaper threadが `QThread.wait()` で終了を確認する。**確認できても
+  reaper thread上では参照を解放しない**。`QThread` などのQObjectをreaper
+  thread上で最終解放すると、GUIでもworkerのaffinity threadでもないthread上で
+  C++デストラクタが走るため、確認済みentryはプロセス終了まで保持する
+  （最終解放はinterpreter終了時に起きる）。
 - 各サービスの `shutdown()` は冪等だが、**初回の結果を書き換えない**。
   放棄したthreadが後から終了した場合だけ `STOPPED` へ更新する。
 
-**既知の制限**: `MetadataReader` は `QThreadPool` を使うため、この方式を適用できない
+**既知の制限**: `MetadataReader` と `PlaylistFileStatusChecker` は `QThreadPool`
+（前者は専用pool、後者は既定で global instance）を使うため、この方式を適用できない
 （個々のrunnableを切り離せず、`QThreadPool` のデストラクタは全runnableの完了まで
-ブロックする）。`shutdown(timeout_ms)` は**メソッドの待機上限であって、
-プロセス終了の上限ではない**。厳密な上限が必要になったら、キャンセル不能な
-Mutagenの同期I/Oを別プロセスへ分離する。現状は「戻らないファイルは想定しない」
-という前提で運用し、超過時は `ABANDONED` を返してログへ残す。
+ブロックする）。両者の `shutdown(...)` は**メソッドの待機上限であって、
+プロセス終了の上限ではない**。切断されたNASなどで `is_file()` / Mutagenの同期I/Oが
+戻らない場合、QApplication・global poolの破棄時にブロックしうる。厳密な上限が
+必要になったら、キャンセル不能な同期I/Oを終了可能な子プロセスや専用 `QThread`
+（`stop_thread` で放棄可能）へ分離する。現状は「戻らないファイルは想定しない」
+という前提で運用し、超過時は結果を捨ててログへ残す。
 
 ---
 

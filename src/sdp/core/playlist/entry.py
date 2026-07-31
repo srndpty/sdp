@@ -5,6 +5,7 @@
 読み取り処理そのものは :mod:`sdp.core.metadata.reader` の責務。
 """
 
+import os
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -34,11 +35,17 @@ class FileStatus(Enum):
 def normalize_path(path: Path) -> Path:
     """エントリが保持するパスの正規化。ここが唯一の正規化地点。
 
-    絶対パスへ統一し、相対パスを作業ディレクトリ依存のまま保持しない。
-    ``strict=False`` なのは、存在しないファイルも復元・保持できる必要があるため
-    （欠損エントリはプレイリストから消さない）。
+    **字句的な絶対パス化だけを行い、ファイルシステムへ触れない。**
+    ``Path.resolve()`` はsymlink・junction・UNCの解決のためにI/Oを発生させ、
+    切断されたUNCや休止中ドライブでは1件でも長時間ブロックしうる。エントリ生成は
+    1000曲の復元やD&DでGUIスレッド上に件数ぶん積み上がるため、ここでは
+    ``os.path.abspath``/``normpath`` による純粋な文字列処理に留める
+    （相対パスは cwd 基準で絶対化するが、対象ファイルへは問い合わせない）。
+    symlinkを解いたcanonical pathが要る場合は、背景workerか再生直前に別途行う。
+    存在しないファイルもそのまま保持できる（欠損エントリは消さない）。
     """
-    return Path(path).expanduser().resolve(strict=False)
+    expanded = Path(path).expanduser()
+    return Path(os.path.abspath(os.path.normpath(expanded)))
 
 
 def new_entry_id() -> str:

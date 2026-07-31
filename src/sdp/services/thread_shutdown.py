@@ -17,6 +17,11 @@ threadと関連オブジェクトをここへ引き取り、制御だけを返�
 thread内でまだ動いているコードの足元が崩れる。呼び出し側は ``keepalive`` で
 生かしておくべきオブジェクトを渡す。
 
+回収したthreadと関連オブジェクトの **Python参照はここで解放しない**。
+``QThread`` などのQObjectをreaper thread上で最終解放すると、GUIでもworkerの
+affinity threadでもないthread上でC++デストラクタが走り、危険になりうる。
+reaperは「終了したこと」を確認するだけで、参照はプロセス終了まで保持する。
+
 強制終了（``QThread.terminate``）は使わない。保存中のユーザーデータが壊れうるため。
 """
 
@@ -60,17 +65,29 @@ class _AbandonedThread:
 
 
 class _Reaper:
-    """放棄したthreadをevent loop非依存で見張り、戻ったら参照を解放する。"""
+    """放棄したthreadをevent loop非依存で見張り、終了を確認する。
+
+    確認できたentryは参照を解放せず ``_completed`` へ移し、プロセス終了まで
+    保持する。QObjectの最終解放をreaper thread上で起こさないための設計。
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._entries: list[_AbandonedThread] = []
+        self._completed: list[_AbandonedThread] = []
         self._worker: threading.Thread | None = None
 
     @property
     def count(self) -> int:
+        """まだ終了を確認できていないentry数。"""
         with self._lock:
             return len(self._entries)
+
+    @property
+    def completed_count(self) -> int:
+        """終了を確認し、プロセス終了まで保持しているentry数。"""
+        with self._lock:
+            return len(self._completed)
 
     def add(self, entry: _AbandonedThread) -> None:
         """引き取って見張りを開始する。"""
@@ -81,7 +98,7 @@ class _Reaper:
             self._start_worker_locked()
 
     def wait_for_empty(self, timeout_s: float) -> bool:
-        """すべて回収されるまで待つ（テストと診断用）。"""
+        """未確認entryがすべて終了確認されるまで待つ（テストと診断用）。"""
         deadline = time.monotonic() + max(0.0, timeout_s)
         while self.count > 0 and time.monotonic() < deadline:
             time.sleep(0.02)
@@ -108,14 +125,17 @@ class _Reaper:
                 # wait() 自体が待機になるので、追加のsleepは要らない。
                 # hard timeout 直後に終了していた場合も、ここで即座に回収できる。
                 if entry.thread.wait(_REAPER_POLL_MS):
-                    self._release(entry)
+                    self._mark_completed(entry)
 
-    def _release(self, entry: _AbandonedThread) -> None:
+    def _mark_completed(self, entry: _AbandonedThread) -> None:
+        # 参照はここで解放しない。reaper thread上でQThread等のC++破棄が走るのを
+        # 避けるため、終了確認済みのentryはプロセス終了まで保持する。
         with self._lock:
             if entry not in self._entries:
                 return
             self._entries.remove(entry)
-        _logger.info("放棄した%sが終了したため参照を解放しました", entry.label)
+            self._completed.append(entry)
+        _logger.info("放棄した%sが終了しました（参照はプロセス終了まで保持します）", entry.label)
 
 
 _reaper = _Reaper()
@@ -126,8 +146,13 @@ def abandoned_thread_count() -> int:
     return _reaper.count
 
 
+def completed_abandoned_thread_count() -> int:
+    """終了を確認し、プロセス終了まで保持している放棄済みthreadの数。"""
+    return _reaper.completed_count
+
+
 def wait_for_abandoned_threads(timeout_s: float = 5.0) -> bool:
-    """放棄済みthreadがすべて回収されるまで待つ（テストと診断用）。"""
+    """放棄済みthreadがすべて終了確認されるまで待つ（テストと診断用）。"""
     return _reaper.wait_for_empty(timeout_s)
 
 
@@ -147,19 +172,24 @@ def stop_thread(
     :param keepalive: 放棄する場合に一緒に生かしておくオブジェクト
         （worker QObjectなど、thread内でまだ使われているもの）。
     """
+    # 上限は負値を0へ丸め、hardが真の上限になるよう first_wait を min(soft, hard)
+    # でclampする（soft > hard の設定でもhardを超えて待たない）。
+    soft = max(0, soft_timeout_ms)
+    hard = max(0, hard_timeout_ms)
+    first_wait = min(soft, hard)
+
     # isRunning() が False でも必ず wait() する。run() から戻った直後の thread は
     # isRunning() が False になり得るが、OSスレッドの後始末はまだ終わっていない。
     # join せずに戻ると、直後のQObject破棄でheap corruptionになる（実測）。
-    if thread.wait(max(0, soft_timeout_ms)):
+    if thread.wait(first_wait):
         return ShutdownOutcome.STOPPED
 
-    _logger.warning("%sが%dms以内に終了しません。もう少し待機します。", label, soft_timeout_ms)
-    remaining = max(0, hard_timeout_ms - soft_timeout_ms)
-    if thread.wait(remaining):
-        return ShutdownOutcome.STOPPED
+    remaining = hard - first_wait
+    if remaining > 0:
+        _logger.warning("%sが%dms以内に終了しません。もう少し待機します。", label, first_wait)
+        if thread.wait(remaining):
+            return ShutdownOutcome.STOPPED
 
-    _logger.error(
-        "%sが%dms以内に終了しないため、待機を打ち切って終了処理を続けます。", label, hard_timeout_ms
-    )
+    _logger.error("%sが%dms以内に終了しないため、待機を打ち切って終了処理を続けます。", label, hard)
     _reaper.add(_AbandonedThread(thread=thread, label=label, keepalive=keepalive))
     return ShutdownOutcome.ABANDONED

@@ -789,20 +789,24 @@ CI（GitHub Actions、Windows のみ）の構成は `.github/workflows/ci.yml` �
 - 下限は「意味のあるテストの結果として満たす」ものとし、
   数値合わせのためのテストは書かない。
 
-### 実音再生経路の観測用ジョブ
+### 実音再生経路の確認・観測用ジョブ
 
 通常のPR CIは `pytest -m "not audio"` のため、QtMultimediaとWindowsの
 FFmpeg backendの組合せ、codec、実 `END_OF_MEDIA` の通知順序、PCMタップへの
-実buffer供給が壊れても気付けない。これを補うため、`audio-observation` ジョブを
-**週1回（月曜03:00 UTC）と手動実行のときだけ**動かす。
+実buffer供給が壊れても気付けない。これを補うため、**週1回（月曜03:00 UTC）と
+手動実行のときだけ** 次の2ジョブを動かす（決定的な確認とデバイス依存の観測を分ける）。
 
-- `--selftest`（Qt依存とplugin loadの確認）
-- `--codec-test` で6形式の実decode（出力デバイスが無くても確認できる）
-- `pytest -m audio`（runnerに音声出力デバイスが無ければ失敗しうる）
+- `audio-codec-check`（音声出力デバイス非依存。**失敗をworkflow failureにする**）
+  - `--selftest`（Qt依存とplugin loadの確認）
+  - `--codec-test` で6形式の実decode（出力デバイスが無くても確認できる）
+- `audio-device-observation`（音声出力デバイスの有無に左右されるため
+  `continue-on-error: true`。他ジョブとPRを止めない）
+  - `pytest -m audio`（runnerに音声出力デバイスが無ければ失敗しうる）
 
-音声デバイスの有無に左右されるため `continue-on-error: true` とし、
-required check にはしない。**まずは観測用**で、安定して意味のある失敗だけを
-出せると分かった時点で扱いを見直す。
+codec/pluginの決定的な破綻は `audio-codec-check` で確実に落とし、デバイス依存で
+ゆらぐ実音再生は `audio-device-observation` に隔離する。後者は required check に
+しない。**まずは観測用**で、安定して意味のある失敗だけを出せると分かった時点で
+扱いを見直す。
 
 ### 文書と実装の整合
 

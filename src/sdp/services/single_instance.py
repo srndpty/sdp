@@ -18,7 +18,7 @@ from PySide6.QtCore import QLockFile, QObject, QStandardPaths, Qt, QThread, Sign
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 from sdp.services.launch_request import LaunchRequest
-from sdp.services.thread_shutdown import stop_thread
+from sdp.services.thread_shutdown import ShutdownOutcome, stop_thread
 
 _logger = logging.getLogger(__name__)
 
@@ -276,11 +276,15 @@ class SingleInstanceService(QObject):
             return
         self._shutdown = True
         thread = self._server_thread
-        if thread is not None and thread.isRunning():
+        outcome: ShutdownOutcome | None = None
+        if thread is not None:
             thread.quit()
-            # 上限つきで待つ。超えても無期限待機へ移らず、放棄して制御を返す。
-            # 放棄する場合は、thread内で使うendpointの所有者ごと生かしておく。
-            stop_thread(
+            # isRunning() で分岐しない。run() から戻った直後は isRunning() が
+            # False でも OSスレッドの後始末が残っており、wait() せず参照を捨てると
+            # QThread破棄でheap corruptionになる（thread_shutdown 側の実測）。
+            # 上限つきで待ち、超えたら放棄して制御を返す。放棄する場合は、
+            # thread内で使うendpointの所有者ごと生かしておく。
+            outcome = stop_thread(
                 thread,
                 label="単一instance IPC thread",
                 soft_timeout_ms=self._startup_timeout_ms,
@@ -288,8 +292,19 @@ class SingleInstanceService(QObject):
             )
         self._server_thread = None
         if self._primary:
-            QLocalServer.removeServer(self._server_name)
-            self._lock.unlock()
+            # server threadを時間内に停止できた場合だけ、lockとserver名を解放する。
+            # ABANDONED（旧server threadがまだ動作中）でendpointとlockを解放すると、
+            # 新しいsdpがprimaryとして起動できてしまい、さらに旧serverが一時的に
+            # 接続を受けても _shutdown=True のため要求がUIへ渡らず消失しうる。
+            # 放棄時はlockを保持したままにし、プロセス消滅時にOS/QLockFileへ委ねる。
+            if outcome is None or outcome is ShutdownOutcome.STOPPED:
+                QLocalServer.removeServer(self._server_name)
+                self._lock.unlock()
+            else:
+                _logger.warning(
+                    "単一instance IPC threadを停止できませんでした。"
+                    "二重起動を防ぐためlockとserver endpointは保持します。"
+                )
         self._primary = False
         self._delivery_started = False
 

@@ -229,7 +229,7 @@ def test_multiple_files_are_added_in_one_batch(
 
     view.add_files()
 
-    assert [entry.path for entry in model.entries()] == [path.resolve() for path in audio_files]
+    assert [entry.path for entry in model.entries()] == list(audio_files)
     assert inserted == [len(audio_files)]
     assert messages == [f"{len(audio_files)}曲を追加しました。"]
     assert count_text(view) == "5曲"
@@ -457,7 +457,7 @@ def test_missing_row_keeps_its_tooltip(model: PlaylistModel, tmp_path: Path) -> 
 
     tooltip = model.data(model.index(0, Column.NAME), 3)  # Qt.ToolTipRole
 
-    assert tooltip == str(path.resolve())
+    assert tooltip == str(path)
 
 
 # -- 大量データ -------------------------------------------------------------

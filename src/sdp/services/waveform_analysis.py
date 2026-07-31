@@ -451,16 +451,13 @@ class WaveformAnalysisService(QObject):
             return
         self._next_token += 1
         token = self._next_token
-        # GUIスレッドではファイルの内容を読まない。存在確認とpath正規化だけを行い、
-        # キャッシュキー（内容fingerprintを含む）の生成はworkerへ任せる。
-        try:
-            resolved = source.resolve(strict=True)
-        except OSError as error:
-            # worker開始前の失敗でもPanelが同じライフサイクルで終端できるようにする。
-            self.analysis_started.emit(source, token)
-            self.analysis_failed.emit(source, token, str(error))
-            return
-        request = WaveformRequest(path=resolved, token=token)
+        # GUIスレッドではファイルシステムへ触れない。source は PlaybackController が
+        # 既に strict resolve 済みのパス（source_changed が渡す値）なので、ここで
+        # 再度 resolve(strict=True) すると NAS・休止ディスク・クラウドプレースホルダー
+        # でUIを止めるだけの重複I/Oになる。strict resolve・stat・内容fingerprint・
+        # cache lookup はすべて worker thread（analyze / from_path）へ任せる。
+        # 解析直前に消えていた等の失敗も worker が analysis_failed で終端する。
+        request = WaveformRequest(path=source, token=token)
         self._request = request
         self._cancellations.discard(request.token)
         self._analyze_requested.emit(request)

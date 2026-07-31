@@ -7,6 +7,7 @@
 
 import gc
 import threading
+import time
 import weakref
 from collections.abc import Iterator
 
@@ -17,6 +18,7 @@ from pytestqt.qtbot import QtBot
 from sdp.services.thread_shutdown import (
     ShutdownOutcome,
     abandoned_thread_count,
+    completed_abandoned_thread_count,
     stop_thread,
     wait_for_abandoned_threads,
 )
@@ -50,6 +52,39 @@ def test_finished_thread_reports_stopped(qtbot: QtBot) -> None:
     thread = QThread()
 
     assert stop_thread(thread, label="テスト") is ShutdownOutcome.STOPPED
+
+
+def test_non_positive_timeouts_do_not_hang(qtbot: QtBot) -> None:
+    """負値や0の上限でも無期限待機へ移らず、判定を返す。"""
+    del qtbot
+    thread = QThread()
+
+    assert (
+        stop_thread(thread, label="テスト", soft_timeout_ms=-5, hard_timeout_ms=-5)
+        is ShutdownOutcome.STOPPED
+    )
+
+
+def test_hard_timeout_caps_wait_even_when_soft_is_larger(
+    release: threading.Event, qtbot: QtBot
+) -> None:
+    """soft > hard でも hard を真の上限とし、softぶん待たない。"""
+    del qtbot
+    thread = _BlockingThread(release)
+    thread.start()
+    assert thread.entered.wait(timeout=5)
+
+    started_at = time.monotonic()
+    outcome = stop_thread(thread, label="テスト", soft_timeout_ms=20_000, hard_timeout_ms=50)
+    elapsed = time.monotonic() - started_at
+
+    assert outcome is ShutdownOutcome.ABANDONED
+    # hard=50msなので、softの20秒を待たずに戻る（余裕をみて数秒で判定）。
+    assert elapsed < 5.0
+
+    release.set()
+    assert wait_for_abandoned_threads()
+    assert thread.wait(WAIT_TIMEOUT_MS)
 
 
 def test_thread_that_returns_in_time_reports_stopped(
@@ -99,10 +134,11 @@ def test_blocked_thread_is_abandoned_instead_of_waiting_forever(
 def test_abandoned_thread_releases_itself_after_returning(
     release: threading.Event, qtbot: QtBot
 ) -> None:
-    """放棄したthreadは、協調的な処理が戻った時点で参照を手放す。"""
+    """放棄したthreadは、協調的な処理が戻った時点で終了確認され保持へ移る。"""
     thread = _BlockingThread(release)
     thread.start()
     assert thread.entered.wait(timeout=5)
+    before_completed = completed_abandoned_thread_count()
     stop_thread(thread, label="テスト", soft_timeout_ms=1, hard_timeout_ms=5)
     assert abandoned_thread_count() == 1
 
@@ -110,6 +146,8 @@ def test_abandoned_thread_releases_itself_after_returning(
 
     assert wait_for_abandoned_threads()
     assert thread.wait(WAIT_TIMEOUT_MS)
+    # 終了確認済みentryは解放せず保持する（reaper thread上でQObjectを破棄しない）。
+    assert completed_abandoned_thread_count() == before_completed + 1
 
 
 def test_abandoned_thread_is_reaped_without_running_a_qt_event_loop(
@@ -143,15 +181,24 @@ def test_thread_finishing_right_after_the_hard_timeout_is_still_reaped(
 
     「wait()がFalseを返した直後にthreadが終わる」順序では、あとから接続する
     signalは届かない。回収はsignalではなくwait()で行う。
+
+    スケジューリング依存で最初の ``wait(0)`` が STOPPED を返してしまうと、
+    放棄経路を一度も通らず「取りこぼさない」ことの証拠にならない。そのため
+    threadはstop_thread中もblockさせて **必ずABANDONED** にしてから解放し、
+    「放棄直後に終了」を決定的に再現する。
     """
     thread = _BlockingThread(release)
     thread.start()
     assert thread.entered.wait(timeout=5)
     before = abandoned_thread_count()
 
-    # 放棄の直前に解放し、finishedのemitと登録が競合する状況を作る。
+    # 解放前に呼ぶことで、threadはまだblock中＝確実にABANDONEDになる。
+    outcome = stop_thread(thread, label="テスト", soft_timeout_ms=0, hard_timeout_ms=0)
+    assert outcome is ShutdownOutcome.ABANDONED
+    assert abandoned_thread_count() == before + 1
+
+    # 放棄が確定した直後に終了させる（hard timeout直後の順序）。
     release.set()
-    stop_thread(thread, label="テスト", soft_timeout_ms=0, hard_timeout_ms=0)
 
     assert wait_for_abandoned_threads()
     assert abandoned_thread_count() == before
@@ -160,10 +207,12 @@ def test_thread_finishing_right_after_the_hard_timeout_is_still_reaped(
 def test_keepalive_objects_survive_until_the_thread_returns(
     release: threading.Event,
 ) -> None:
-    """放棄したthreadが戻るまで、渡したオブジェクトを解放しない。
+    """放棄したthreadに渡したオブジェクトを、少なくともthreadが戻るまで生かす。
 
     worker QObjectのPython参照が先に切れると、thread内でまだ動いている
-    コードの足元が崩れる。
+    コードの足元が崩れる。さらに、終了確認後もreaper thread上でQObjectを
+    最終解放しないため、keepaliveはプロセス終了まで保持される。
+    （通常のQObjectをreaper thread上でGCさせることは安全性の証明にしない。）
     """
     thread = _BlockingThread(release)
     thread.start()
@@ -182,5 +231,8 @@ def test_keepalive_objects_survive_until_the_thread_returns(
 
     release.set()
     assert wait_for_abandoned_threads()
+    assert thread.wait(WAIT_TIMEOUT_MS)
     gc.collect()
-    assert reference() is None
+
+    # 終了確認後も、reaper thread上での破棄を避けるため参照を保持し続ける。
+    assert reference() is not None

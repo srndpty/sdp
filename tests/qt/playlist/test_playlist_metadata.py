@@ -92,7 +92,7 @@ def test_title_falls_back_to_the_file_name(model: PlaylistModel, audio_files: li
     assert display(model, 0, Column.ARTIST) == ""
     assert display(model, 0, Column.ALBUM) == ""
     assert display(model, 0, Column.DURATION) == ""
-    assert display(model, 0, Column.PATH) == str(audio_files[0].resolve())
+    assert display(model, 0, Column.PATH) == str(audio_files[0])
 
 
 # -- 状態遷移 ---------------------------------------------------------------

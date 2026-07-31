@@ -74,7 +74,7 @@ def test_add_paths_normalizes_to_absolute(
 
     model.add_paths([Path("相対 曲.wav")])
 
-    assert model.entry_at(0).path == (tmp_path / "相対 曲.wav").resolve()
+    assert model.entry_at(0).path == tmp_path / "相対 曲.wav"
 
 
 def test_duplicate_paths_are_allowed(model: PlaylistModel, audio_files: list[Path]) -> None:
@@ -150,7 +150,7 @@ def test_entry_at_and_row_lookup(model: PlaylistModel, audio_files: list[Path]) 
 
     for row, path in enumerate(audio_files):
         entry = model.entry_at(row)
-        assert entry.path == path.resolve()
+        assert entry.path == path
         assert model.row_of_entry_id(entry.entry_id) == row
 
 
