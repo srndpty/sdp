@@ -20,6 +20,7 @@ from sdp.core.analysis.waveform_cache import (
     WaveformCacheKey,
 )
 from sdp.core.playback.controller import PlaybackController
+from sdp.services.thread_shutdown import ShutdownOutcome
 from sdp.services.waveform_analysis import (
     FILE_CHANGED_MESSAGE,
     DecodedChunk,
@@ -453,7 +454,7 @@ def test_shutdown_waits_for_blocked_worker_after_timeout(
     qtbot: QtBot,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """短いtimeoutを超えてもworker終了まで待ち、安全にQObjectを削除できる。"""
+    """短いtimeoutを超えても、hard上限までにworkerが戻れば通常どおり終了する。"""
     source = make_audio_file(tmp_path)
     entered = threading.Event()
     release = threading.Event()
@@ -472,11 +473,12 @@ def test_shutdown_waits_for_blocked_worker_after_timeout(
     releaser.start()
 
     with caplog.at_level("WARNING"):
-        service.shutdown(timeout_ms=1)
+        outcome = service.shutdown(timeout_ms=1)
     releaser.join(timeout=1)
 
+    assert outcome is ShutdownOutcome.STOPPED
     assert not service._thread.isRunning()  # pyright: ignore[reportPrivateUsage]
-    assert "安全なQObject破棄のため終了まで待機します" in caplog.text
+    assert "もう少し待機します" in caplog.text
     service.deleteLater()
     qtbot.waitUntil(lambda: not isValid(service))
     assert not isValid(service)

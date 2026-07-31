@@ -19,6 +19,7 @@ from sdp.core.analysis.waveform_cache import (
     WaveformCacheKey,
 )
 from sdp.core.playback.controller import PlaybackController
+from sdp.services.thread_shutdown import ShutdownOutcome, stop_thread
 
 _logger = logging.getLogger(__name__)
 
@@ -348,10 +349,15 @@ class WaveformAnalysisService(QObject):
         self._thread.start()
         self._on_source_changed(self._playback.source)
 
-    def shutdown(self, timeout_ms: int = SHUTDOWN_TIMEOUT_MS) -> None:
-        """新規要求を禁止し、decoder停止を要求してthread終了を待つ。"""
+    def shutdown(self, timeout_ms: int = SHUTDOWN_TIMEOUT_MS) -> ShutdownOutcome:
+        """新規要求を禁止し、decoder停止を要求してthread終了を待つ。
+
+        待機は上限つきで、**超えても無期限待機へ移らない**（「閉じるを押したのに
+        プロセスが残る」状態を作らない）。上限を超えた場合はthreadを親から
+        切り離して放棄し、``ABANDONED`` を返す。terminateは使わない。
+        """
         if self._shutdown:
-            return
+            return ShutdownOutcome.STOPPED
         self._shutdown = True
         if self._started:
             self._playback.source_changed.disconnect(self._on_source_changed)
@@ -359,15 +365,7 @@ class WaveformAnalysisService(QObject):
         self._shutdown_requested.emit()
         self._thread.requestInterruption()
         self._thread.quit()
-        if not self._thread.wait(timeout_ms):
-            _logger.warning(
-                "波形解析threadが%dms以内に終了しません。"
-                "安全なQObject破棄のため終了まで待機します。",
-                timeout_ms,
-            )
-            # 実行中QThreadを子に持ったまま戻るとQObject破棄時に致命的となる。
-            # terminateは使わず、協調的な処理が戻るまで待つ。
-            self._thread.wait()
+        return stop_thread(self._thread, label="波形解析thread", soft_timeout_ms=timeout_ms)
 
     @Slot(object)
     def _on_source_changed(self, source: object) -> None:

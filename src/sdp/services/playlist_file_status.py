@@ -67,7 +67,12 @@ class _ProbeTask(QRunnable):
                     # 再生直前の同期確認に任せる（ここで例外を伝播させない）。
                     _logger.debug("ファイル状態を確認できません: %s", path, exc_info=True)
                     results[entry_id] = FileStatus.MISSING
-            self._signals.finished.emit(self._generation, results)
+            try:
+                self._signals.finished.emit(self._generation, results)
+            except RuntimeError:
+                # 所有者が先に破棄された（shutdownを経ないアプリ終了・テスト等）。
+                # 結果を渡す相手がいないだけなので、警告にせず捨てる。
+                _logger.debug("ファイル状態の通知先が既に破棄されています")
         finally:
             # 例外で抜けても shutdown 側の待機を必ず解く。
             self._done.set()

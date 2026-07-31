@@ -18,6 +18,7 @@ from PySide6.QtCore import QLockFile, QObject, QStandardPaths, Qt, QThread, Sign
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 from sdp.services.launch_request import LaunchRequest
+from sdp.services.thread_shutdown import stop_thread
 
 _logger = logging.getLogger(__name__)
 
@@ -277,13 +278,12 @@ class SingleInstanceService(QObject):
         thread = self._server_thread
         if thread is not None and thread.isRunning():
             thread.quit()
-            if not thread.wait(self._startup_timeout_ms):
-                _logger.warning(
-                    "単一instance IPC threadが%dms以内に終了しません。"
-                    "安全なQObject破棄のため終了まで待機します。",
-                    self._startup_timeout_ms,
-                )
-                thread.wait()
+            # 上限つきで待つ。超えても無期限待機へ移らず、放棄して制御を返す。
+            stop_thread(
+                thread,
+                label="単一instance IPC thread",
+                soft_timeout_ms=self._startup_timeout_ms,
+            )
         self._server_thread = None
         if self._primary:
             QLocalServer.removeServer(self._server_name)
