@@ -8,8 +8,10 @@ import pytest
 
 from sdp.core.analysis.waveform import WaveformData
 from sdp.core.analysis.waveform_cache import (
+    FINGERPRINT_CHUNK_BYTES,
     WaveformCache,
     WaveformCacheKey,
+    content_fingerprint,
 )
 
 
@@ -19,12 +21,13 @@ def make_source(tmp_path: Path, name: str = "日本語 音源.wav") -> Path:
     return path
 
 
-def make_key(path: Path, **changes: int) -> WaveformCacheKey:
+def make_key(path: Path, **changes: object) -> WaveformCacheKey:
     base = WaveformCacheKey.from_path(path)
-    values = {
+    values: dict[str, object] = {
         "path": base.path,
         "size": base.size,
         "mtime_ns": base.mtime_ns,
+        "content_fingerprint": base.content_fingerprint,
         "analysis_version": base.analysis_version,
         "bucket_ms": base.bucket_ms,
         "format_version": base.format_version,
@@ -61,11 +64,12 @@ def test_cache_key_is_stable_and_contains_no_source_name(tmp_path: Path) -> None
         {"mtime_ns": 1},
         {"analysis_version": 2},
         {"bucket_ms": 10},
-        {"format_version": 2},
+        {"format_version": 3},
+        {"content_fingerprint": "x" * 64},
     ],
 )
-def test_cache_key_changes_with_each_input(tmp_path: Path, change: dict[str, int]) -> None:
-    """size、mtime、解析version、bucket、mono formatがkeyを無効化する。"""
+def test_cache_key_changes_with_each_input(tmp_path: Path, change: dict[str, object]) -> None:
+    """size、mtime、内容fingerprint、解析version、bucket、formatがkeyを無効化する。"""
     source = make_source(tmp_path)
     assert make_key(source, **change).digest != make_key(source).digest
 
@@ -76,7 +80,7 @@ def test_cache_key_changes_with_path_and_requires_absolute_path(tmp_path: Path) 
     second = make_source(tmp_path, "二.wav")
     assert WaveformCacheKey.from_path(first).digest != WaveformCacheKey.from_path(second).digest
     with pytest.raises(ValueError, match="絶対"):
-        WaveformCacheKey(Path("relative.wav"), 1, 1)
+        WaveformCacheKey(Path("relative.wav"), 1, 1, "fingerprint")
 
 
 def test_cache_round_trip_preserves_float32_and_read_only(tmp_path: Path) -> None:
@@ -111,6 +115,7 @@ def test_cache_miss_does_not_create_directory(tmp_path: Path) -> None:
         {"analysis_version": np.int64(2)},
         {"file_size": np.int64(999)},
         {"file_mtime_ns": np.int64(1)},
+        {"content_fingerprint": np.str_("x" * 64)},
         {"minimum": np.array([-1.0], dtype=np.float32)},
         {"maximum": np.array([0.5], dtype=np.float32)},
         {"minimum": np.array([-1.0, 0.0], dtype=np.float64)},
@@ -138,6 +143,7 @@ def test_invalid_npz_is_deleted_and_treated_as_miss(
         "format_version": np.int64(key.format_version),
         "file_size": np.int64(key.size),
         "file_mtime_ns": np.int64(key.mtime_ns),
+        "content_fingerprint": np.str_(key.content_fingerprint),
         "complete": np.bool_(True),
     }
     fields.update(override)
@@ -264,3 +270,57 @@ def test_lru_continues_after_individual_delete_failure(
     assert paths[0].exists()
     assert not paths[1].exists()
     assert not paths[2].exists()
+
+
+def test_same_size_and_mtime_with_different_content_is_a_miss(tmp_path: Path) -> None:
+    """サイズとmtimeを保ったまま内容が差し替わったら古い波形を返さない。
+
+    バックアップ復元・同期ソフト・一部のタグ編集ツールはタイムスタンプを
+    維持するため、size と mtime だけでは音源を同定できない。
+    """
+    source = tmp_path / "差し替わる曲.wav"
+    source.write_bytes(b"original-audio-content")
+    key = WaveformCacheKey.from_path(source)
+    cache = WaveformCache(tmp_path / "cache")
+    saved = cache.save(key, make_data())
+    assert cache.load(key) is not None
+    stat = source.stat()
+
+    # 同じ長さの別内容へ差し替え、mtimeも元へ戻す。
+    source.write_bytes(b"REPLACED-audio-content")
+    os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    replaced_key = WaveformCacheKey.from_path(source)
+
+    assert replaced_key.size == key.size
+    assert replaced_key.mtime_ns == key.mtime_ns
+    assert replaced_key.content_fingerprint != key.content_fingerprint
+    assert replaced_key.digest != key.digest
+    # 旧keyで保存済みのファイルは、新しいkeyからは参照されない。
+    assert cache.load(replaced_key) is None
+    assert saved.is_file()
+
+
+def test_content_fingerprint_covers_head_middle_and_tail(tmp_path: Path) -> None:
+    """先頭・中央・末尾のどこが変わってもfingerprintが変わる。"""
+    size = FINGERPRINT_CHUNK_BYTES * 4
+    base = bytearray(b"\x00" * size)
+    source = tmp_path / "長い曲.wav"
+    source.write_bytes(bytes(base))
+    original = content_fingerprint(source, size)
+
+    for offset in (0, size // 2, size - 1):
+        changed = bytearray(base)
+        changed[offset] = 0xFF
+        source.write_bytes(bytes(changed))
+        assert content_fingerprint(source, size) != original, offset
+
+
+def test_content_fingerprint_is_stable_and_handles_empty_files(tmp_path: Path) -> None:
+    """同じ内容なら同じ値になり、空ファイルでも失敗しない。"""
+    source = make_source(tmp_path)
+    size = source.stat().st_size
+    assert content_fingerprint(source, size) == content_fingerprint(source, size)
+
+    empty = tmp_path / "空.wav"
+    empty.write_bytes(b"")
+    assert len(content_fingerprint(empty, 0)) == 64

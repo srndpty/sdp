@@ -1305,7 +1305,9 @@ def test_visualization_schemas_are_unchanged(
     from sdp.core.analysis import waveform_cache
 
     assert waveform_cache.WAVEFORM_ANALYSIS_VERSION == 1
-    assert waveform_cache.WAVEFORM_FORMAT_VERSION == 1
+    # format 2 で内容fingerprintを追加した（縮約アルゴリズムは変えていないため
+    # analysis versionは据え置き）。古いcacheはversion不一致で作り直される。
+    assert waveform_cache.WAVEFORM_FORMAT_VERSION == 2
     assert waveform_cache.WAVEFORM_BUCKET_MS == 20
 
 

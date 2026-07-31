@@ -15,12 +15,60 @@ from sdp.core.analysis.waveform import WAVEFORM_BUCKET_MS, WaveformData
 _logger = logging.getLogger(__name__)
 
 WAVEFORM_ANALYSIS_VERSION = 1
-WAVEFORM_FORMAT_VERSION = 1
+WAVEFORM_FORMAT_VERSION = 2
+"""キャッシュファイルの構造version。
+
+- version 1: path・size・mtime_ns で同一性を判定
+- version 2: 先頭・中央・末尾の内容 fingerprint を追加
+
+version 1 のファイルは version 不一致で無効化され、再解析される。
+"""
+
+FINGERPRINT_CHUNK_BYTES = 64 * 1024
+"""fingerprintで読む1区間のbyte数（先頭・中央・末尾の3か所）。"""
 MAX_WAVEFORM_CACHE_BYTES = 500 * 1024 * 1024
 
 
 class WaveformCacheError(Exception):
     """キャッシュが現在の契約どおり解釈できない。"""
+
+
+def content_fingerprint(path: Path, size: int) -> str:
+    """ファイル内容の軽量な指紋（先頭・中央・末尾の各64KiBとサイズ）。
+
+    size と mtime だけでは音源を同定できない。バックアップ復元、同期ソフト、
+    一部のタグ編集ツールはタイムスタンプを維持したまま内容を差し替えるため、
+    古い波形をそのまま返してしまう。全体のSHA-256は長時間音源で重すぎるので、
+    3か所の抜き取りで実用上の取り違えを防ぐ。
+
+    先頭はヘッダーとタグ、末尾は末尾タグと切り詰め、中央は本体の差し替えを
+    捉える。**暗号学的な同一性の保証ではない**（悪意ある衝突は想定しない）。
+    """
+    digest = hashlib.sha256()
+    digest.update(str(size).encode("ascii"))
+    if size <= 0:
+        return digest.hexdigest()
+    offsets = _fingerprint_offsets(size)
+    with path.open("rb") as stream:
+        for offset in offsets:
+            stream.seek(offset)
+            digest.update(offset.to_bytes(8, "big"))
+            digest.update(stream.read(FINGERPRINT_CHUNK_BYTES))
+    return digest.hexdigest()
+
+
+def _fingerprint_offsets(size: int) -> tuple[int, ...]:
+    """読み取り開始位置を重複なく昇順で返す。"""
+    candidates = (
+        0,
+        max(0, size // 2 - FINGERPRINT_CHUNK_BYTES // 2),
+        max(0, size - FINGERPRINT_CHUNK_BYTES),
+    )
+    offsets: list[int] = []
+    for offset in sorted(candidates):
+        if offset not in offsets:
+            offsets.append(offset)
+    return tuple(offsets)
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +78,7 @@ class WaveformCacheKey:
     path: Path
     size: int
     mtime_ns: int
+    content_fingerprint: str = ""
     analysis_version: int = WAVEFORM_ANALYSIS_VERSION
     bucket_ms: int = WAVEFORM_BUCKET_MS
     format_version: int = WAVEFORM_FORMAT_VERSION
@@ -41,6 +90,8 @@ class WaveformCacheKey:
             raise ValueError("sizeとmtime_nsは0以上である必要があります")
         if self.analysis_version < 1 or self.bucket_ms < 1 or self.format_version < 1:
             raise ValueError("versionとbucket_msは1以上である必要があります")
+        if not self.content_fingerprint:
+            raise ValueError("content_fingerprintは空にできません")
 
     @classmethod
     def from_path(
@@ -59,6 +110,7 @@ class WaveformCacheKey:
             path=resolved,
             size=stat.st_size,
             mtime_ns=stat.st_mtime_ns,
+            content_fingerprint=content_fingerprint(resolved, stat.st_size),
             analysis_version=analysis_version,
             bucket_ms=bucket_ms,
             format_version=format_version,
@@ -69,6 +121,7 @@ class WaveformCacheKey:
         document = {
             "analysis_version": self.analysis_version,
             "bucket_ms": self.bucket_ms,
+            "content_fingerprint": self.content_fingerprint,
             "format_version": self.format_version,
             "mtime_ns": self.mtime_ns,
             "path": str(self.path),
@@ -154,6 +207,7 @@ class WaveformCache:
                     format_version=np.int64(key.format_version),
                     file_size=np.int64(key.size),
                     file_mtime_ns=np.int64(key.mtime_ns),
+                    content_fingerprint=np.str_(key.content_fingerprint),
                     complete=np.bool_(validated.complete),
                 )
                 stream.flush()
@@ -201,6 +255,7 @@ def _read_archive(archive: np.lib.npyio.NpzFile, key: WaveformCacheKey) -> Wavef
         "format_version",
         "file_size",
         "file_mtime_ns",
+        "content_fingerprint",
         "complete",
     }
     if not required.issubset(archive.files):
@@ -213,6 +268,9 @@ def _read_archive(archive: np.lib.npyio.NpzFile, key: WaveformCacheKey) -> Wavef
         raise WaveformCacheError("file sizeが一致しません")
     if _scalar_int(archive["file_mtime_ns"]) != key.mtime_ns:
         raise WaveformCacheError("mtime_nsが一致しません")
+    if _scalar_str(archive["content_fingerprint"]) != key.content_fingerprint:
+        # size・mtimeを保ったまま内容が差し替えられた場合はここで弾く。
+        raise WaveformCacheError("content fingerprintが一致しません")
     complete = archive["complete"]
     if complete.shape != () or complete.dtype != np.dtype(np.bool_) or not bool(complete.item()):
         raise WaveformCacheError("completeな結果ではありません")
@@ -229,6 +287,12 @@ def _read_archive(archive: np.lib.npyio.NpzFile, key: WaveformCacheKey) -> Wavef
         duration_ms=duration,
         complete=True,
     )
+
+
+def _scalar_str(value: np.ndarray) -> str:
+    if value.shape != () or value.dtype.kind not in "US":
+        raise WaveformCacheError("文字列scalar fieldが不正です")
+    return str(value.item())
 
 
 def _scalar_int(value: np.ndarray) -> int:
