@@ -316,6 +316,12 @@ def test_load_failure_from_backend_is_relayed(
 
     assert backend.call_args("load") == [(audio_file, 1)]
     assert spy.count() == 1
+    # load に由来するエラーは、その load の世代と source を伴う
+    # （世代を持たないと、前 source の遅延エラーと区別できない）。
+    error = spy.at(0)[0]
+    assert isinstance(error, PlaybackError)
+    assert error.generation == 1
+    assert error.source == audio_file
 
 
 def test_no_media_and_stopped_state_contract(

@@ -55,7 +55,7 @@ sdp/
 │   │       └── waveform_cache.py # npz キャッシュ、キー生成、LRU 容量管理
 │   ├── services/
 │   │   ├── launch_request.py # Qt非依存の起動要求とargv変換
-│   │   ├── pcm_tap.py        # QAudioBufferOutput → 正規化 → mono 化 → リングバッファ
+│   │   ├── pcm_tap.py        # 再生中PCM → 正規化 → mono 化 → リングバッファ
 │   │   ├── waveform_analysis.py # QAudioDecoder workerと現在sourceの解析調停
 │   │   ├── playlist_file_status.py # 欠損判定の背景確認（GUIスレッドでstatしない）
 │   │   ├── playlist_session.py # playlist.json の復元とデバウンス保存
@@ -103,7 +103,7 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 | クラス | 責務 | 持たないもの |
 |---|---|---|
 | `PlaybackBackend` | `load` / `play` / `pause` / `stop` / `seek` / `set_volume` / `set_muted` / `set_playback_rate` / `set_pitch_compensation` と、位置・長さ・状態・メディア状況・エラーのシグナル。**mpv 差し替えに必要な最小限のみ** | プレイリストの知識、UI の知識 |
-| `QtMultimediaBackend` | QMediaPlayer / QAudioOutput の所有（QAudioBufferOutput は P5 で追加）と、上記インターフェースへの変換。Qt の enum・QUrl・エラーをアプリ内の型へ写す | 曲順ロジック、値の検証 |
+| `QtMultimediaBackend` | load 世代ごとの QMediaPlayer / QAudioBufferOutput と QAudioOutput の所有、上記インターフェースへの変換、通知への load 世代の付与。Qt の enum・QUrl・エラーをアプリ内の型へ写す | 曲順ロジック、値の検証 |
 | `PlaybackController` | 1 つの source の再生（読み込み・状態・位置・音量・速度）と Backend との境界 | 曲順、プレイリストの知識 |
 | `SpeedPanel` | 0.5～2.0倍の速度操作、プリセット、ピッチ補正切替とControllerとの双方向同期 | Backend、プレイリスト、メタデータ、永続化 |
 | `ShortcutManager` | WindowShortcutの生成、フォーカスに応じた抑止、Controller群への操作委譲 | Backend、Modelの直接操作、設定保存 |
@@ -232,6 +232,7 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
   外部へは公開せず、UI と Controller は Qt の型に触れない。
   P5-A で QAudioBufferOutput も所有し `setAudioBufferOutput` で結び付けるが、
   これは `PlaybackBackend` の契約ではなく Qt 固有の補助ポートとして扱う（§6.2）。
+  QAudioBufferOutput は **load 世代ごとに作り直し、その世代の QMediaPlayer を親にする**。
 - **load 世代と player の identity**: `QMediaPlayer` は **`load()` ごとに作り直す**。
   Qt のシグナル自体には発生元の source を識別する情報が無いため、1 つの player を
   使い回すと、前 source から遅れて届いた通知にも受信時点の「現在世代」を後付けして
@@ -240,9 +241,13 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
   旧 player は停止して `deleteLater()` するが、シグナル接続は切らない。遅れて届く
   通知は **旧世代のまま** 通知され、受け手が世代で除外できる。
   状態・位置・duration・速度・ピッチ補正は現在世代の player のものだけを中継する。
-  `QAudioOutput` と `QAudioBufferOutput` は世代をまたいで同一のものを付け替え、
-  速度とピッチ補正は新しい player へ引き継ぐ（`PcmTap` の接続先も変えない）。
-  旧 player 側で `setAudioBufferOutput(None)` を呼んで明示的に外さない
+  `QAudioOutput` だけは世代をまたいで同一のものを付け替え（音量・ミュートの実体を保つため）、
+  速度とピッチ補正は新しい player へ引き継ぐ。**PCM も同じ扱いにする**: `QAudioBuffer` にも
+  source を識別する情報が無く、音声出力側の buffering で遅れて届きうるため、
+  1 つの `QAudioBufferOutput` を共有すると前 source の PCM を除外できない。
+  Backend は現在世代の PCM だけを `audio_buffer_received` シグナルへ流し、`PcmTap` は
+  そのシグナルへ接続するので、player を作り直しても接続先は変わらない。
+  旧 player 側で `setAudioOutput(None)` などを呼んで明示的に外さない
   （新しい player へ設定した時点で Qt 側が外すため、二重に外すと異常終了する。実測）。
 - **状態**: Qt は source 未設定でも `StoppedState` を返すため、`NO_MEDIA` と `STOPPED` を
   Qt の値だけでは区別できない。Backend が現在の source を内部で保持して判定する
@@ -335,7 +340,7 @@ UI 操作 → PlayerControls ──(メソッド呼び出し)──→ PlaybackC
 Backend ──position_changed / duration_changed──→ Controller ──→ PlayerControls / WaveformPanel
 Backend ──media_status_changed(END_OF_MEDIA)──→ Controller（次曲を決定）
 Backend ──error_occurred(PlaybackError)──→ Controller（該当エントリにエラーを記録し方針を適用）→ PlaylistModel
-QAudioBufferOutput ──audioBufferReceived──→ PcmTap（軽量変換のみ）→ PcmRingBuffer
+Backend ──audio_buffer_received(現在世代のPCM)──→ PcmTap（軽量変換のみ）→ PcmRingBuffer
 QTimer(30FPS) → SpectrumWidget: PcmRingBuffer.snapshot() → FFT → 描画
 WaveformAnalysisService(worker) ──partial / finished(WaveformData)──→ WaveformPanel ──→ WaveformWidget
 MetadataReader(worker) ──metadataReady(entry_id, tags)──→ PlaylistModel
@@ -405,14 +410,20 @@ P5-A の着手前に pause / stop / 再生中の直接 `setSource` / 終端通�
 
 - **`PlaybackBackend` の一般インターフェースへ PCM シグナルや Qt の PCM 型を追加しない。**
   mpv へ差し替えた場合に持ち込めないため、PCM 取得は **Qt Multimedia 固有の補助ポート**として扱う。
-- `QtMultimediaBackend` が `QAudioBufferOutput(parent=self)` を所有し、`setAudioBufferOutput`
-  で `QMediaPlayer` へ結び付ける。format を指定しないため、デコード直後のネイティブ形式が届く
-  （再サンプリングを挟まない）。通常の `QAudioOutput` はそのまま維持する。
-- 公開するのは `audio_buffer_output` という狭い property だけで、**composition root と
-  `PcmTap` 以外は参照しない**。UI 層からの `QAudioBufferOutput` / `QAudioBuffer` /
+- `QtMultimediaBackend` が load 世代ごとに `QAudioBufferOutput(parent=その世代の player)` を
+  所有し、`setAudioBufferOutput` で結び付ける。format を指定しないため、デコード直後の
+  ネイティブ形式が届く（再サンプリングを挟まない）。通常の `QAudioOutput` はそのまま維持する。
+- 公開するのは `audio_buffer_received` という狭いシグナルだけで、**composition root と
+  `PcmTap` 以外は参照しない**。`QAudioBufferOutput` 自体は公開しない（世代ごとに作り直すため、
+  接続先として安定しない）。UI 層からの `QAudioBufferOutput` / `QAudioBuffer` /
   `QtMultimediaBackend` の import は AST 検査で禁止している。
+- **前 source の PCM は Backend が load 世代で除外する。** `QAudioBuffer` には source を
+  識別する情報が無く、`PcmTap` 側では判定できない（`PcmTap` の clear 後に遅れて届いた
+  前曲 PCM を、新しい source のものとして取り込んでしまう）。
 - `FakePlaybackBackend` へ QAudioBuffer 概念を導入しない（テストで検査する）。
-- 接続は `app.py` の 1 行（`pcm_tap.connect_audio_buffer_output(backend.audio_buffer_output)`）だけ。
+- 接続は `app.py` の 1 行（`pcm_tap.connect_audio_buffer_source(backend.audio_buffer_received)`）だけ。
+  `PcmTap` が受け取るのは「`QAudioBuffer` を運ぶシグナル」であり、具体的な
+  `QAudioBufferOutput` ではない。
 
 ### 6.3 PcmTap（音声コールバック）
 
@@ -705,7 +716,7 @@ FFT・Peak / RMS・Peak hold・タイマー・リングバッファ・LevelProce
 同じく composition 済みサービスとして受け取る）。
 
 `app.py`（composition root）が `QtMultimediaBackend` → `PlaybackController` →
-`PcmTap` → `QAudioBufferOutput` への接続 → `MainWindow` の順に組み立て、
+`PcmTap` → Backend の PCM 供給シグナルへの接続 → `MainWindow` の順に組み立て、
 `PlayerComposition` が `pcm_tap` を保持する。**`build_player()` だけではタイマーを開始しない。**
 終了時は可視化を先に止める（`spectrum_panel.shutdown()` → `pcm_tap.shutdown()` →
 `waveform_analysis.shutdown()` → `metadata_reader.shutdown()` → settings / playlist 保存）。

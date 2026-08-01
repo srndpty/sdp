@@ -4,7 +4,8 @@ ADR-0001 で採用した QMediaPlayer + QAudioOutput をこのモジュールへ
 Qt の enum・QUrl・例外を PlaybackBackend の契約へ変換する。
 Controller と UI はこのモジュールを import しない。
 
-可視化用の PCM 供給口として QAudioBufferOutput を所有するが、これは
+可視化用の PCM 供給口として、load 世代ごとの QAudioBufferOutput と、世代を
+検査済みの :attr:`QtMultimediaBackend.audio_buffer_received` を持つ。これは
 PlaybackBackend の一般インターフェースには**含めない**（Qt Multimedia 固有の
 補助ポートとして扱う。mpv へ差し替えた場合に持ち込めないため）。
 接続するのは composition root と PcmTap だけで、UI 層は参照しない。
@@ -87,6 +88,10 @@ class _PlayerSession(QObject):
     closure（lambda）で束縛しない理由は、connection 側に Backend への強参照が
     残り、Backend と Qt オブジェクトが相互参照で破棄されなくなるため。
     この中継は player の子として生き、Backend を参照しない。
+
+    PCM（``audioBufferReceived``）も同じ扱いにする。QAudioBuffer にも source を
+    識別する情報が無く、音声出力側の buffering で遅れて届きうるため、Backend で
+    1 つの QAudioBufferOutput を共有すると前 source の PCM を除外できない。
     """
 
     playback_state_changed = Signal(int, QMediaPlayer.PlaybackState)
@@ -98,11 +103,20 @@ class _PlayerSession(QObject):
 
     playback_rate_changed = Signal(int, float)
     pitch_compensation_changed = Signal(int, bool)
+    audio_buffer_received = Signal(int, object)
+    """(世代, 再生中PCMの ``QAudioBuffer``)。"""
 
-    def __init__(self, player: QMediaPlayer, generation: int, source: Path | None) -> None:
+    def __init__(
+        self,
+        player: QMediaPlayer,
+        generation: int,
+        source: Path | None,
+        audio_buffer_output: QAudioBufferOutput,
+    ) -> None:
         super().__init__(player)
         self._generation = generation
         self._source = source
+        audio_buffer_output.audioBufferReceived.connect(self._on_audio_buffer_received)
         player.playbackStateChanged.connect(self._on_playback_state_changed)
         player.positionChanged.connect(self._on_position_changed)
         player.durationChanged.connect(self._on_duration_changed)
@@ -139,6 +153,10 @@ class _PlayerSession(QObject):
     def _on_pitch_compensation_changed(self, enabled: bool) -> None:
         self.pitch_compensation_changed.emit(self._generation, enabled)
 
+    @Slot(object)
+    def _on_audio_buffer_received(self, buffer: object) -> None:
+        self.audio_buffer_received.emit(self._generation, buffer)
+
 
 class QtMultimediaBackend(PlaybackBackend):
     """QMediaPlayer と QAudioOutput を所有し、PlaybackBackend の契約を満たす。
@@ -146,22 +164,28 @@ class QtMultimediaBackend(PlaybackBackend):
     所有する Qt オブジェクトは自身を parent にしており、本オブジェクトの破棄と
     ともに破棄される。外部へは公開しない（UI や Controller は Qt の型に触れない）。
 
-    **QMediaPlayer は load ごとに作り直す。** Qt のシグナルは発生元の source を
-    識別できないため、1 つの player を使い回すと遅延通知の由来が分からなくなる
-    （:meth:`load` を参照）。QAudioOutput と QAudioBufferOutput は世代をまたいで
-    同一のものを付け替える（PcmTap の接続先を変えないため）。
+    **QMediaPlayer と QAudioBufferOutput は load ごとに作り直す。** Qt のシグナルは
+    発生元の source を識別できないため、1 つの player・1 つの PCM 出力を使い回すと
+    遅延通知の由来が分からなくなる（:meth:`load` を参照）。QAudioOutput だけは
+    世代をまたいで同一のものを付け替える（音量・ミュートの実体を保つため）。
+    PCM の受け手は :attr:`audio_buffer_received` へ接続するので、player を
+    作り直しても接続先は変わらない。
 
     値の検証（範囲・NaN など）は PlaybackController の責務のため、ここでは
     重複した clamp や独自制限を行わず、Qt API が要求する型へ変換して転送する。
     """
 
+    audio_buffer_received = Signal(object)
+    """再生中PCM（``QAudioBuffer``）。現在の load 世代のものだけを通知する。
+
+    Qt Multimedia 固有の補助ポートであり、:class:`PlaybackBackend` の契約ではない
+    （mpv へ差し替えた場合に持ち込めないため）。接続するのは composition root と
+    :class:`~sdp.services.pcm_tap.PcmTap` だけ。
+    """
+
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._audio_output = QAudioOutput(self)
-        # format を指定しない QAudioBufferOutput は「デコード直後のネイティブ形式」
-        # を通知する（再サンプリングを挟まない）。音声出力は QAudioOutput 側で
-        # 従来どおり継続する（P0-C §8、P5-A probe で実測）。
-        self._audio_buffer_output = QAudioBufferOutput(self)
 
         # Qt は source 未設定でも StoppedState を返すため、NO_MEDIA と STOPPED は
         # Qt の playbackState だけでは区別できない。source の有無を自分で保持する。
@@ -186,21 +210,23 @@ class QtMultimediaBackend(PlaybackBackend):
         拡張子や ``QMediaFormat`` の列挙で対応可否を判定せず（ADR-0001 の制約 3）、
         読み込みの失敗は Qt の ``errorOccurred`` と ``mediaStatusChanged`` から通知する。
 
-        **load ごとに QMediaPlayer を作り直す。** Qt のシグナルには発生元の source を
-        識別する情報が無く、1 つの QMediaPlayer を使い回すと、前 source から遅れて
-        届いた通知にも「現在の世代」を後付けしてしまう（受信時の可変フィールドを
-        読むことになるため）。世代を player の identity へ結び付け、接続の closure へ
-        固定することで、旧 player の遅延通知は旧世代のまま通知される。
+        **load ごとに QMediaPlayer（と PCM 出力）を作り直す。** Qt のシグナルには
+        発生元の source を識別する情報が無く、1 つの QMediaPlayer を使い回すと、
+        前 source から遅れて届いた通知にも「現在の世代」を後付けしてしまう
+        （受信時の可変フィールドを読むことになるため）。世代を player の identity へ
+        結び付け、player の子である :class:`_PlayerSession` が保持することで、
+        旧 player の遅延通知は旧世代のまま通知される。
 
-        旧 player は音声出力から切り離してから破棄予約する。タイムラインの 0 への
-        リセットは、旧世代の通知として捨てられるためここで通知し直す。
+        旧 player は停止して破棄予約する（出力は明示的に外さない。
+        :meth:`_retire_player`）。タイムラインの 0 へのリセットは、旧世代の通知として
+        捨てられるためここで通知し直す。
         """
         previous = self._player
         previous_position_ms = previous.position()
         previous_duration_ms = previous.duration()
         self._source_path = path
         # 以後の通知はこの世代のものとして扱う。旧playerの後始末が同期で通知を
-        # 出しうるため、切り離しより前に更新する。
+        # 出しうるため、旧playerの破棄予約より前に更新する。
         self._load_generation = generation
         self._retire_player(previous)
         # 再生速度とピッチ補正は QMediaPlayer が持つため、新しい player へ引き継ぐ。
@@ -246,14 +272,16 @@ class QtMultimediaBackend(PlaybackBackend):
 
     # -- Qt 固有の補助ポート -------------------------------------------------
 
-    @property
-    def audio_buffer_output(self) -> QAudioBufferOutput:
-        """再生中PCMの供給口。composition root が PcmTap へ接続するためだけに公開する。
+    def _on_audio_buffer_received(self, generation: int, buffer: object) -> None:
+        """現在世代のPCMだけを供給口へ流す。
 
-        PlaybackBackend の契約ではないため、UI と Controller はこれに触れない
-        （UI からの import は AST 検査で禁止している）。
+        QAudioBuffer にも source を識別する情報が無く、音声出力側の buffering で
+        遅れて届きうる（Qt の QAudioBufferOutput ドキュメント）。旧 player の
+        PCM を新しい source のものとして可視化へ混ぜない。
         """
-        return self._audio_buffer_output
+        if generation != self._load_generation:
+            return
+        self.audio_buffer_received.emit(buffer)
 
     # -- 状態 ---------------------------------------------------------------
 
@@ -293,7 +321,7 @@ class QtMultimediaBackend(PlaybackBackend):
     # -- Qt シグナルの変換 ---------------------------------------------------
     #
     # 各ハンドラーの ``generation`` は、通知を出した QMediaPlayer を作ったときの
-    # 読み込み世代（接続の closure へ固定してある）。受信時点の可変フィールドでは
+    # 読み込み世代（player の子である _PlayerSession が保持する）。受信時点の可変フィールドでは
     # ないため、旧 player の遅延通知でも旧世代のまま届く。
 
     def _on_playback_state_changed(
@@ -396,14 +424,19 @@ class QtMultimediaBackend(PlaybackBackend):
         """
         player = QMediaPlayer(self)
         player.setAudioOutput(self._audio_output)
-        player.setAudioBufferOutput(self._audio_buffer_output)
+        # format を指定しない QAudioBufferOutput は「デコード直後のネイティブ形式」
+        # を通知する（再サンプリングを挟まない）。音声出力は QAudioOutput 側で
+        # 従来どおり継続する（P0-C §8、P5-A probe で実測）。
+        # player の子にすることで、旧世代の PCM 出力は旧 player とともに消える。
+        audio_buffer_output = QAudioBufferOutput(player)
+        player.setAudioBufferOutput(audio_buffer_output)
         if playback_rate is not None:
             player.setPlaybackRate(playback_rate)
         if pitch_compensation is not None:
             player.setPitchCompensation(pitch_compensation)
 
         # 世代と source は player の子である中継が保持する（受信時に読み直さない）。
-        session = _PlayerSession(player, generation, self._source_path)
+        session = _PlayerSession(player, generation, self._source_path, audio_buffer_output)
         session.playback_state_changed.connect(self._on_playback_state_changed)
         session.position_changed.connect(self._on_position_changed)
         session.duration_changed.connect(self._on_duration_changed)
@@ -411,24 +444,26 @@ class QtMultimediaBackend(PlaybackBackend):
         session.error_occurred.connect(self._on_error_occurred)
         session.playback_rate_changed.connect(self._on_playback_rate_changed)
         session.pitch_compensation_changed.connect(self._on_pitch_compensation_changed)
+        session.audio_buffer_received.connect(self._on_audio_buffer_received)
         return player
 
     def _retire_player(self, player: QMediaPlayer) -> None:
-        """旧世代の player を出力から切り離し、破棄を予約する。
+        """旧世代の player を停止し、破棄を予約する。
 
         シグナル接続は切らない。旧 player から遅れて届く通知を、旧世代の通知として
         観測可能にするため（受け手が世代で除外できる）。破棄されるまでのあいだ
-        音を出し続けないよう、停止して出力から外す。
+        音を出し続けないよう、停止する。
 
         親（Backend）からは外さない。``setParent(None)`` で Python 所有へ移すと、
         参照が切れた時点で C++ デストラクタが即座に走り、デコード中の player を
         その場で壊しうる。所有は Qt 側に残したまま、event loop の次のターンで
         破棄させる。
 
-        音声出力とPCM供給口は、ここで ``None`` を設定して外さない。同じ
-        ``QAudioBufferOutput`` を新しい player へ設定した時点で Qt 側が旧 player から
-        外すため、明示的な切り離しを重ねると二重に外れて異常終了する（実測）。
-        停止だけしておけば、破棄までのあいだに音は出ない。
+        音声出力は、ここで ``None`` を設定して外さない。同じ ``QAudioOutput`` を
+        新しい player へ設定した時点で Qt 側が旧 player から外すため、明示的な
+        切り離しを重ねると二重に外れて異常終了する（ADR-0001 の制約 13。
+        ``QAudioBufferOutput`` で実測）。停止だけしておけば、破棄までのあいだに
+        音は出ない。PCM 出力は player の子なので、破棄と同時に消える。
         """
         player.stop()
         player.deleteLater()

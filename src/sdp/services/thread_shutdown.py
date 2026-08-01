@@ -11,7 +11,7 @@ threadと関連オブジェクトをここへ引き取り、制御だけを返�
 回収は **Qtのevent loopに依存しない**。アプリの終了処理は ``app.exec()`` が
 戻ったあと、つまりmainのevent loopが止まってから走るため、queued connectionへ
 回収を任せると配送されない。専用のreaper threadが :meth:`QThread.wait` で
-待ち、戻ったところで参照を解放する。
+終了を確認する（確認するだけで、参照は解放しない。下記）。
 
 引き取るのはthreadだけではない。worker QObjectのPython参照が先に切れると、
 thread内でまだ動いているコードの足元が崩れる。呼び出し側は ``keepalive`` で
@@ -157,9 +157,7 @@ class _Reaper:
                 return
             self._entries.remove(entry)
             self._completed.append(entry)
-        _logger.info(
-            "放棄した%sが終了しました（参照は所有者threadでのdrainまで保持します）", entry.label
-        )
+        _logger.info("放棄した%sが終了しました（参照はプロセス終了まで保持します）", entry.label)
 
 
 _reaper = _Reaper()

@@ -51,7 +51,7 @@ def controller(backend: QtMultimediaBackend) -> PlaybackController:
 @pytest.fixture
 def tap(controller: PlaybackController, backend: QtMultimediaBackend) -> Iterator[PcmTap]:
     instance = PcmTap(controller)
-    instance.connect_audio_buffer_output(backend.audio_buffer_output)
+    instance.connect_audio_buffer_source(backend.audio_buffer_received)
     yield instance
     instance.shutdown()
 
@@ -156,7 +156,7 @@ def test_callback_runs_on_the_gui_thread(
         del buffer
         observed.add(threading.current_thread().name)
 
-    backend.audio_buffer_output.audioBufferReceived.connect(record)
+    backend.audio_buffer_received.connect(record)
     play(controller, wav(test_audio_dir))
 
     wait_for_pcm(tap, qtbot)

@@ -169,6 +169,21 @@ def int16_stereo_buffer(value: int = 16_384) -> QAudioBuffer:
     return QAudioBuffer(struct.pack("<2h", value, value), audio_format)
 
 
+def current_player(composition: app_module.PlayerComposition) -> QMediaPlayer:
+    """現在世代の QMediaPlayer（load ごとに作り直され、旧世代は破棄予約される）。
+
+    子の並びは生成順なので、末尾が最新世代になる。
+    """
+    players = composition.backend.findChildren(QMediaPlayer)
+    assert players
+    return players[-1]
+
+
+def current_buffer_output(composition: app_module.PlayerComposition) -> QAudioBufferOutput:
+    """現在世代の QMediaPlayer が持つPCM出力（load ごとに作り直される）。"""
+    return current_player(composition).audioBufferOutput()
+
+
 # -- 組み立て ---------------------------------------------------------------
 
 
@@ -1072,16 +1087,15 @@ def test_ui_layer_does_not_import_mutagen() -> None:
 def test_composition_holds_the_pcm_tap_connected_to_the_backend(
     composition: app_module.PlayerComposition,
 ) -> None:
-    """PcmTapを保持し、具体BackendのQAudioBufferOutputへ接続されている。"""
+    """PcmTapを保持し、具体Backendの世代フィルター済みPCM供給口へ接続されている。"""
     tap = composition.pcm_tap
     assert isinstance(tap, PcmTap)
 
-    buffer_output = composition.backend.audio_buffer_output
+    # 現在世代の player が QAudioBufferOutput を所有していること。
+    player = current_player(composition)
+    buffer_output = player.audioBufferOutput()
     assert isinstance(buffer_output, QAudioBufferOutput)
-    # Backend が所有し、QMediaPlayer へ設定済みであること。
-    player = composition.backend.findChild(QMediaPlayer)
-    assert player is not None
-    assert player.audioBufferOutput() is buffer_output
+    assert buffer_output.parent() is player
 
     # 実際のPCM通知経路でリングバッファへ届く。
     buffer_output.audioBufferReceived.emit(int16_stereo_buffer())
@@ -1135,7 +1149,7 @@ def test_pcm_tap_uses_three_fixed_capacity_buffers(
         assert buffer.capacity == capacity
 
     for _ in range(50):
-        composition.backend.audio_buffer_output.audioBufferReceived.emit(int16_stereo_buffer())
+        current_buffer_output(composition).audioBufferReceived.emit(int16_stereo_buffer())
 
     for buffer in buffers:
         assert buffer.capacity == capacity
@@ -1207,7 +1221,7 @@ def test_source_change_clears_the_pcm_in_the_production_wiring(
     buffer = int16_stereo_buffer()
 
     composition.controller.load(audio_files[0])
-    composition.backend.audio_buffer_output.audioBufferReceived.emit(buffer)
+    current_buffer_output(composition).audioBufferReceived.emit(buffer)
     assert tap.available_frame_count == 1
     assert tap.sample_rate == 48_000
 
@@ -1218,6 +1232,38 @@ def test_source_change_clears_the_pcm_in_the_production_wiring(
     assert tap.channel_count == 0
     assert tap.left_ring_buffer.available == 0
     assert tap.right_ring_buffer.available == 0
+
+
+def test_late_pcm_from_the_previous_source_is_not_mixed_into_the_new_one(
+    composition: app_module.PlayerComposition, audio_files: list[Path]
+) -> None:
+    """前sourceのplayerから遅れて届くPCMは、新しいsourceのPCMとして混ざらない。
+
+    QAudioBuffer には source を識別する情報が無く、音声出力側の buffering で
+    遅れて届きうる。Backend が load 世代で除外しないと、曲切替直後に前曲のPCMが
+    Spectrum／Level Meterへ混ざる。
+    """
+    tap = composition.pcm_tap
+
+    composition.controller.load(audio_files[0])
+    previous_output = current_buffer_output(composition)
+    composition.controller.load(audio_files[1])
+    # source変更でtapは一度clearされている。
+    assert tap.available_frame_count == 0
+    received_before = tap.received_buffer_count
+
+    previous_output.audioBufferReceived.emit(int16_stereo_buffer())
+
+    assert tap.received_buffer_count == received_before
+    assert tap.available_frame_count == 0
+    assert tap.sample_rate == 0
+    assert tap.channel_count == 0
+
+    # 現在世代のPCMは従来どおり受理する。
+    current_buffer_output(composition).audioBufferReceived.emit(int16_stereo_buffer())
+
+    assert tap.received_buffer_count == received_before + 1
+    assert tap.available_frame_count == 1
 
 
 def test_production_wiring_feeds_all_three_buffers(
@@ -1232,7 +1278,7 @@ def test_production_wiring_feeds_all_three_buffers(
     tap = composition.pcm_tap
     composition.controller.load(audio_files[0])
 
-    composition.backend.audio_buffer_output.audioBufferReceived.emit(int16_stereo_buffer())
+    current_buffer_output(composition).audioBufferReceived.emit(int16_stereo_buffer())
 
     assert tap.channel_count == 2
     assert tap.available_frame_count == 1
@@ -1245,6 +1291,7 @@ def test_playback_backend_interface_has_no_pcm_responsibility() -> None:
     """PlaybackBackendの一般契約へPCM SignalやQt型を追加していない。"""
     for forbidden in (
         "audio_buffer_output",
+        "audio_buffer_received",
         "pcm_buffer_received",
         "audioBufferReceived",
         "QAudioBufferOutput",
@@ -1262,7 +1309,12 @@ def test_fake_backend_has_no_audio_buffer_concept() -> None:
     """FakePlaybackBackendへQAudioBuffer概念を導入していない。"""
     from fakes import fake_playback_backend as fake_module
 
-    for forbidden in ("QAudioBuffer", "QAudioBufferOutput", "audio_buffer_output"):
+    for forbidden in (
+        "QAudioBuffer",
+        "QAudioBufferOutput",
+        "audio_buffer_output",
+        "audio_buffer_received",
+    ):
         assert not hasattr(fake_module, forbidden), forbidden
         assert not hasattr(FakePlaybackBackend, forbidden), forbidden
 
@@ -1276,7 +1328,7 @@ def test_shutdown_stops_the_spectrum_timer_and_the_tap(
     """終了処理でタイマーとPCM受信が残らない。"""
     composition = app_module.build_player(playlist_file, settings_file, waveform_cache_directory)
     qtbot.addWidget(composition.window)
-    buffer_output = composition.backend.audio_buffer_output
+    buffer_output = current_buffer_output(composition)
 
     composition.window.spectrum_panel.shutdown()
     composition.pcm_tap.shutdown()

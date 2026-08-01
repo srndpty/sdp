@@ -15,7 +15,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from PySide6.QtMultimedia import QAudioBufferOutput, QAudioOutput, QMediaPlayer
+from PySide6.QtMultimedia import QAudioBuffer, QAudioBufferOutput, QAudioOutput, QMediaPlayer
 from PySide6.QtTest import QSignalSpy
 from pytestqt.qtbot import QtBot
 
@@ -735,7 +735,8 @@ def test_retired_players_are_destroyed_and_do_not_accumulate(
             lambda: backend.findChildren(QMediaPlayer) == [backend._player],
             timeout=LOAD_TIMEOUT_MS,
         )
-    assert backend.audio_buffer_output.parent() is backend
+    # PCM出力もplayerの子なので、旧世代のぶんは一緒に消えている。
+    assert len(backend.findChildren(QAudioBufferOutput)) == 1
 
 
 def test_playback_rate_and_pitch_compensation_survive_a_new_load(
@@ -799,13 +800,24 @@ def test_controller_keeps_requested_rate_against_float32_readback(qtbot: QtBot) 
 # -- QAudioBufferOutput（P5-A の補助ポート）---------------------------------
 
 
-def test_audio_buffer_output_is_owned_and_attached(backend: QtMultimediaBackend) -> None:
-    """QAudioBufferOutput を子として所有し、QMediaPlayer へ設定している。"""
+def test_audio_buffer_output_is_owned_by_the_current_player(
+    backend: QtMultimediaBackend, test_audio_dir: Path, tmp_path: Path
+) -> None:
+    """QAudioBufferOutput は世代ごとに作り直し、現在世代の player が所有する。"""
     outputs = backend.findChildren(QAudioBufferOutput)
 
     assert len(outputs) == 1
-    assert backend.audio_buffer_output is outputs[0]
+    assert outputs[0].parent() is player_of(backend)
     assert player_of(backend).audioBufferOutput() is outputs[0]
+
+    source_b = tmp_path / "B.wav"
+    write_silent_wav(source_b, 200)
+    backend.load(test_audio_dir / "sine440.wav", 1)
+    backend.load(source_b, 2)
+
+    current = player_of(backend)
+    assert current.audioBufferOutput() is not outputs[0]
+    assert current.audioBufferOutput().parent() is current
 
 
 def test_normal_audio_output_is_preserved(backend: QtMultimediaBackend) -> None:
@@ -816,13 +828,43 @@ def test_normal_audio_output_is_preserved(backend: QtMultimediaBackend) -> None:
 
 def test_audio_buffer_output_uses_the_native_format(backend: QtMultimediaBackend) -> None:
     """format を指定せず、デコード直後のネイティブ形式を受け取る。"""
-    assert not backend.audio_buffer_output.format().isValid()
+    output = player_of(backend).audioBufferOutput()
+
+    assert not output.format().isValid()
 
 
-def test_audio_buffer_output_is_not_part_of_the_backend_contract() -> None:
+def test_audio_buffer_port_is_not_part_of_the_backend_contract() -> None:
     """PlaybackBackend の一般インターフェースへ PCM 責務を追加していない。"""
+    assert not hasattr(PlaybackBackend, "audio_buffer_received")
     assert not hasattr(PlaybackBackend, "audio_buffer_output")
-    assert hasattr(QtMultimediaBackend, "audio_buffer_output")
+    assert hasattr(QtMultimediaBackend, "audio_buffer_received")
+    # 世代ごとに作り直す QAudioBufferOutput 自体は公開しない。
+    assert not hasattr(QtMultimediaBackend, "audio_buffer_output")
+
+
+def test_only_the_current_generation_pcm_reaches_the_port(
+    backend: QtMultimediaBackend, test_audio_dir: Path, tmp_path: Path
+) -> None:
+    """旧世代のplayerから遅れて届くPCMは供給口へ流さない。
+
+    QAudioBuffer には source を識別する情報が無く、音声出力側の buffering で
+    遅れて届きうる。世代で除外しないと、前の曲のPCMが可視化へ混ざる。
+    """
+    source_b = tmp_path / "B.wav"
+    write_silent_wav(source_b, 200)
+    backend.load(test_audio_dir / "sine440.wav", 1)
+    previous_output = player_of(backend).audioBufferOutput()
+    backend.load(source_b, 2)
+    current_output = player_of(backend).audioBufferOutput()
+    spy = QSignalSpy(backend.audio_buffer_received)
+
+    previous_output.audioBufferReceived.emit(QAudioBuffer())
+
+    assert spy.count() == 0
+
+    current_output.audioBufferReceived.emit(QAudioBuffer())
+
+    assert spy.count() == 1
 
 
 def test_audio_buffer_output_does_not_change_the_playback_contract(
@@ -846,7 +888,7 @@ def test_audio_buffer_output_does_not_change_the_playback_contract(
 
 
 def test_audio_buffer_output_is_destroyed_with_the_backend(qtbot: QtBot) -> None:
-    """Backend の破棄で QAudioBufferOutput も破棄される。"""
+    """Backend の破棄で QAudioBufferOutput も破棄される（player ごと消える）。"""
     del qtbot
     backend = QtMultimediaBackend()
     destroyed: list[str] = []
@@ -854,8 +896,9 @@ def test_audio_buffer_output_is_destroyed_with_the_backend(qtbot: QtBot) -> None
     def record_buffer_output(*_: object) -> None:
         destroyed.append("buffer_output")
 
-    backend.audio_buffer_output.destroyed.connect(record_buffer_output)
+    player_of(backend).audioBufferOutput().destroyed.connect(record_buffer_output)
 
     del backend
+    gc.collect()
 
     assert destroyed == ["buffer_output"]

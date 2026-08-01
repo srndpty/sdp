@@ -1,8 +1,13 @@
-"""再生中PCMを QAudioBufferOutput から受け取り、リングバッファへ書き込むタップ。
+"""再生中PCMを Qt Multimedia 側の供給口から受け取り、リングバッファへ書き込むタップ。
 
 Qt Multimedia 固有の補助ポートであり、``PlaybackBackend`` の一般インターフェース
 ではない。接続するのは composition root だけで、UI 層は
 :class:`~sdp.core.playback.qt_backend.QtMultimediaBackend` を参照しない。
+
+接続先は「``QAudioBuffer`` を運ぶシグナル」とする。具体的な
+``QAudioBufferOutput`` を受け取らないのは、Backend が load 世代ごとにそれを
+作り直すため（QAudioBuffer 自体には source を識別する情報が無く、前 source の
+PCM は Backend が世代で除外する）。
 
 音声コールバック（``audioBufferReceived``。P0-C と P5-A の probe でともに
 **GUI スレッド受信**を実測）で行うのは、buffer の妥当性確認・bytes 化・NumPy に
@@ -18,8 +23,8 @@ from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
-from PySide6.QtCore import QObject, Signal, Slot
-from PySide6.QtMultimedia import QAudioBuffer, QAudioBufferOutput
+from PySide6.QtCore import QObject, Signal, SignalInstance, Slot
+from PySide6.QtMultimedia import QAudioBuffer
 
 from sdp.core.analysis.pcm import audio_buffer_to_pcm_chunk
 from sdp.core.analysis.ring_buffer import (
@@ -86,7 +91,7 @@ class PcmTap(QObject):
         self._received_count = 0
         self._discarded_count = 0
         self._unexpected_error_count = 0
-        self._buffer_output: QAudioBufferOutput | None = None
+        self._audio_buffer_source: SignalInstance | None = None
         self._shutdown = False
         # formatと3本のリングバッファを、可視化から見て1つの世代として扱う。
         self._snapshot_lock = threading.RLock()
@@ -172,26 +177,31 @@ class PcmTap(QObject):
 
     # -- 接続 ---------------------------------------------------------------
 
-    def connect_audio_buffer_output(self, buffer_output: QAudioBufferOutput) -> None:
-        """QAudioBufferOutput のPCM通知を受け取り始める（composition rootのみ）。"""
+    def connect_audio_buffer_source(self, audio_buffer_received: SignalInstance) -> None:
+        """``QAudioBuffer`` を運ぶシグナルからPCMを受け取り始める（composition rootのみ）。
+
+        Backend の世代フィルター済みポート（``QtMultimediaBackend.audio_buffer_received``）
+        を想定するが、``QAudioBufferOutput.audioBufferReceived`` のような同じ形の
+        シグナルでも同じように扱える。
+        """
         if self._shutdown:
             raise RuntimeError("shutdown後のPcmTapは再接続できません")
-        if self._buffer_output is buffer_output:
+        if self._audio_buffer_source == audio_buffer_received:
             return
-        self.disconnect_audio_buffer_output()
-        self._buffer_output = buffer_output
-        buffer_output.audioBufferReceived.connect(self.handle_audio_buffer)
+        self.disconnect_audio_buffer_source()
+        self._audio_buffer_source = audio_buffer_received
+        audio_buffer_received.connect(self.handle_audio_buffer)
 
-    def disconnect_audio_buffer_output(self) -> None:
-        buffer_output = self._buffer_output
-        self._buffer_output = None
-        if buffer_output is None:
+    def disconnect_audio_buffer_source(self) -> None:
+        audio_buffer_received = self._audio_buffer_source
+        self._audio_buffer_source = None
+        if audio_buffer_received is None:
             return
         try:
-            buffer_output.audioBufferReceived.disconnect(self.handle_audio_buffer)
+            audio_buffer_received.disconnect(self.handle_audio_buffer)
         except RuntimeError:
-            # QAudioBufferOutput が既に破棄済み。終了処理を妨げない。
-            _logger.debug("QAudioBufferOutputの接続は既に解除されています")
+            # 供給元が既に破棄済み。終了処理を妨げない。
+            _logger.debug("PCM供給口の接続は既に解除されています")
 
     def shutdown(self) -> None:
         """PCM受信とsource監視を止め、保持中のPCMを捨てる（冪等）。"""
@@ -199,7 +209,7 @@ class PcmTap(QObject):
             return
         # disconnect前に終端化し、既にqueueされたbufferも受理しない。
         self._shutdown = True
-        self.disconnect_audio_buffer_output()
+        self.disconnect_audio_buffer_source()
         for signal, slot in (
             (self._playback.source_changed, self._on_source_changed),
             (self._playback.state_changed, self._on_state_changed),
@@ -225,8 +235,8 @@ class PcmTap(QObject):
     def handle_audio_buffer(self, value: object) -> None:
         """音声コールバック。例外を外へ漏らさず、無効bufferは数えて捨てる。
 
-        ``QAudioBufferOutput.audioBufferReceived`` の接続先であり、
-        QAudioBufferOutput を用意せずにPCMを注入できる境界として公開する。
+        PCM供給シグナルの接続先であり、Qt Multimedia を用意せずにPCMを注入できる
+        境界として公開する。
 
         PySide6 はスロット内の例外を呼び出し元へ伝播させずに処理を継続するため
         （P0-C）、ここで観測可能な失敗（件数とログ）へ変換する。

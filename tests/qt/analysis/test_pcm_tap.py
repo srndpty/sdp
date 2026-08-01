@@ -607,9 +607,13 @@ def test_callback_thread_is_the_gui_thread(tap: PcmTap) -> None:
 
 
 def test_connects_and_receives_from_a_real_audio_buffer_output(tap: PcmTap) -> None:
-    """実QAudioBufferOutputのSignal経路でPCMが届く。"""
+    """実QAudioBufferOutputのSignal経路でPCMが届く。
+
+    本番では Backend の世代フィルター済みポートへ接続するが、``QAudioBuffer`` を
+    運ぶSignalであれば同じように扱えることを、実Qtオブジェクトで確かめる。
+    """
     buffer_output = QAudioBufferOutput()
-    tap.connect_audio_buffer_output(buffer_output)
+    tap.connect_audio_buffer_source(buffer_output.audioBufferReceived)
 
     buffer_output.audioBufferReceived.emit(int16_buffer([16384, 16384]))
 
@@ -617,11 +621,11 @@ def test_connects_and_receives_from_a_real_audio_buffer_output(tap: PcmTap) -> N
     assert tap.snapshot(1).tolist() == pytest.approx([0.5])
 
 
-def test_reconnecting_the_same_output_does_not_duplicate_deliveries(tap: PcmTap) -> None:
-    """同じ出力を二重接続しても1回しか受け取らない。"""
+def test_reconnecting_the_same_source_does_not_duplicate_deliveries(tap: PcmTap) -> None:
+    """同じ供給口を二重接続しても1回しか受け取らない。"""
     buffer_output = QAudioBufferOutput()
-    tap.connect_audio_buffer_output(buffer_output)
-    tap.connect_audio_buffer_output(buffer_output)
+    tap.connect_audio_buffer_source(buffer_output.audioBufferReceived)
+    tap.connect_audio_buffer_source(buffer_output.audioBufferReceived)
 
     buffer_output.audioBufferReceived.emit(int16_buffer([0, 0]))
 
@@ -631,9 +635,9 @@ def test_reconnecting_the_same_output_does_not_duplicate_deliveries(tap: PcmTap)
 def test_disconnect_stops_further_deliveries(tap: PcmTap) -> None:
     """切断後はPCMを受け取らない。"""
     buffer_output = QAudioBufferOutput()
-    tap.connect_audio_buffer_output(buffer_output)
+    tap.connect_audio_buffer_source(buffer_output.audioBufferReceived)
 
-    tap.disconnect_audio_buffer_output()
+    tap.disconnect_audio_buffer_source()
     buffer_output.audioBufferReceived.emit(int16_buffer([0, 0]))
 
     assert tap.received_buffer_count == 0
@@ -644,7 +648,7 @@ def test_shutdown_is_idempotent_and_clears(
 ) -> None:
     """shutdown後は全入力を拒否し、二重呼出でも状態を変えない。"""
     buffer_output = QAudioBufferOutput()
-    tap.connect_audio_buffer_output(buffer_output)
+    tap.connect_audio_buffer_source(buffer_output.audioBufferReceived)
     send(tap, int16_buffer([32767, 32767]))
 
     tap.shutdown()
@@ -666,7 +670,7 @@ def test_shutdown_is_idempotent_and_clears(
     assert tap.right_ring_buffer.available == 0
 
     with pytest.raises(RuntimeError, match="shutdown後"):
-        tap.connect_audio_buffer_output(QAudioBufferOutput())
+        tap.connect_audio_buffer_source(QAudioBufferOutput().audioBufferReceived)
 
 
 def test_deleted_tap_does_not_crash_on_a_later_signal(

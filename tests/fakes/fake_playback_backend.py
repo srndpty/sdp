@@ -5,6 +5,7 @@ QtMultimediaBackend の内部実装（QMediaPlayer の状態遷移など）は�
 """
 
 import struct
+from dataclasses import replace
 from pathlib import Path
 
 from sdp.core.playback.backend import PlaybackBackend
@@ -49,7 +50,11 @@ class FakePlaybackBackend(PlaybackBackend):
         """呼び出された操作の記録。``("seek", (1500,))`` のような形。"""
 
         self.load_error: PlaybackError | None = None
-        """設定すると load 時に error_occurred を発火する。"""
+        """設定すると load 時に error_occurred を発火する。
+
+        通知する際は「その load に属するエラー」として世代と source を補完する。
+        source に属さない内部失敗を模擬する場合は :meth:`emit_error` を使う。
+        """
 
         self.float32_rate_readback = False
         """True にすると playback_rate_changed を float32 へ丸めて通知する。"""
@@ -90,7 +95,10 @@ class FakePlaybackBackend(PlaybackBackend):
         self.calls.append(("load", (path, generation)))
         self._load_generation = generation
         if self.load_error is not None:
-            self.error_occurred.emit(self.load_error)
+            # この load に属するエラーとして、世代と source を必ず補完する
+            # （generation=None のまま通すと、Controller の世代フィルターを
+            # 素通りする「sourceに属さないエラー」として扱われてしまう）。
+            self.error_occurred.emit(replace(self.load_error, generation=generation, source=path))
             return
         self._state = PlaybackState.STOPPED
         if not self.defer_load_status:
@@ -170,6 +178,7 @@ class FakePlaybackBackend(PlaybackBackend):
         )
 
     def emit_error(self, error: PlaybackError) -> None:
+        """任意のエラーをそのまま通知する（世代・source は補完しない）。"""
         self.error_occurred.emit(error)
 
     # -- 状態 ---------------------------------------------------------------

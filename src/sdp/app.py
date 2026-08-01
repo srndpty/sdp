@@ -127,9 +127,10 @@ def build_player(
         else waveform_cache_directory,
     )
     # 再生中PCMの供給は Qt Multimedia 固有の補助ポート。ここだけが具体Backendの
-    # QAudioBufferOutput を知る（PlaybackBackend の契約には含めない）。
+    # PCM供給口を知る（PlaybackBackend の契約には含めない）。
+    # Backend 側で現在の load 世代だけへ絞ってあるため、前sourceのPCMは届かない。
     pcm_tap = PcmTap(controller)
-    pcm_tap.connect_audio_buffer_output(backend.audio_buffer_output)
+    pcm_tap.connect_audio_buffer_source(backend.audio_buffer_received)
     # MainWindowは復元済み設定を表示前に反映する（可視化のフリッカーを避ける）。
     window = MainWindow(
         controller,
