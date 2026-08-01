@@ -21,6 +21,7 @@ from mutagen import MutagenError
 from PySide6.QtCore import QModelIndex, QObject, QRunnable, QThread, QThreadPool, Signal
 
 from sdp.core.metadata.types import MetadataStatus, TrackMetadata
+from sdp.core.playlist.entry import FileStatus
 from sdp.core.playlist.model import FILE_STATUS_ROLE, PlaylistModel
 from sdp.services.thread_shutdown import ShutdownOutcome
 
@@ -392,8 +393,11 @@ class MetadataReader(QObject):
         if self._shutdown:
             return
         entry = self._playlist.entry_at(row)
-        if entry.is_missing:
-            # 欠損中は要求しない。復活したときの dataChanged で改めて要求する。
+        if entry.file_status is not FileStatus.AVAILABLE:
+            # 欠損中と**未確認中**は要求しない。UNKNOWNのまま読み始めると、
+            # ファイル状態確認とMutagen読み取りが同じファイルへ同時にI/Oを出し、
+            # 欠損と判明するエントリや切断NASへも無駄な読み取りが走る。
+            # AVAILABLEが確定した時点の dataChanged（FILE_STATUS_ROLE）で改めて要求する。
             self._tokens.pop(entry.entry_id, None)
             self._discard_pending(entry.entry_id)
             return
@@ -427,7 +431,10 @@ class MetadataReader(QObject):
         if row is None:
             return False
         entry = self._playlist.entry_at(row)
-        if entry.is_missing or entry.metadata_status is not MetadataStatus.NOT_REQUESTED:
+        if (
+            entry.file_status is not FileStatus.AVAILABLE
+            or entry.metadata_status is not MetadataStatus.NOT_REQUESTED
+        ):
             return False
 
         self._next_token += 1
@@ -472,7 +479,10 @@ class MetadataReader(QObject):
                 row = self._playlist.row_of_entry_id(result.entry_id)
                 if row is not None:
                     entry = self._playlist.entry_at(row)
-                    if not entry.is_missing and entry.metadata_status is MetadataStatus.LOADING:
+                    if (
+                        entry.file_status is FileStatus.AVAILABLE
+                        and entry.metadata_status is MetadataStatus.LOADING
+                    ):
                         # 現在要求の結果なのにpathなどが一致しない異常。LOADINGへ
                         # 固着させず失敗として閉じるが、値は適用しない。
                         self._playlist.mark_metadata_failed(result.entry_id)
@@ -503,7 +513,7 @@ class MetadataReader(QObject):
         entry = self._playlist.entry_at(row)
         return (
             entry.path == result.path
-            and not entry.is_missing
+            and entry.file_status is FileStatus.AVAILABLE
             and entry.metadata_status is MetadataStatus.LOADING
         )
 

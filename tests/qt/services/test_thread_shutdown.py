@@ -19,6 +19,7 @@ from sdp.services.thread_shutdown import (
     ShutdownOutcome,
     abandoned_thread_count,
     completed_abandoned_thread_count,
+    drain_completed_abandoned_threads,
     stop_thread,
     wait_for_abandoned_threads,
 )
@@ -236,3 +237,25 @@ def test_keepalive_objects_survive_until_the_thread_returns(
 
     # 終了確認後も、reaper thread上での破棄を避けるため参照を保持し続ける。
     assert reference() is not None
+
+
+def test_completed_entries_can_be_drained_from_the_owner_thread(
+    release: threading.Event,
+) -> None:
+    """終了確認済みのentryは、所有者threadから明示的に解放できる。
+
+    アプリ終了時は解放せずプロセス終了へ任せるが、実行中に停止・再生成する
+    用途ではオブジェクトグラフを溜めないよう drain できる必要がある。
+    """
+    thread = _BlockingThread(release)
+    thread.start()
+    assert thread.entered.wait(timeout=5)
+    stop_thread(thread, label="テスト", soft_timeout_ms=1, hard_timeout_ms=5)
+    release.set()
+    assert wait_for_abandoned_threads()
+    assert completed_abandoned_thread_count() >= 1
+
+    drained = drain_completed_abandoned_threads()
+
+    assert drained >= 1
+    assert completed_abandoned_thread_count() == 0

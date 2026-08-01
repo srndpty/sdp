@@ -103,8 +103,20 @@ class PlaylistFileStatusChecker(QObject):
         self._shutdown_stopped: bool | None = None
         self._batch_done: Event | None = None
 
-        playlist.rowsInserted.connect(self._on_rows_inserted)
-        playlist.modelReset.connect(self._on_model_reset)
+        self._started = False
+
+    def start(self) -> None:
+        """Modelの変化を監視し、未確認エントリの確認を開始する（冪等）。
+
+        構築だけでは何も始めない。``build_player()`` の途中で例外が起きても、
+        通常の ``shutdown()`` を経ないまま背景taskが走り続けないようにするため
+        （MetadataReader・WaveformAnalysisServiceと同じライフサイクルに揃える）。
+        """
+        if self._started or self._shutdown:
+            return
+        self._started = True
+        self._playlist.rowsInserted.connect(self._on_rows_inserted)
+        self._playlist.modelReset.connect(self._on_model_reset)
         self.schedule()
 
     @property
@@ -128,7 +140,12 @@ class PlaylistFileStatusChecker(QObject):
         """未確認エントリを同期で確定させ、更新した件数を返す。
 
         終了時と、背景実行を待てないテストのための同期経路。
+
+        先に世代を進めて、進行中バッチの結果を無効化する。そうしないと、
+        「背景がAVAILABLEと判定 → 反映前に削除 → 同期でMISSING → 遅れて
+        AVAILABLEが反映」の順で、新しい同期結果が古い結果へ巻き戻る。
         """
+        self._generation += 1
         statuses = {
             entry_id: probe_file_status(path)
             for entry_id, path in self._playlist.unchecked_entries(len(self._playlist.entries()))
@@ -155,6 +172,9 @@ class PlaylistFileStatusChecker(QObject):
             return self._recheck_shutdown_outcome()
         self._shutdown = True
         self._generation += 1
+        if self._started:
+            self._playlist.rowsInserted.disconnect(self._on_rows_inserted)
+            self._playlist.modelReset.disconnect(self._on_model_reset)
         done = self._batch_done
         stopped = done is None or done.wait(max(0, wait_ms) / 1_000.0)
         if not stopped:

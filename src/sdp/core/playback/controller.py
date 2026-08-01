@@ -63,13 +63,21 @@ class PlaybackController(QObject):
     muted_changed = Signal(bool)
     playback_rate_changed = Signal(float)
     pitch_compensation_changed = Signal(bool)
-    media_status_changed = Signal(MediaStatus)
+    media_status_changed = Signal(MediaStatus, int)
+    """読み込み状況と、その通知がどの :meth:`load` に由来するかの世代番号。
+
+    受け手は :attr:`load_generation` と突き合わせて、前 source の遅延通知を
+    切り分けられる。
+    """
+
     error_occurred = Signal(PlaybackError)
 
     def __init__(self, backend: PlaybackBackend, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._backend = backend
         self._source: Path | None = None
+        # load() ごとに進む読み込み世代。status通知の由来を識別するために使う。
+        self._load_generation = 0
 
         # ユーザーが要求した値の真値。Backend の読み戻しより優先する。
         self._volume = backend.volume
@@ -165,11 +173,22 @@ class PlaybackController(QObject):
             )
             return
 
+        # 読み込み世代を先に進める。source_changed の受け手はこの時点で
+        # load_generation を読み、以後の status 通知と突き合わせられる。
+        self._load_generation += 1
         # Backend.load() は media_status_changed などを同期通知しうる。
         # UI が新しい source を認識してから読み込み状態を受け取れるよう、先に通知する。
         self._source = resolved_path
         self.source_changed.emit(resolved_path)
-        self._backend.load(resolved_path)
+        self._backend.load(resolved_path, self._load_generation)
+
+    @property
+    def load_generation(self) -> int:
+        """直近の :meth:`load` が採番した読み込み世代。
+
+        ``source_changed`` を受けた時点で読むと、その source に対応する世代になる。
+        """
+        return self._load_generation
 
     def play(self) -> None:
         self._backend.play()
@@ -278,8 +297,8 @@ class PlaybackController(QObject):
     def _on_backend_duration_changed(self, duration_ms: int) -> None:
         self.duration_changed.emit(duration_ms)
 
-    def _on_backend_media_status_changed(self, status: MediaStatus) -> None:
-        self.media_status_changed.emit(status)
+    def _on_backend_media_status_changed(self, status: MediaStatus, generation: int) -> None:
+        self.media_status_changed.emit(status, generation)
 
     def _on_backend_volume_changed(self, volume: float) -> None:
         if math.isclose(volume, self._volume, abs_tol=_VOLUME_ABSOLUTE_TOLERANCE):

@@ -32,13 +32,23 @@ class PlaybackBackend(QObject):
     muted_changed = Signal(bool)
     playback_rate_changed = Signal(float)
     pitch_compensation_changed = Signal(bool)
-    media_status_changed = Signal(MediaStatus)
+    media_status_changed = Signal(MediaStatus, int)
+    """読み込み状況と、それがどの :meth:`load` に由来するかの世代番号。
+
+    ``MediaStatus`` だけでは、どの source の通知か分からない。source を切り替えた
+    直後に前 source の通知が遅れて届くと、新しい source が終わったものと
+    誤認して1曲飛ばしうる。**通知そのものへ source を識別する情報を載せる。**
+    """
     error_occurred = Signal(PlaybackError)
 
     # -- 操作 ---------------------------------------------------------------
 
-    def load(self, path: Path) -> None:
+    def load(self, path: Path, generation: int) -> None:
         """音源を読み込む。
+
+        ``generation`` は :class:`PlaybackController` が採番する読み込み世代。
+        以後 :attr:`media_status_changed` はこの値を添えて通知し、受け手が
+        「どの source 由来の通知か」を判定できるようにする。
 
         存在検査は PlaybackController が済ませてある。実際に再生できるかどうかは
         読み込んでみるまで分からないため（ADR-0001 の制約 3）、

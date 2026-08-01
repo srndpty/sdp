@@ -439,7 +439,8 @@ class MainWindow(QMainWindow):
     def _on_current_entry_changed(self, entry_id: object) -> None:
         self._playlist_view.set_current_entry_id(entry_id if isinstance(entry_id, str) else None)
 
-    def _on_media_status_changed(self, status: MediaStatus) -> None:
+    def _on_media_status_changed(self, status: MediaStatus, load_generation: int) -> None:
+        del load_generation
         if status is MediaStatus.INVALID_MEDIA and self._has_current_source_error:
             return
         message = _MEDIA_STATUS_MESSAGES.get(status)

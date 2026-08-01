@@ -1624,10 +1624,17 @@ P7-B2の要件にしない。
   専用のreaper threadが `QThread.wait()` で終了を確認する。**確認できても
   reaper thread上では参照を解放しない**。`QThread` などのQObjectをreaper
   thread上で最終解放すると、GUIでもworkerのaffinity threadでもないthread上で
-  C++デストラクタが走るため、確認済みentryはプロセス終了まで保持する
-  （最終解放はinterpreter終了時に起きる）。
+  C++デストラクタが走るため、確認済みentryは保持し続ける。**この仕組みは
+  プロセス終了に向けた放棄を前提にしている。** 実行中にコンポーネントを停止・
+  再生成する用途で使う場合は、所有者のthreadから
+  `drain_completed_abandoned_threads()` を呼んで解放する。
 - 各サービスの `shutdown()` は冪等だが、**初回の結果を書き換えない**。
   放棄したthreadが後から終了した場合だけ `STOPPED` へ更新する。
+
+また、`MetadataReader` は `FileStatus.AVAILABLE` が確定したエントリだけを読む。
+未確認（`UNKNOWN`）のまま読み始めると、ファイル状態確認と同じファイルへ同時に
+I/Oを出し、欠損と判明するエントリや切断NASへも無駄な読み取りが走るため。
+`run()` では `PlaylistFileStatusChecker` を先に `start()` する。
 
 **既知の制限**: `MetadataReader` と `PlaylistFileStatusChecker` は `QThreadPool`
 （前者は専用pool、後者は既定で global instance）を使うため、この方式を適用できない

@@ -118,6 +118,7 @@ def build_player(
     # 生成だけで読み取りは始めない（start() は run() が呼ぶ）。
     metadata_reader = MetadataReader(playlist_model)
     # エントリ生成ではファイルへ触れない。欠損判定は背景で少しずつ確定させる。
+    # 構築だけでは開始せず、run() から明示的に start() する。
     file_status_checker = PlaylistFileStatusChecker(playlist_model)
     waveform_analysis = WaveformAnalysisService(
         controller,
@@ -258,6 +259,9 @@ def run(argv: list[str] | None = None, *, server_name: str | None = None) -> int
     # 復元完了後から変更監視を始める（load中のSignalを自動保存扱いしない）。
     composition.settings_session.start()
     composition.playlist_session.start()
+    # ファイル状態の確認を先に開始する。メタデータ読み取りはAVAILABLE確定後に
+    # 走るため、この順序だと同じファイルへの重複I/Oが起きない。
+    composition.file_status_checker.start()
     # メタデータの読み取りはここで開始する（GUI スレッドはブロックしない）。
     composition.metadata_reader.start()
     composition.waveform_analysis.start()

@@ -993,12 +993,17 @@ def test_build_player_does_not_start_background_work(
 def test_started_reader_reads_restored_and_added_entries(
     playlist_file: Path, audio_files: list[Path], qtbot: QtBot
 ) -> None:
-    """start 後は復元済みエントリも追加分も読み取る。"""
+    """start 後は復元済みエントリも追加分も読み取る。
+
+    メタデータ読み取りはファイル状態がAVAILABLEと確定してから始まるため、
+    実アプリと同じ順序で状態確認サービスも開始する。
+    """
     save_playlist(playlist_file, [create_entry(audio_files[0])])
     composition = app_module.build_player(playlist_file)
     qtbot.addWidget(composition.window)
     model = composition.playlist_model
 
+    composition.file_status_checker.start()
     composition.metadata_reader.start()
 
     qtbot.waitUntil(

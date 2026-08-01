@@ -55,9 +55,28 @@ class RecordingReader:
 
 
 @pytest.fixture
-def playlist(qtbot: QtBot) -> Iterator[PlaylistModel]:
+def unchecked_playlist(qtbot: QtBot) -> Iterator[PlaylistModel]:
+    """ファイル状態を確定させないModel（UNKNOWNのままの挙動を見るテスト用）。"""
     del qtbot
     yield PlaylistModel()
+
+
+@pytest.fixture
+def playlist(unchecked_playlist: PlaylistModel) -> Iterator[PlaylistModel]:
+    """ファイル状態が確定するModel。
+
+    実アプリでは :class:`PlaylistFileStatusChecker` が背景でAVAILABLE／MISSINGを
+    確定させ、MetadataReaderはAVAILABLE確定後にだけ読む。ここでは行の追加・置換の
+    たびに同期で確定させ、その流れを再現する。
+    """
+    model = unchecked_playlist
+
+    def resolve(*_arguments: object) -> None:
+        model.refresh_file_status()
+
+    model.rowsInserted.connect(resolve)
+    model.modelReset.connect(resolve)
+    yield model
 
 
 @pytest.fixture
@@ -789,3 +808,52 @@ def test_the_same_entry_is_not_queued_twice(
     assert reader.pending_count == pending_before
     read_function.release()
     reader.shutdown(timeout_ms=2_000)
+
+
+def test_unknown_entries_are_not_read_until_the_status_is_resolved(
+    unchecked_playlist: PlaylistModel,
+    read_function: RecordingReader,
+    audio_files: list[Path],
+    qtbot: QtBot,
+) -> None:
+    """ファイル状態が未確認のあいだはMutagen読み取りを始めない。
+
+    UNKNOWNのまま読み始めると、ファイル状態確認と同じファイルへ同時にI/Oを出し、
+    欠損と判明するエントリや切断NASへも無駄な読み取りが走る。
+    """
+    reader = MetadataReader(unchecked_playlist, read_function=read_function, max_threads=2)
+    unchecked_playlist.add_paths(audio_files[:1])
+    reader.start()
+    try:
+        qtbot.wait(50)
+        assert read_function.calls == []
+        assert unchecked_playlist.entry_at(0).metadata_status is MetadataStatus.NOT_REQUESTED
+
+        # AVAILABLE確定でのdataChangedが読み取りの契機になる。
+        unchecked_playlist.refresh_file_status()
+
+        qtbot.waitUntil(lambda: read_function.call_count() == 1, timeout=WAIT_TIMEOUT_MS)
+        wait_for_status(qtbot, unchecked_playlist, 0, MetadataStatus.LOADED)
+    finally:
+        reader.shutdown(timeout_ms=2_000)
+
+
+def test_entries_resolved_as_missing_are_never_read(
+    unchecked_playlist: PlaylistModel,
+    read_function: RecordingReader,
+    tmp_path: Path,
+    qtbot: QtBot,
+) -> None:
+    """UNKNOWN → MISSING と確定したエントリは一度も読まない。"""
+    reader = MetadataReader(unchecked_playlist, read_function=read_function, max_threads=2)
+    unchecked_playlist.add_paths([tmp_path / "ない曲.wav"])
+    reader.start()
+    try:
+        unchecked_playlist.refresh_file_status()
+        qtbot.wait(50)
+
+        assert read_function.calls == []
+        assert unchecked_playlist.entry_at(0).is_missing
+        assert unchecked_playlist.entry_at(0).metadata_status is MetadataStatus.NOT_REQUESTED
+    finally:
+        reader.shutdown(timeout_ms=2_000)

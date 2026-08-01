@@ -42,6 +42,8 @@ class FakePlaybackBackend(PlaybackBackend):
         self._muted = muted
         self._playback_rate = playback_rate
         self._pitch_compensation = pitch_compensation
+        # 直近の load() が渡した読み込み世代。status通知へ添える。
+        self._load_generation = 0
 
         self.calls: list[tuple[str, tuple[object, ...]]] = []
         """呼び出された操作の記録。``("seek", (1500,))`` のような形。"""
@@ -82,14 +84,15 @@ class FakePlaybackBackend(PlaybackBackend):
 
     # -- 操作 ---------------------------------------------------------------
 
-    def load(self, path: Path) -> None:
+    def load(self, path: Path, generation: int = 1) -> None:
         self.calls.append(("load", (path,)))
+        self._load_generation = generation
         if self.load_error is not None:
             self.error_occurred.emit(self.load_error)
             return
         self._state = PlaybackState.STOPPED
         if not self.defer_load_status:
-            self.media_status_changed.emit(MediaStatus.LOADED)
+            self.media_status_changed.emit(MediaStatus.LOADED, self._load_generation)
         self.state_changed.emit(self._state)
 
     def play(self) -> None:
@@ -155,8 +158,14 @@ class FakePlaybackBackend(PlaybackBackend):
         self._state = state
         self.state_changed.emit(state)
 
-    def emit_media_status(self, status: MediaStatus) -> None:
-        self.media_status_changed.emit(status)
+    def emit_media_status(self, status: MediaStatus, generation: int | None = None) -> None:
+        """status を通知する。``generation`` 省略時は現在の読み込み世代を使う。
+
+        前 source から遅れて届く通知を再現したい場合は、古い世代を明示して渡す。
+        """
+        self.media_status_changed.emit(
+            status, self._load_generation if generation is None else generation
+        )
 
     def emit_error(self, error: PlaybackError) -> None:
         self.error_occurred.emit(error)

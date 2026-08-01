@@ -47,6 +47,19 @@ class WaveformRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class WaveformCacheSaveRequest:
+    """1件のキャッシュ保存要求（保存に必要な値をすべて持つ不変値）。
+
+    workerの可変状態（現在request・現在key）を参照して保存すると、GUIを1往復する
+    あいだに次の曲の解析が始まった場合に、正常に解析できた結果を捨ててしまう。
+    """
+
+    path: Path
+    key: WaveformCacheKey
+    data: WaveformData
+
+
+@dataclass(frozen=True, slots=True)
 class DecodedChunk:
     """テスト用decode境界がworkerへ逐次渡すmono PCM。"""
 
@@ -87,7 +100,11 @@ class _WaveformWorker(QObject):
 
     started = Signal(object)
     partial = Signal(object, object)
-    finished = Signal(object, object, bool)
+    finished = Signal(object, object, object, bool)
+    """(request, 解析時に使ったcache key, WaveformData, cache由来かどうか)。
+
+    keyを一緒に渡すことで、保存要求がworkerの現在状態に依存しなくなる。
+    """
     failed = Signal(object, str)
     decoder_created = Signal(bool)
 
@@ -143,7 +160,7 @@ class _WaveformWorker(QObject):
                 self._fail(request, FILE_CHANGED_MESSAGE)
                 return
             self._terminal = True
-            self.finished.emit(request, cached, True)
+            self.finished.emit(request, key, cached, True)
             return
         if self._decode_function is not None:
             self._analyze_with_function(request)
@@ -160,27 +177,24 @@ class _WaveformWorker(QObject):
         # cancelより前にqueueされた旧cache保存は既にcancel状態を確認済み。
         self._cancellations.discard(token)
 
-    @Slot(object, object)
-    def save_cache(self, request_value: object, data_value: object) -> None:
-        if not isinstance(request_value, WaveformRequest) or not isinstance(
-            data_value, WaveformData
-        ):
-            return
-        key = self._key
-        current = self._request
-        if key is None or current is None or current.token != request_value.token:
-            return
-        if self._cancelled(request_value):
+    @Slot(object)
+    def save_cache(self, value: object) -> None:
+        """完了した解析結果を保存する。
+
+        要求は保存に必要な値をすべて持つため、workerの現在状態を参照しない
+        （GUIを1往復するあいだに次の曲の解析が始まっていても取りこぼさない）。
+        """
+        if not isinstance(value, WaveformCacheSaveRequest):
             return
         # 保存前だけは完全なfingerprintで確認する（解析中の安価な確認では
         # 内容差し替えを見逃しうるため、古い波形を書き込まない）。
-        if not _key_still_matches(request_value.path, key):
+        if not _key_still_matches(value.path, value.key):
             return
         try:
-            self._cache.save(key, data_value)
+            self._cache.save(value.key, value.data)
         except (OSError, ValueError):
             # cache失敗は解析結果・再生を失敗扱いにしない。
-            _logger.exception("波形キャッシュを保存できません: %s", request_value.path)
+            _logger.exception("波形キャッシュを保存できません: %s", value.path)
 
     @Slot()
     def shutdown(self) -> None:
@@ -311,7 +325,7 @@ class _WaveformWorker(QObject):
             reducer = WaveformReducer(1_000, key.bucket_ms)
         data = reducer.snapshot(complete=True)
         if not self._cancelled(request):
-            self.finished.emit(request, data, False)
+            self.finished.emit(request, key, data, False)
         self._cleanup_decoder()
 
     def _fail(self, request: WaveformRequest, message: str) -> None:
@@ -345,7 +359,7 @@ class WaveformAnalysisService(QObject):
 
     _analyze_requested = Signal(object)
     _cancel_requested = Signal(int)
-    _cache_save_requested = Signal(object, object)
+    _cache_save_requested = Signal(object)
     _shutdown_requested = Signal()
 
     def __init__(
@@ -481,15 +495,19 @@ class WaveformAnalysisService(QObject):
         if request is not None and isinstance(data_value, WaveformData):
             self.partial_ready.emit(request.path, request.token, data_value)
 
-    @Slot(object, object, bool)
+    @Slot(object, object, object, bool)
     def _on_worker_finished(
-        self, request_value: object, data_value: object, from_cache: bool
+        self, request_value: object, key_value: object, data_value: object, from_cache: bool
     ) -> None:
         request = self._applicable_request(request_value)
         if request is None or not isinstance(data_value, WaveformData):
             return
-        if not from_cache:
-            self._cache_save_requested.emit(request, data_value)
+        if not from_cache and isinstance(key_value, WaveformCacheKey):
+            # 保存に必要な値をすべて詰めて渡す。workerが次の曲の解析へ移っていても
+            # 取りこぼさない。
+            self._cache_save_requested.emit(
+                WaveformCacheSaveRequest(path=request.path, key=key_value, data=data_value)
+            )
         self.analysis_finished.emit(request.path, request.token, data_value, from_cache)
 
     @Slot(object, str)

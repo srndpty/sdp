@@ -198,7 +198,7 @@ def test_qt_error_is_converted(
 ) -> None:
     """Qt の各エラーがコード・日本語メッセージ・技術詳細へ変換される。"""
     source = test_audio_dir / "sine440.wav"
-    backend.load(source)
+    backend.load(source, 1)
     spy = QSignalSpy(backend.error_occurred)
 
     player_of(backend).errorOccurred.emit(qt_error, "backend error text")
@@ -309,7 +309,7 @@ def test_first_load_reports_stopped_once(
     """初回 load で NO_MEDIA から STOPPED へ 1 回だけ通知する。"""
     spy = QSignalSpy(backend.state_changed)
 
-    backend.load(test_audio_dir / "sine440.wav")
+    backend.load(test_audio_dir / "sine440.wav", 1)
 
     assert spy.count() == 1
     assert spy.at(0)[0] is PlaybackState.STOPPED
@@ -320,7 +320,7 @@ def test_repeated_stopped_state_is_not_reported_twice(
     backend: QtMultimediaBackend, test_audio_dir: Path
 ) -> None:
     """Qt から同じ StoppedState が来ても STOPPED を重複通知しない。"""
-    backend.load(test_audio_dir / "sine440.wav")
+    backend.load(test_audio_dir / "sine440.wav", 1)
     spy = QSignalSpy(backend.state_changed)
 
     player_of(backend).playbackStateChanged.emit(QMediaPlayer.PlaybackState.StoppedState)
@@ -334,7 +334,7 @@ def test_state_property_matches_last_emitted_state(
     backend: QtMultimediaBackend, test_audio_dir: Path
 ) -> None:
     """公開 state と最後に通知した状態が常に一致する。"""
-    backend.load(test_audio_dir / "sine440.wav")
+    backend.load(test_audio_dir / "sine440.wav", 1)
     spy = QSignalSpy(backend.state_changed)
     player = player_of(backend)
 
@@ -450,7 +450,7 @@ def test_seek_is_forwarded_to_the_player(
     backend: QtMultimediaBackend, test_audio_dir: Path, qtbot: QtBot
 ) -> None:
     """seek が QMediaPlayer の位置設定へ転送される。"""
-    backend.load(test_audio_dir / "sine440.wav")
+    backend.load(test_audio_dir / "sine440.wav", 1)
     qtbot.waitUntil(lambda: backend.duration_ms > 0, timeout=LOAD_TIMEOUT_MS)
 
     backend.seek(1000)
@@ -495,7 +495,7 @@ def test_load_reaches_loaded_media_without_playing(
     error_spy = QSignalSpy(backend.error_occurred)
     status_spy = QSignalSpy(backend.media_status_changed)
 
-    backend.load(source)
+    backend.load(source, 1)
 
     assert backend.state is PlaybackState.STOPPED
     qtbot.waitUntil(lambda: backend.duration_ms > 0, timeout=LOAD_TIMEOUT_MS)
@@ -526,7 +526,7 @@ def test_replacing_source_stops_once_and_resets_timeline(
     write_silent_wav(source_b, 750)
     player = player_of(backend)
 
-    backend.load(source_a)
+    backend.load(source_a, 1)
     qtbot.waitUntil(lambda: backend.duration_ms > 1_500, timeout=LOAD_TIMEOUT_MS)
     backend.seek(1_000)
     qtbot.waitUntil(lambda: backend.position_ms >= 900, timeout=LOAD_TIMEOUT_MS)
@@ -539,7 +539,7 @@ def test_replacing_source_stops_once_and_resets_timeline(
     status_spy = QSignalSpy(backend.media_status_changed)
     error_spy = QSignalSpy(backend.error_occurred)
 
-    backend.load(source_b)
+    backend.load(source_b, 1)
 
     assert backend.state is PlaybackState.STOPPED
     assert state_spy.count() == 1
@@ -561,7 +561,7 @@ def test_reloading_same_source_resets_position_without_reloading_media(
 ) -> None:
     """同じsourceの再ロードは先頭へ戻し、statusとdurationを再通知しない。"""
     source = test_audio_dir / "sine440.wav"
-    backend.load(source)
+    backend.load(source, 1)
     qtbot.waitUntil(lambda: backend.duration_ms > 0, timeout=LOAD_TIMEOUT_MS)
     duration_ms = backend.duration_ms
     backend.seek(1_000)
@@ -571,7 +571,7 @@ def test_reloading_same_source_resets_position_without_reloading_media(
     status_spy = QSignalSpy(backend.media_status_changed)
     error_spy = QSignalSpy(backend.error_occurred)
 
-    backend.load(source)
+    backend.load(source, 1)
 
     assert backend.state is PlaybackState.STOPPED
     assert backend.position_ms == 0
@@ -593,8 +593,8 @@ def test_new_source_supersedes_pending_invalid_source(
     status_spy = QSignalSpy(backend.media_status_changed)
     error_spy = QSignalSpy(backend.error_occurred)
 
-    backend.load(invalid_source)
-    backend.load(source_b)
+    backend.load(invalid_source, 1)
+    backend.load(source_b, 1)
 
     qtbot.waitUntil(lambda: backend.duration_ms > 0, timeout=LOAD_TIMEOUT_MS)
     statuses = [status_spy.at(index)[0] for index in range(status_spy.count())]
@@ -676,7 +676,7 @@ def test_audio_buffer_output_does_not_change_the_playback_contract(
     source = tmp_path / "無音.wav"
     write_silent_wav(source, 200)
 
-    backend.load(source)
+    backend.load(source, 1)
 
     assert backend.state is PlaybackState.STOPPED
     assert backend.position_ms == 0

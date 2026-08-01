@@ -61,6 +61,7 @@ def test_existing_entries_are_checked_after_construction(
     """構築時点で既にある行も確認される。"""
     playlist.add_paths([audio_files[0], tmp_path / "ない曲.wav"])
     checker = PlaylistFileStatusChecker(playlist, pool=pool)
+    checker.start()
 
     wait_until_checked(qtbot, playlist)
 
@@ -78,6 +79,7 @@ def test_added_rows_are_checked_in_the_background(
 ) -> None:
     """追加された行も背景で確認され、欠損だけがグレー対象になる。"""
     checker = PlaylistFileStatusChecker(playlist, pool=pool)
+    checker.start()
 
     playlist.add_paths([*audio_files, tmp_path / "ない曲.wav"])
     # 追加直後は未確認。ここでGUIスレッドがstatを実行していない。
@@ -100,6 +102,7 @@ def test_more_entries_than_one_batch_are_all_checked(
         paths.append(path)
     playlist.add_paths(paths)
     checker = PlaylistFileStatusChecker(playlist, batch_size=3, pool=pool)
+    checker.start()
 
     wait_until_checked(qtbot, playlist)
 
@@ -112,6 +115,7 @@ def test_shutdown_stops_further_batches(
 ) -> None:
     """shutdown後は新しいバッチを始めず、結果も反映しない。"""
     checker = PlaylistFileStatusChecker(playlist, batch_size=1, pool=pool)
+    checker.start()
     checker.shutdown()
 
     playlist.add_paths(audio_files)
@@ -127,6 +131,7 @@ def test_removed_entries_do_not_break_the_update(
     """確認中に行が消えても、残った行だけが更新される。"""
     playlist.add_paths(audio_files)
     checker = PlaylistFileStatusChecker(playlist, pool=pool)
+    checker.start()
     playlist.removeRows(0, 1)
 
     wait_until_checked(qtbot, playlist)
@@ -142,6 +147,7 @@ def test_run_pending_now_resolves_synchronously(
     """同期経路は待たずに全件を確定させる。"""
     playlist.add_paths([audio_files[0], tmp_path / "ない曲.wav"])
     checker = PlaylistFileStatusChecker(playlist, pool=pool)
+    checker.start()
     checker.shutdown()
 
     assert checker.run_pending_now() == 2
@@ -163,6 +169,7 @@ def test_shutdown_waits_for_the_running_batch_but_not_forever(
     """実行中バッチの完了を待つが、上限を超えたら諦めて戻る。"""
     playlist.add_paths(audio_files)
     checker = PlaylistFileStatusChecker(playlist, pool=pool)
+    checker.start()
 
     assert checker.shutdown() is True
     # 冪等。2回目も即座に戻る。
@@ -175,6 +182,7 @@ def test_shutdown_returns_even_when_the_batch_does_not_finish(
     """バッチが戻らなくても、待機上限で制御を返す（終了処理を固めない）。"""
     playlist.add_paths(audio_files)
     checker = PlaylistFileStatusChecker(playlist, pool=pool)
+    checker.start()
     # 完了イベントを未設定のものへ差し替え、「終わらないバッチ」を模す。
     checker._batch_done = Event()  # pyright: ignore[reportPrivateUsage]
 
@@ -203,6 +211,7 @@ def test_model_reset_during_a_batch_does_not_stall_further_checks(
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(playlist_file_status, "probe_file_status", blocking_probe)
         checker = PlaylistFileStatusChecker(playlist, pool=pool)
+        checker.start()
         assert entered.wait(timeout=5)
 
         # 実行中に総入れ替えする（保存済みplaylistの復元と同じ経路）。
@@ -223,6 +232,7 @@ def test_shutdown_does_not_rewrite_a_failed_result_as_success(
     """冪等なshutdownでも、初回の失敗を成功へ書き換えない。"""
     playlist.add_paths(audio_files)
     checker = PlaylistFileStatusChecker(playlist, pool=pool)
+    checker.start()
     # 終わらないバッチを模し、初回shutdownを失敗させる。
     checker._batch_done = threading.Event()  # pyright: ignore[reportPrivateUsage]
 

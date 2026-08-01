@@ -599,3 +599,37 @@ def test_shutdown_does_not_rewrite_an_abandoned_result_as_stopped(
 
     # 実際に終わったあとは STOPPED へ更新してよい。
     assert service.shutdown() is ShutdownOutcome.STOPPED
+
+
+def test_cache_is_saved_even_when_the_next_source_starts_immediately(
+    controller: PlaybackController, tmp_path: Path, qtbot: QtBot
+) -> None:
+    """Aの完了直後にBをloadしても、Aのキャッシュが保存される。
+
+    保存要求がworkerの現在状態（現在request・現在key）を参照していると、
+    GUIを1往復するあいだにBの解析が始まった時点でAの結果を捨ててしまう。
+    """
+    first = make_audio_file(tmp_path, "A.wav")
+    second = make_audio_file(tmp_path, "B.wav")
+    cache_dir = tmp_path / "cache"
+    first_key = WaveformCacheKey.from_path(first)
+
+    def decode(path: Path, cancelled: Callable[[], bool]) -> Iterator[DecodedChunk]:
+        del path, cancelled
+        yield DecodedChunk(np.zeros(20, dtype=np.float32), 1_000)
+
+    service = make_service(controller, cache_dir, decode)
+    finished = QSignalSpy(service.analysis_finished)
+    service.start()
+    try:
+        controller.load(first)
+        qtbot.waitUntil(lambda: finished.count() == 1, timeout=5_000)
+        # analysis_finished を受けた直後（保存要求がworkerへ届く前）に次の曲を読む。
+        controller.load(second)
+
+        qtbot.waitUntil(
+            lambda: (cache_dir / first_key.filename).is_file(),
+            timeout=5_000,
+        )
+    finally:
+        service.shutdown()

@@ -17,10 +17,15 @@ threadと関連オブジェクトをここへ引き取り、制御だけを返�
 thread内でまだ動いているコードの足元が崩れる。呼び出し側は ``keepalive`` で
 生かしておくべきオブジェクトを渡す。
 
-回収したthreadと関連オブジェクトの **Python参照はここで解放しない**。
+回収したthreadと関連オブジェクトの **Python参照はreaper thread上で解放しない**。
 ``QThread`` などのQObjectをreaper thread上で最終解放すると、GUIでもworkerの
 affinity threadでもないthread上でC++デストラクタが走り、危険になりうる。
-reaperは「終了したこと」を確認するだけで、参照はプロセス終了まで保持する。
+reaperは「終了したこと」を確認するだけで、確認済みentryは保持し続ける。
+
+**この関数はプロセス終了に向けた放棄を前提にしている。** アプリ実行中に
+コンポーネントを停止・再生成する用途で使うと、停止のたびにオブジェクトグラフが
+残り続ける。その場合は所有者のthreadから :func:`drain_completed_abandoned_threads`
+を呼び、終了確認済みのentryを解放すること。
 
 強制終了（``QThread.terminate``）は使わない。保存中のユーザーデータが壊れうるため。
 """
@@ -85,9 +90,16 @@ class _Reaper:
 
     @property
     def completed_count(self) -> int:
-        """終了を確認し、プロセス終了まで保持しているentry数。"""
+        """終了を確認し、まだ解放していないentry数。"""
         with self._lock:
             return len(self._completed)
+
+    def drain_completed(self) -> int:
+        """終了確認済みentryを解放する（呼び出し元のthreadで最終解放が起きる）。"""
+        with self._lock:
+            drained = len(self._completed)
+            self._completed.clear()
+        return drained
 
     def add(self, entry: _AbandonedThread) -> None:
         """引き取って見張りを開始する。"""
@@ -135,7 +147,9 @@ class _Reaper:
                 return
             self._entries.remove(entry)
             self._completed.append(entry)
-        _logger.info("放棄した%sが終了しました（参照はプロセス終了まで保持します）", entry.label)
+        _logger.info(
+            "放棄した%sが終了しました（参照は所有者threadでのdrainまで保持します）", entry.label
+        )
 
 
 _reaper = _Reaper()
@@ -154,6 +168,19 @@ def completed_abandoned_thread_count() -> int:
 def wait_for_abandoned_threads(timeout_s: float = 5.0) -> bool:
     """放棄済みthreadがすべて終了確認されるまで待つ（テストと診断用）。"""
     return _reaper.wait_for_empty(timeout_s)
+
+
+def drain_completed_abandoned_threads() -> int:
+    """終了確認済みのentryを解放し、解放した件数を返す。
+
+    **所有者のthread（通常はGUI thread）から呼ぶこと。** ここでQObjectの最終解放が
+    起きるため、reaper threadからは呼ばない。
+
+    アプリ終了時は ``app.exec()`` のあとで解放先のevent loopが無く、そのまま
+    プロセスが終わるので呼ぶ必要はない。実行中にコンポーネントを停止・再生成する
+    用途で、放棄したオブジェクトグラフを溜めたくない場合に使う。
+    """
+    return _reaper.drain_completed()
 
 
 def stop_thread(

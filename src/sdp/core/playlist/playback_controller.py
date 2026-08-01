@@ -24,21 +24,6 @@ from sdp.core.playlist.types import RepeatMode, next_repeat_mode
 MISSING_FILE_MESSAGE = "ファイルが見つからないため再生できません。"
 END_OF_PLAYLIST_MESSAGE = "プレイリストの最後まで再生しました。"
 
-_SOURCE_PROGRESS_STATUSES = frozenset(
-    {
-        MediaStatus.LOADING,
-        MediaStatus.LOADED,
-        MediaStatus.BUFFERING,
-        MediaStatus.BUFFERED,
-    }
-)
-"""新sourceの読み込みが進んだことを示すstatus。
-
-``END_OF_MEDIA`` は必ずこれらのあとに来るため、「この世代のsourceが自分で
-何かを通知した」ことの根拠になる。source切替直後に前sourceから遅れて届く
-``END_OF_MEDIA`` は、これらより前に来るので除外できる。
-"""
-
 
 class _PlayAttempt(Enum):
     """曲送り候補への再生要求結果。"""
@@ -96,7 +81,9 @@ class PlaylistPlaybackController(QObject):
         # source が変わるまでは解除せず、遅れて届く重複通知を抑止する。
         self._source_generation = 0
         self._end_consumed_generation: int | None = None
-        self._current_generation_started = False
+        # 現在sourceに対応するPlaybackControllerの読み込み世代。
+        # status通知の由来を識別し、前sourceの遅延通知を捨てるために使う。
+        self._load_generation: int | None = None
         self._can_play_previous = False
         self._can_play_next = False
 
@@ -467,27 +454,20 @@ class PlaylistPlaybackController(QObject):
         del source
         self._source_generation += 1
         self._end_consumed_generation = None
-        self._current_generation_started = False
+        # source_changedはload()がbackendを呼ぶ直前に届くため、ここで読めば
+        # この source に対応する世代になる。
+        self._load_generation = self._playback.load_generation
         self._set_current_entry_id(self._loading_entry_id)
 
-    def _on_media_status_changed(self, status: MediaStatus) -> None:
-        if status in _SOURCE_PROGRESS_STATUSES:
-            # 新sourceの読み込みが進んだ証拠。ここで世代を「開始済み」とみなす。
-            #
-            # **positionでは判定しない。** 前sourceの遅延positionでも、1度でも
-            # 正の値が届けば新世代を開始済みにしてしまい、続けて届く前source由来の
-            # 遅延ENDで1曲飛ばす。読み込み進行statusは新sourceしか出さないため、
-            # 世代の開始を表す根拠としてはこちらだけを使う。
-            self._current_generation_started = True
+    def _on_media_status_changed(self, status: MediaStatus, load_generation: int) -> None:
+        if load_generation != self._load_generation:
+            # 前sourceから遅れて届いた通知。statusの種類では区別できないため
+            # （LOADEDもENDも同じ形で届く）、通知に添えられた世代で切り分ける。
             return
         if status is not MediaStatus.END_OF_MEDIA:
             return
         if self._current_entry_id is None:
             # 「開く...」で直接開いた単曲。プレイリストへ勝手に移らない。
-            return
-        if not self._current_generation_started:
-            # source切替直後、新sourceがまだ何も通知していない時点へ届いた
-            # 前source由来の通知を無視する。
             return
         generation = self._source_generation
         if self._end_consumed_generation == generation:

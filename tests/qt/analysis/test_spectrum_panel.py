@@ -302,8 +302,8 @@ def test_source_change_resets_the_frame(
     qtbot.waitUntil(lambda: widget_of(panel).frame is not None, timeout=2_000)
 
     # source_changedとstate_changedの順序へ依存しないよう、Backendの同期停止通知を抑える。
-    def keep_playing(path: Path) -> None:
-        del path
+    def keep_playing(path: Path, generation: int) -> None:
+        del path, generation
 
     monkeypatch.setattr(backend, "load", keep_playing)
     controller.load(sources[1])

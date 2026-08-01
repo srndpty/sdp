@@ -44,9 +44,14 @@ def test_wav_playback_lifecycle(
     assert source.is_file(), source
     error_spy = QSignalSpy(backend.error_occurred)
     statuses: list[MediaStatus] = []
-    backend.media_status_changed.connect(statuses.append)
 
-    backend.load(source)
+    def record_status(status: MediaStatus, generation: int) -> None:
+        del generation
+        statuses.append(status)
+
+    backend.media_status_changed.connect(record_status)
+
+    backend.load(source, 1)
     qtbot.waitUntil(lambda: backend.duration_ms > 0, timeout=LOAD_TIMEOUT_MS)
     assert backend.duration_ms == pytest.approx(2000, abs=200)
 
@@ -84,7 +89,7 @@ def test_compressed_format_playback(
     assert source.is_file(), source
     error_spy = QSignalSpy(backend.error_occurred)
 
-    backend.load(source)
+    backend.load(source, 1)
     qtbot.waitUntil(lambda: backend.duration_ms > 0, timeout=LOAD_TIMEOUT_MS)
 
     backend.play()
@@ -106,7 +111,7 @@ def test_replace_source_while_playing_or_paused(
     """実再生中・一時停止中にsourceを差し替えると、先頭で停止する。"""
     source_a = test_audio_dir / "sine440.wav"
     source_b = test_audio_dir / "sweep.wav"
-    backend.load(source_a)
+    backend.load(source_a, 1)
     qtbot.waitUntil(lambda: backend.duration_ms > 0, timeout=LOAD_TIMEOUT_MS)
     backend.play()
     qtbot.waitUntil(lambda: backend.state is PlaybackState.PLAYING, timeout=ACTION_TIMEOUT_MS)
@@ -119,7 +124,7 @@ def test_replace_source_while_playing_or_paused(
     position_spy = QSignalSpy(backend.position_changed)
     error_spy = QSignalSpy(backend.error_occurred)
 
-    backend.load(source_b)
+    backend.load(source_b, 1)
 
     assert backend.state is PlaybackState.STOPPED
     assert state_spy.count() == 1

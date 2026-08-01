@@ -100,6 +100,9 @@ class QtMultimediaBackend(PlaybackBackend):
         # Qt は source 未設定でも StoppedState を返すため、NO_MEDIA と STOPPED は
         # Qt の playbackState だけでは区別できない。source の有無を自分で保持する。
         self._source_path: Path | None = None
+        # 直近の load() が渡した読み込み世代。status通知へ添えて、受け手が
+        # 前sourceの遅延通知を切り分けられるようにする。
+        self._load_generation = 0
         # 公開プロパティと「最後に通知した状態」を常に一致させるため、状態は
         # ここで保持し、_sync_state() でのみ更新と通知を同時に行う。
         self._state = PlaybackState.NO_MEDIA
@@ -118,7 +121,7 @@ class QtMultimediaBackend(PlaybackBackend):
 
     # -- 操作 ---------------------------------------------------------------
 
-    def load(self, path: Path) -> None:
+    def load(self, path: Path, generation: int) -> None:
         """ローカルファイルとして QMediaPlayer へ設定する。
 
         存在確認と通常ファイル確認は Controller が済ませているため重複させない。
@@ -130,6 +133,9 @@ class QtMultimediaBackend(PlaybackBackend):
         NO_MEDIA → STOPPED を 1 回だけ通知してから source を設定する。
         """
         self._source_path = path
+        # 以後の mediaStatusChanged はこの世代の通知として扱う。setSource は同期で
+        # status を出すため、setSource より前に更新する。
+        self._load_generation = generation
         self._sync_state()
         self._player.setSource(QUrl.fromLocalFile(str(path)))
         # setSource が再生を止めた場合（再生中の差し替え）に追随する。
@@ -233,7 +239,7 @@ class QtMultimediaBackend(PlaybackBackend):
             # 既知値を既定値へ丸めず、観測可能な失敗にする。
             self._report_internal_failure(f"未知の QMediaPlayer.MediaStatus: {_enum_name(status)}")
             return
-        self.media_status_changed.emit(mapped)
+        self.media_status_changed.emit(mapped, self._load_generation)
 
     @Slot(QMediaPlayer.Error, str)
     def _on_error_occurred(self, error: QMediaPlayer.Error, error_string: str) -> None:
