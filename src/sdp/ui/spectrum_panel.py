@@ -12,7 +12,7 @@ import logging
 
 from PySide6.QtCore import QElapsedTimer, QEvent, QObject, Qt, QTimer, Slot
 from PySide6.QtGui import QHideEvent, QShowEvent
-from PySide6.QtWidgets import QVBoxLayout, QWidget
+from PySide6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
 from sdp.core.analysis.level import LEVEL_WINDOW_SIZE, LevelProcessor
 from sdp.core.analysis.spectrum import SPECTRUM_TIMER_INTERVAL_MS, SpectrumProcessor
@@ -55,6 +55,7 @@ class SpectrumPanel(QWidget):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("spectrumPanel")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         self._playback = playback
         self._pcm_tap = pcm_tap
         self._processor = SpectrumProcessor()
@@ -79,6 +80,7 @@ class SpectrumPanel(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         layout.addWidget(self._widget)
         layout.addWidget(self._level_widget)
 

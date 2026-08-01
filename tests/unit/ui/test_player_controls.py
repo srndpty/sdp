@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtTest import QSignalSpy
-from PySide6.QtWidgets import QLabel, QPushButton, QSlider
+from PySide6.QtWidgets import QLabel, QPushButton, QSlider, QWidget
 from pytestqt.qtbot import QtBot
 
 from fakes.fake_playback_backend import FakePlaybackBackend
@@ -152,8 +152,8 @@ def test_transport_buttons_call_the_controller(
     assert backend.call_names() == ["play", "pause", "stop"]
 
 
-def test_transport_and_mute_controls_use_icons(controls: PlayerControls) -> None:
-    """主要な再生操作は文字ラベルではなくアイコンで表示する。"""
+def test_transport_and_mute_controls_use_white_icons(controls: PlayerControls) -> None:
+    """主要な再生操作はダークテーマでも読める白いアイコンで表示する。"""
     for name in (
         "previousTrackButton",
         "playButton",
@@ -164,6 +164,36 @@ def test_transport_and_mute_controls_use_icons(controls: PlayerControls) -> None
         control = button(controls, name)
         assert control.text() == ""
         assert not control.icon().isNull()
+        image = control.icon().pixmap(20, 20).toImage()
+        opaque_colors = [
+            image.pixelColor(x, y)
+            for y in range(image.height())
+            for x in range(image.width())
+            if image.pixelColor(x, y).alpha() > 0
+        ]
+        assert opaque_colors
+        assert all(color.red() == color.green() == color.blue() == 255 for color in opaque_colors)
+
+
+def test_buttons_and_volume_share_one_row(controls: PlayerControls, qtbot: QtBot) -> None:
+    """再生・モード・音量の操作を同じ横一列へ配置する。"""
+    controls.show()
+    qtbot.waitExposed(controls)
+    centers: list[int] = []
+    for name in (
+        "previousTrackButton",
+        "playButton",
+        "stopButton",
+        "nextTrackButton",
+        "repeatModeButton",
+        "shuffleButton",
+        "volumeSlider",
+        "muteButton",
+    ):
+        widget = controls.findChild(QWidget, name)
+        assert widget is not None
+        centers.append(widget.geometry().center().y())
+    assert max(centers) - min(centers) <= 1
 
 
 # -- シークバー -------------------------------------------------------------

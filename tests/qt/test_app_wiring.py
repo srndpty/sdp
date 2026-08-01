@@ -7,6 +7,7 @@
 import json
 import logging
 import struct
+import uuid
 from collections.abc import Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -414,7 +415,7 @@ def test_run_starts_and_stops_background_services_in_order(
     monkeypatch.setattr(MainWindow, "show", skip_window_show)
     monkeypatch.setattr(app_module.logging_setup, "configure_logging", ignore_logging_setup)
     monkeypatch.setattr(app_module.logging_setup, "install_excepthook", ignore_logging_setup)
-    assert app_module.run([]) == 0
+    assert app_module.run([], server_name=f"test-run-order-{uuid.uuid4().hex}") == 0
     assert events == [
         "settings_start",
         "playlist_start",
@@ -1775,7 +1776,7 @@ def test_run_saves_ui_state_before_stopping_sessions(
     monkeypatch.setattr(app_module.logging_setup, "configure_logging", ignore_logging_setup)
     monkeypatch.setattr(app_module.logging_setup, "install_excepthook", ignore_logging_setup)
 
-    assert app_module.run([]) == 0
+    assert app_module.run([], server_name=f"test-ui-state-order-{uuid.uuid4().hex}") == 0
 
     assert events == ["exec", "ui_state_flush", "ui_state_stop"]
 

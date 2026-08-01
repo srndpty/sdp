@@ -5,13 +5,15 @@ PlaybackController の公開 API とシグナルだけを使う。
 """
 
 from PySide6.QtCore import QSignalBlocker, Qt, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter
 from PySide6.QtWidgets import (
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QStyle,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -43,6 +45,21 @@ _STATE_LABELS: dict[PlaybackState, str] = {
 }
 
 _VOLUME_SLIDER_MAX = 100
+_ICON_SIZES = (16, 20, 24, 32)
+
+
+def _white_standard_icon(widget: QWidget, standard_pixmap: QStyle.StandardPixmap) -> QIcon:
+    """Qt標準アイコンをダークテーマでも読める白色へ統一する。"""
+    source = widget.style().standardIcon(standard_pixmap)
+    icon = QIcon()
+    for size in _ICON_SIZES:
+        pixmap = source.pixmap(size, size)
+        painter = QPainter(pixmap)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+        painter.fillRect(pixmap.rect(), QColor(Qt.GlobalColor.white))
+        painter.end()
+        icon.addPixmap(pixmap)
+    return icon
 
 
 class PlayerControls(QWidget):
@@ -69,6 +86,7 @@ class PlayerControls(QWidget):
 
     def __init__(self, controller: PlaybackController, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         self._controller = controller
         # ユーザーがシークバーをドラッグしている間は、Backend からの位置通知で
         # つまみを動かさない（操作が奪われるため）。
@@ -89,7 +107,7 @@ class PlayerControls(QWidget):
         self._previous_button.setAccessibleName("前の曲")
         self._previous_button.setToolTip("前の曲（Page Up）")
         self._previous_button.setIcon(
-            self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipBackward)
+            _white_standard_icon(self, QStyle.StandardPixmap.SP_MediaSkipBackward)
         )
         self._previous_button.setEnabled(False)
         self._next_button = QPushButton()
@@ -97,7 +115,7 @@ class PlayerControls(QWidget):
         self._next_button.setAccessibleName("次の曲")
         self._next_button.setToolTip("次の曲（Page Down）")
         self._next_button.setIcon(
-            self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipForward)
+            _white_standard_icon(self, QStyle.StandardPixmap.SP_MediaSkipForward)
         )
         self._next_button.setEnabled(False)
 
@@ -105,12 +123,12 @@ class PlayerControls(QWidget):
         self._play_button.setObjectName("playButton")
         self._play_button.setAccessibleName("再生")
         self._play_button.setToolTip("再生（Space）")
-        self._play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+        self._play_button.setIcon(_white_standard_icon(self, QStyle.StandardPixmap.SP_MediaPlay))
         self._stop_button = QPushButton()
         self._stop_button.setObjectName("stopButton")
         self._stop_button.setAccessibleName("停止")
         self._stop_button.setToolTip("停止")
-        self._stop_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaStop))
+        self._stop_button.setIcon(_white_standard_icon(self, QStyle.StandardPixmap.SP_MediaStop))
 
         self._seek_slider = QSlider(Qt.Orientation.Horizontal)
         self._seek_slider.setObjectName("seekSlider")
@@ -148,29 +166,25 @@ class PlayerControls(QWidget):
         seek_row.addWidget(self._seek_slider, stretch=1)
         seek_row.addWidget(self._duration_label)
 
-        button_row = QHBoxLayout()
-        button_row.addWidget(self._previous_button)
-        button_row.addWidget(self._play_button)
-        button_row.addWidget(self._stop_button)
-        button_row.addWidget(self._next_button)
-        button_row.addStretch(1)
-        button_row.addWidget(self._state_label)
+        controls_row = QHBoxLayout()
+        controls_row.addWidget(self._previous_button)
+        controls_row.addWidget(self._play_button)
+        controls_row.addWidget(self._stop_button)
+        controls_row.addWidget(self._next_button)
+        controls_row.addWidget(self._repeat_button)
+        controls_row.addWidget(self._shuffle_button)
+        controls_row.addSpacing(8)
+        controls_row.addWidget(QLabel("音量"))
+        controls_row.addWidget(self._volume_slider, stretch=1)
+        controls_row.addWidget(self._mute_button)
+        controls_row.addSpacing(8)
+        controls_row.addWidget(self._state_label)
 
-        mode_row = QHBoxLayout()
-        mode_row.addWidget(self._repeat_button)
-        mode_row.addWidget(self._shuffle_button)
-        mode_row.addStretch(1)
-
-        volume_row = QHBoxLayout()
-        volume_row.addWidget(QLabel("音量"))
-        volume_row.addWidget(self._volume_slider, stretch=1)
-        volume_row.addWidget(self._mute_button)
-
-        layout = QGridLayout(self)
-        layout.addLayout(seek_row, 0, 0)
-        layout.addLayout(button_row, 1, 0)
-        layout.addLayout(mode_row, 2, 0)
-        layout.addLayout(volume_row, 3, 0)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(9, 2, 9, 2)
+        layout.setSpacing(2)
+        layout.addLayout(seek_row)
+        layout.addLayout(controls_row)
 
     def _connect_widgets(self) -> None:
         # 前後曲は再生実装へ触らず、要求としてだけ外へ出す（配線は MainWindow）。
@@ -268,12 +282,14 @@ class PlayerControls(QWidget):
         self._play_button.setEnabled(state is not PlaybackState.NO_MEDIA)
         if state is PlaybackState.PLAYING:
             self._play_button.setIcon(
-                self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause)
+                _white_standard_icon(self, QStyle.StandardPixmap.SP_MediaPause)
             )
             self._play_button.setAccessibleName("一時停止")
             self._play_button.setToolTip("一時停止（Space）")
         else:
-            self._play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+            self._play_button.setIcon(
+                _white_standard_icon(self, QStyle.StandardPixmap.SP_MediaPlay)
+            )
             self._play_button.setAccessibleName("再生")
             self._play_button.setToolTip("再生（Space）")
         self._stop_button.setEnabled(state in {PlaybackState.PLAYING, PlaybackState.PAUSED})
@@ -315,7 +331,7 @@ class PlayerControls(QWidget):
             if muted
             else QStyle.StandardPixmap.SP_MediaVolume
         )
-        self._mute_button.setIcon(self.style().standardIcon(icon))
+        self._mute_button.setIcon(_white_standard_icon(self, icon))
 
     def _on_source_changed(self, source: object) -> None:
         del source  # 表示するファイル名は MainWindow の責務

@@ -107,6 +107,7 @@ class PlaylistView(QWidget):
 
     def __init__(self, model: PlaylistModel, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setMinimumHeight(240)
         self._model = model
 
         self._table = PlaylistTableView()

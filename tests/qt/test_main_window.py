@@ -11,10 +11,11 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QDialogButtonBox,
     QDoubleSpinBox,
-    QLabel,
+    QSizePolicy,
     QSplitter,
     QTableView,
     QWidget,
@@ -107,12 +108,6 @@ def audio_file(tmp_path: Path) -> Path:
     return path
 
 
-def file_name_text(window: MainWindow) -> str:
-    label = window.findChild(QLabel, "fileNameLabel")
-    assert label is not None
-    return label.text()
-
-
 def stub_open_dialog(selected: str) -> Callable[..., tuple[str, str]]:
     """`QFileDialog.getOpenFileName` の差し替え。空文字はキャンセルを表す。"""
 
@@ -132,7 +127,6 @@ def action_of(window: MainWindow, name: str) -> QAction:
 @pytest.mark.parametrize(
     ("object_name", "accessible_name"),
     [
-        ("fileNameLabel", "現在のファイル"),
         ("playButton", "再生"),
         ("stopButton", "停止"),
         ("seekSlider", "再生位置"),
@@ -327,28 +321,24 @@ def test_all_files_filter_is_available() -> None:
     assert "すべてのファイル (*)" in main_window_module.FILE_DIALOG_FILTER
 
 
-def test_source_change_updates_file_name_and_title(
+def test_source_change_updates_the_window_title(
     window: MainWindow, controller: PlaybackController, audio_file: Path
 ) -> None:
-    """source_changed でファイル名表示・ツールチップ・タイトルが更新される。"""
+    """source_changedでファイル名をウィンドウタイトルへ表示する。"""
     controller.load(audio_file)
 
-    assert file_name_text(window) == audio_file.name
     assert window.windowTitle() == f"sdp — {audio_file.name}"
-    label = window.findChild(QLabel, "fileNameLabel")
-    assert label is not None
-    assert label.toolTip() == str(audio_file.resolve())
+    assert window.findChild(QWidget, "fileNameLabel") is None
 
 
 def test_cleared_source_restores_the_initial_title(
     window: MainWindow, controller: PlaybackController, audio_file: Path
 ) -> None:
-    """source が無くなったらファイル名表示とタイトルを初期状態へ戻す。"""
+    """sourceが無くなったらタイトルを初期状態へ戻す。"""
     controller.load(audio_file)
 
     controller.source_changed.emit(None)
 
-    assert file_name_text(window) == main_window_module.NO_FILE_TEXT
     assert window.windowTitle() == main_window_module.WINDOW_TITLE
     assert window.statusBar().currentMessage() == "音声ファイルを開いてください。"
 
@@ -394,7 +384,7 @@ def test_error_message_is_shown_without_technical_detail(
 
     assert window.statusBar().currentMessage() == error.message
     assert error.detail not in window.statusBar().currentMessage()
-    assert error.detail not in file_name_text(window)
+    assert error.detail not in window.windowTitle()
 
 
 @pytest.mark.parametrize("error_first", [True, False])
@@ -709,6 +699,31 @@ def test_toggling_settings_shows_and_hides_each_visualization(
     assert window.waveform_panel.isVisible()
     assert panel.is_spectrum_visible
     assert panel.is_level_meter_visible
+
+
+def test_playlist_keeps_a_useful_height_and_player_panel_does_not_expand(
+    window: MainWindow, qtbot: QtBot
+) -> None:
+    """保存済み比率が上側へ偏ってもプレイリストを狭くせず、余白を作らない。"""
+    window.resize(880, 768)
+    window.show()
+    qtbot.waitExposed(window)
+    splitter = window.findChild(QSplitter, "mainSplitter")
+    player_panel = window.findChild(QWidget, "playerPanel")
+    playlist = window.findChild(PlaylistView)
+    assert splitter is not None
+    assert player_panel is not None
+    assert playlist is not None
+
+    splitter.setSizes([10_000, 1])
+    QApplication.processEvents()
+
+    assert playlist.minimumHeight() == 240
+    assert playlist.height() >= 240
+    assert player_panel.sizePolicy().verticalPolicy() is QSizePolicy.Policy.Maximum
+    player_layout = player_panel.layout()
+    assert player_layout is not None
+    assert player_layout.spacing() == 0
 
 
 def test_hidden_waveform_panel_stops_following_the_position(
