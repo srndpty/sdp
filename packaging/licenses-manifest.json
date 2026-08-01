@@ -5,8 +5,8 @@
     {
       "id": "sdp",
       "display_name": "sdp",
-      "license": "MIT",
-      "shipped_texts": ["LICENSE", "_internal/LICENSE"],
+      "license": "GPL-3.0-only",
+      "shipped_texts": ["LICENSE", "_internal/LICENSE", "_internal/licenses/common/GPL-3.0.txt"],
       "linkage": "application",
       "status": "resolved",
       "notes": "本アプリ本体。",
@@ -25,11 +25,11 @@
     {
       "id": "pyside6",
       "display_name": "PySide6 / shiboken6",
-      "license": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only（wheel metadata）",
-      "shipped_texts": ["_internal/licenses/PySide6/LicenseRef-Qt-Commercial.txt"],
+      "license": "GPL-3.0-only（wheel metadataのopen source選択肢）",
+      "shipped_texts": ["_internal/licenses/common/GPL-3.0.txt", "_internal/licenses/PySide6/LicenseRef-Qt-Commercial.txt"],
       "linkage": "dynamic",
-      "status": "needs_text",
-      "notes": "wheelが同梱するのは商用ライセンス参照文のみで、LGPL-3.0原文が配布物に無い。LGPLで配布するならLGPL-3.0とGPL-3.0の原文、著作権表示、ソース入手方法の提示が必要。",
+      "status": "needs_decision",
+      "notes": "GPL-3.0原文は同梱済み。外部公開時にPySide6/Shiboken 6.10.3の完全な対応sourceをbinaryと同じ配布場所から取得可能にする必要がある。",
       "file_patterns": [
         "_internal/PySide6/pyside6.abi3.dll",
         "_internal/PySide6/*.pyd",
@@ -40,34 +40,21 @@
     {
       "id": "qt",
       "display_name": "Qt 6（Core/Gui/Widgets/Network/Multimedia ほか）",
-      "license": "LGPL-3.0-only（想定。The Qt Companyのopen source提供分）",
-      "shipped_texts": [],
+      "license": "GPL-3.0-only（Qt open source選択肢）",
+      "shipped_texts": ["_internal/licenses/common/GPL-3.0.txt"],
       "linkage": "dynamic",
       "status": "needs_decision",
-      "notes": "PySide6 wheel経由でQt DLLとpluginを同梱している。LGPL-3.0で配布する前提なら、原文・著作権表示・再リンク手段（DLL差し替え可能なonedirである点）・Qtソース入手方法の明示が必要。商用ライセンスを選ぶ場合は条件が変わる。",
+      "notes": "GPL-3.0原文は同梱済み。外部公開時にQt 6.10.3の完全な対応source、build情報、installation informationをbinaryと同じ配布場所から取得可能にする必要がある。",
       "file_patterns": ["_internal/PySide6/Qt6*.dll", "_internal/PySide6/plugins/**/*.dll"]
-    },
-    {
-      "id": "qt-virtualkeyboard",
-      "display_name": "Qt Virtual Keyboard（Qt6VirtualKeyboard.dll / qtvirtualkeyboardplugin.dll）",
-      "license": "要確認（Qtのopen source提供ではGPL-3.0-onlyの可能性）",
-      "shipped_texts": [],
-      "linkage": "dynamic",
-      "status": "needs_expert",
-      "notes": "sdpは使用していないがPySide6-Addons経由で同梱される。ライセンス面と配布サイズの両方の理由で、除外できるかをP7-C以降で検討する。",
-      "file_patterns": [
-        "_internal/PySide6/Qt6VirtualKeyboard.dll",
-        "_internal/PySide6/plugins/platforminputcontexts/qtvirtualkeyboardplugin.dll"
-      ]
     },
     {
       "id": "ffmpeg",
       "display_name": "FFmpeg 7.1.3（avcodec-61 / avformat-61 / avutil-59 / swresample-5 / swscale-8）",
-      "license": "LGPL-2.1-or-later（build configurationに --enable-gpl / --enable-nonfree / --enable-version3 が無いことを実測）",
-      "shipped_texts": [],
+      "license": "LGPL-2.1-or-later、BSD-2-Clause、BSD-3-Clause、BSD-Source-Code、ISC、MIT、MPL-2.0（build configurationに --enable-gpl / --enable-nonfree / --enable-version3 が無いことを実測）",
+      "shipped_texts": ["_internal/licenses/common/LGPL-2.1.txt"],
       "linkage": "dynamic",
-      "status": "needs_text",
-      "notes": "configuration文字列: --prefix=/c/FFmpeg-n7.1.3/build/msvc/installed --disable-programs --disable-doc --disable-debug --enable-network --disable-lzma --enable-pic --disable-vulkan --disable-v4l2-m2m --disable-decoder=truemotion1 --enable-zlib --toolchain=msvc --enable-shared --disable-static。LGPL原文とソース入手方法の提示が必要。",
+      "status": "needs_decision",
+      "notes": "LGPL-2.1原文とbuild configurationは同梱済み。外部公開時にFFmpeg n7.1.3の完全なattributionと対応sourceをbinaryと同じ配布場所から取得可能にする必要がある。",
       "verified_configuration": true,
       "file_patterns": [
         "_internal/PySide6/avcodec-*.dll",
@@ -76,16 +63,6 @@
         "_internal/PySide6/swresample-*.dll",
         "_internal/PySide6/swscale-*.dll"
       ]
-    },
-    {
-      "id": "openssl",
-      "display_name": "OpenSSL 3（libssl-3-x64.dll / libcrypto-3-x64.dll）",
-      "license": "Apache-2.0（OpenSSL 3.x）",
-      "shipped_texts": [],
-      "linkage": "dynamic",
-      "status": "needs_text",
-      "notes": "Qt Networkのopensslバックエンド用にPySide6 wheelが同梱する。sdpはTLSを使わないため、除外できるかも検討する。",
-      "file_patterns": ["_internal/libssl-*.dll", "_internal/libcrypto-*.dll"]
     },
     {
       "id": "numpy",
@@ -103,11 +80,11 @@
     {
       "id": "mutagen",
       "display_name": "Mutagen",
-      "license": "GPL-2.0-or-later",
-      "shipped_texts": ["_internal/licenses/mutagen/COPYING"],
+      "license": "GPL-3.0-onlyとして利用（upstreamはGPL-2.0-or-later）",
+      "shipped_texts": ["_internal/licenses/mutagen/COPYING", "_internal/licenses/common/GPL-3.0.txt"],
       "linkage": "python-module",
-      "status": "needs_expert",
-      "notes": "「version 2 or later」のため、配布物全体をGPL-3.0の条件で頒布する解釈が取り得る（MIT・LGPL・PSF・BSDはいずれもGPL-3.0互換）。ただしその場合、配布物全体のソース提供義務が生じるかの判断が要る。回避したい場合はメタデータ読み取りをGPLでない実装へ置き換える選択肢がある。純Pythonのため分類対象のDLL・pydは持たない。",
+      "status": "needs_decision",
+      "notes": "sdpをGPL-3.0-onlyとしたためlicense互換性の判断は解決。外部公開時にMutagen 1.48.1の対応sourceをbinaryと同じ配布場所から取得可能にする必要がある。純Pythonのため分類対象のDLL・pydは持たない。",
       "file_patterns": []
     },
     {
@@ -121,19 +98,14 @@
       "file_patterns": []
     },
     {
-      "id": "msvc-runtime",
-      "display_name": "Microsoft Visual C++ Runtime（VCRUNTIME140*.dll / MSVCP140*.dll / ucrtbase.dll / api-ms-win-*）",
-      "license": "Microsoft Software License Terms（再頒布可能コンポーネント）",
-      "shipped_texts": [],
+      "id": "libffi",
+      "display_name": "libffi 3.4.6（CPython _ctypes dependency）",
+      "license": "MIT系ライセンス",
+      "shipped_texts": ["_internal/licenses/common/libffi-LICENSE.txt"],
       "linkage": "dynamic",
-      "status": "needs_decision",
-      "notes": "Visual Studioの再頒布条件に従う。GPL系と組み合わせる場合はsystem library例外の該当性も要確認。",
-      "file_patterns": [
-        "**/VCRUNTIME140*.dll",
-        "**/MSVCP140*.dll",
-        "_internal/ucrtbase.dll",
-        "_internal/api-ms-win-*.dll"
-      ]
+      "status": "resolved",
+      "notes": "uv PythonのBUILD=20260127に対応するpython-build-standalone sourceでversion 3.4.6と原文を確認済み。",
+      "file_patterns": ["_internal/libffi-*.dll"]
     }
   ]
 }

@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QSplitter,
     QTableView,
+    QWidget,
 )
 from pytestqt.qtbot import QtBot
 
@@ -42,6 +43,7 @@ from sdp.services.ui_state import (
 )
 from sdp.services.waveform_analysis import WaveformAnalysisService
 from sdp.ui import main_window as main_window_module
+from sdp.ui.legal_dialog import LegalDocumentDialog
 from sdp.ui.main_window import MainWindow
 from sdp.ui.player_controls import PlayerControls
 from sdp.ui.playlist_view import PlaylistView
@@ -125,6 +127,30 @@ def action_of(window: MainWindow, name: str) -> QAction:
     action = window.findChild(QAction, name)
     assert action is not None, name
     return action
+
+
+@pytest.mark.parametrize(
+    ("object_name", "accessible_name"),
+    [
+        ("fileNameLabel", "現在のファイル"),
+        ("playButton", "再生"),
+        ("pauseButton", "一時停止"),
+        ("stopButton", "停止"),
+        ("seekSlider", "再生位置"),
+        ("volumeSlider", "音量"),
+        ("muteButton", "ミュート"),
+        ("repeatModeButton", "リピート"),
+        ("shuffleButton", "シャッフル"),
+        ("playlistTable", "プレイリスト"),
+    ],
+)
+def test_core_controls_have_stable_accessible_names(
+    window: MainWindow, object_name: str, accessible_name: str
+) -> None:
+    """配布版UI Automationが座標や翻訳済み表示順へ依存せず操作できる。"""
+    widget = window.findChild(QWidget, object_name)
+    assert widget is not None, object_name
+    assert widget.accessibleName() == accessible_name
 
 
 # -- 依存の向き -------------------------------------------------------------
@@ -441,6 +467,42 @@ def test_open_action_opens_the_file_dialog(
     action_of(window, "openAction").trigger()
 
     assert backend.call_args("load") == [(audio_file.resolve(), 1)]
+
+
+@pytest.mark.parametrize(
+    ("action_name", "title", "expected"),
+    [
+        ("aboutAction", "sdpについて", "一切の保証がありません"),
+        ("showLicenseAction", "ライセンス", "GNU GENERAL PUBLIC LICENSE"),
+        ("showThirdPartyLicensesAction", "第三者ライセンス", "PySide6 / Qt / Shiboken"),
+    ],
+)
+def test_help_actions_show_legal_notices(
+    window: MainWindow, action_name: str, title: str, expected: str
+) -> None:
+    """Help menuからGPL告知・本文・第三者通知を読める。"""
+    action_of(window, action_name).trigger()
+
+    dialog = window.legal_dialog
+    assert isinstance(dialog, LegalDocumentDialog)
+    assert dialog.windowTitle() == title
+    assert expected in dialog.text
+
+
+def test_about_notice_points_to_license_and_corresponding_source(window: MainWindow) -> None:
+    """適切な法的告知から配布条件と対応sourceの文書名を確認できる。"""
+    action_of(window, "aboutAction").trigger()
+
+    dialog = window.legal_dialog
+    assert dialog is not None
+    for expected in (
+        "Copyright (C) 2026 sdp contributors",
+        "GNU General Public License version 3",
+        "LICENSE",
+        "THIRD_PARTY_NOTICES.txt",
+        "CORRESPONDING_SOURCE.md",
+    ):
+        assert expected in dialog.text
 
 
 # -- 設定（P6-A）------------------------------------------------------------

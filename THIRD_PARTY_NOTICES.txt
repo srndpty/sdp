@@ -2,25 +2,38 @@ sdp 配布物の第三者ソフトウェア
 ================================
 
 sdp の Windows onedir 配布物には、次のランタイムが含まれます。ライセンス原文は
-配布物の _internal/licenses/ 以下へ、インストール済みwheelまたはPython配布物からコピーします。
+配布物の _internal/licenses/ 以下へ、source管理下またはインストール済み配布物から収集します。
 本ファイルはライセンス原文の代替ではありません。
 
 - Python: Python Software Foundation License
   _internal/licenses/Python/LICENSE.txt
-- PySide6 / Qt / Shiboken: Qt for Pythonが配布するライセンス通知
+- PySide6 / Qt / Shiboken: GPL-3.0-onlyを選択
+  _internal/licenses/common/GPL-3.0.txt
+  Qt for Pythonが配布する追加通知:
   _internal/licenses/PySide6/、_internal/licenses/PySide6-Essentials/、
   _internal/licenses/PySide6-Addons/、_internal/licenses/shiboken6/
 - NumPy: BSD-3-Clauseおよび同梱コンポーネントのライセンス
   _internal/licenses/numpy/
 - Mutagen: GNU GPL version 2 or later
-  _internal/licenses/mutagen/
+  version 3を選択し、_internal/licenses/mutagen/ と
+  _internal/licenses/common/GPL-3.0.txt に原文を収録します。
+- FFmpeg 7.1.3: LGPL-2.1-or-later
+  _internal/licenses/common/LGPL-2.1.txt
+  FFmpegにはBSD、ISC、MIT、MPL-2.0等で許諾されたコードも含まれます。完全な
+  attributionと対応sourceは、binaryと同じreleaseへ置くsource archiveに含めます。
+- libffi 3.4.6: CPythonの_ctypesが利用するruntime（libffi-8.dll）
+  _internal/licenses/common/libffi-LICENSE.txt
 
 PyInstallerはビルドツールであり、PyInstallerのPython module自体はsdpの実行時配布物へ
 含めません。ただしbootloaderはsdp.exeへ組み込まれるため、例外付きGPLライセンス原文を
 _internal/licenses/pyinstaller/COPYING.txtへ同梱します。
 
 注意:
-現在のPySide6 wheelに含まれるQt関連ファイルは、環境によって商用ライセンス参照文だけの
-場合があります。外部配布前には、採用するQt/PySide6ライセンス形態を確定し、その条件に
-必要なLGPL/GPL等の原文、著作権表示、再リンク可能性などを別途監査してください。
+Qt/PySide6はopen sourceのGPL-3.0-onlyを選択しています。未使用のQt Virtual Keyboardと
+OpenSSL backend、Mesa llvmpipeの`opengl32sw.dll`は配布物から除外します。
+MSVC／Universal CRT DLLも同梱せず、Microsoft Visual C++ v14 Redistributable x64と
+Windows 11標準のUniversal CRTを前提とします。NumPy wheel内のハッシュ付きMSVCP import名は、
+配布時に標準の`MSVCP140.dll`参照へ戻します。変換手順は`CORRESPONDING_SOURCE.md`と
+`src/sdp/package_runtime.py`に記録します。外部公開前には、対応sourceをbinaryと同じ場所から
+取得できるようにする必要があります。
 P7-B1の成果物は開発・個人評価用であり、この監査完了をリリース準備完了とはみなしません。

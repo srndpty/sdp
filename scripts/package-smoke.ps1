@@ -37,11 +37,21 @@ function Invoke-PackagedSelftest {
         -FilePath (Join-Path $copiedPackage 'sdp.exe') `
         -ArgumentList '--selftest' `
         -PassThru `
-        -Wait `
         -WindowStyle Hidden
+    if (-not $process.WaitForExit(20000)) {
+        try {
+            $process.Kill()
+            $process.WaitForExit(5000) | Out-Null
+        }
+        finally {
+            $process.Dispose()
+        }
+        throw "$Label が20秒以内に終了しませんでした"
+    }
     if ($process.ExitCode -ne $ExpectedExitCode) {
         throw "$Label の終了コードが不正です（期待 $ExpectedExitCode、実際 $($process.ExitCode)）"
     }
+    $process.Dispose()
 }
 
 function Assert-MissingDependencyFails {

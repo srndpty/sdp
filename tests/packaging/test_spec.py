@@ -50,6 +50,8 @@ def test_spec_collects_metadata_and_only_declared_resources() -> None:
     assert 'copy_metadata("sdp")' in source
     assert '"LICENSE"' in source
     assert '"THIRD_PARTY_NOTICES.txt"' in source
+    assert '"CORRESPONDING_SOURCE.md"' in source
+    assert '"GPL-3.0.txt"' in source
     assert "collect_all" not in source
     assert "test_audio" not in source
     # assetsを参照してよいのはアプリアイコンだけ。テスト音源を収集しない。
@@ -57,6 +59,13 @@ def test_spec_collects_metadata_and_only_declared_resources() -> None:
     assert "if missing:" in source
     assert "必須ライセンスファイルを検出できません" in source
     assert "if not python_license.is_file():" in source
+    assert "qt6virtualkeyboard.dll" in source
+    assert "qopensslbackend.dll" in source
+    assert "opengl32sw.dll" in source
+    for runtime in ("vcruntime140", "msvcp140", "concrt140", "api-ms-win-", "ucrtbase.dll"):
+        assert runtime in source
+    assert "replace_hashed_msvc_imports(package_root)" in source
+    assert "NumPyのハッシュ付きMSVCP importを検出できません" in source
 
 
 def test_spec_embeds_icon_and_generated_version_resource() -> None:

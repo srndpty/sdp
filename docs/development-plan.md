@@ -347,8 +347,9 @@ Windows上の手動受け入れを残している。P7-B1（PyInstaller onedir�
   [testing-strategy.md §6.17](./testing-strategy.md)）。
   **未完了**: 可聴再生・波形／Spectrum／Peak RMSの実音確認、100%／150% DPI、
   SmartScreen表示、Windows Sandbox等のクリーン環境、Python未導入環境。
-  **外部配布ブロッカー**: Qt/PySide6のLGPL原文同梱と配布形態の決定、FFmpeg／OpenSSLの
-  原文、MutagenのGPL波及範囲（[distribution-licenses.md](./distribution-licenses.md)）。
+  **外部配布ブロッカー**: GPL-3.0-only方針とMesa／MSVC runtime除外は決定済み。
+  対応source archiveとPySide6／Qt binaryとの対応根拠
+  （[distribution-licenses.md](./distribution-licenses.md)）。
 - **P7-C進捗**: Inno Setup 6のper-user installer（`packaging/installer.iss`）、
   `scripts/{build-installer,installer-smoke}.ps1`、自作app icon（`assets/sdp.ico`、
   7解像度）、Windows version resource、スタートメニューと任意のデスクトップ
@@ -366,8 +367,7 @@ Windows上の手動受け入れを残している。P7-B1（PyInstaller onedir�
   **未完了**: UAC非表示・Apps & Features表示・関連付け経由のダブルクリック・
   旧version→新versionのupgrade・DPI・Sandbox／新規ユーザー・SmartScreenの手動確認。
   **ライセンスの未解決事項が残るあいだ、installerは技術検証用に留め、公開可能とは扱わない。**
-- **残るreleaseブロッカー**: (1) Qt/PySide6のLGPL原文同梱と配布形態の決定、
-  FFmpeg／OpenSSLの原文、MutagenのGPL波及範囲
+- **残るreleaseブロッカー**: (1) 対応source archiveとPySide6／Qt binaryとの対応根拠
   （[distribution-licenses.md](./distribution-licenses.md)）、
   (2) P3・P4-B・P6-C・P7-A・P7-B2・P7-Cの手動受け入れ、
   (3) コード署名なしによるSmartScreen警告の扱い。

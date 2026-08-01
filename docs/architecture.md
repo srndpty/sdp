@@ -69,6 +69,7 @@ sdp/
 │   │   └── logging_setup.py  # RotatingFileHandler、Qt ログ統合、未捕捉例外処理
 │   └── ui/
 │       ├── main_window.py    # レイアウト骨格・メニュー・ドック配置のみ（god class 禁止）
+│       ├── legal_dialog.py   # GPL告知・ライセンス文書の読み取り専用表示
 │       ├── player_controls.py# 再生ボタン群・シークバー・音量・時間表示
 │       ├── speed_panel.py    # 速度スライダー・プリセット・ピッチ補正トグル
 │       ├── playlist_view.py  # QTableView と D&D、コンテキストメニュー
@@ -1481,7 +1482,7 @@ P7-A の単一 instance 転送により既存 Window のプレイリストへ追
 - `resources.py`は開発時にrepository root、frozen時にexe directoryと`_internal`を区別する。
   ユーザーデータは従来どおり`%LOCALAPPDATA%/sdp`であり、exe隣へ保存しない。
 - テスト音源、pytest、Ruff、Pyright等の開発物は同梱しない。
-- 配布物にsdpのMIT License、第三者通知、wheelから収集したライセンス原文を含める。
+- 配布物にsdpのGPL-3.0-only、第三者通知、wheelとsource管理下から収集したライセンス原文を含める。
 
 PySide6 6.10.3の標準hookによるP7-B1実測では、`ffmpegmediaplugin.dll`と
 `windowsmediaplugin.dll`、FFmpegのavcodec／avformat／avutil／swresample／swscale DLLを
@@ -1497,7 +1498,7 @@ Qt tempへ生成し、FFmpeg backendを明示した`QAudioDecoder`で最低1buff
 成功0、依存または書き込み失敗1、不正引数2を返す。これは音を出さずにplugin loadを診断するが、
 実音や圧縮形式を含む全codecの受け入れは代替しない。
 
-layout検査はFFmpeg／Windows media plugin、FFmpeg runtime DLL、VC Runtimeに加え、宣言した
+layout検査はFFmpeg／Windows media plugin、FFmpeg runtime DLLに加え、宣言した
 project／Python／PySide6／NumPy／Mutagen／PyInstallerのライセンス文書を必須にする。specも
 必須ライセンス原文をwheelから検出できない場合はbuildを失敗させ、欠落した配布物を作らない。
 
@@ -1623,7 +1624,7 @@ P7-B2の要件にしない。
 - specは`packaging/windows-version-info.txt`をbuild時に展開して
   `build/`（git管理外）へ書き、`EXE(version=...)`へ渡す。
 - `assets/sdp.ico`は7解像度を持つ自作アイコン（`tools/gen_app_icon.py`が
-  標準ライブラリだけで生成。第三者素材なし、MIT）。exe・installer・uninstaller・
+  標準ライブラリだけで生成。第三者素材なし、GPL-3.0-only）。exe・installer・uninstaller・
   ショートカット・Apps & Featuresの表示に使う。
 
 #### 検査

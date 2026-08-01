@@ -111,6 +111,7 @@ class PlaylistView(QWidget):
 
         self._table = PlaylistTableView()
         self._table.setObjectName("playlistTable")
+        self._table.setAccessibleName("プレイリスト")
         self._table.setModel(model)
         self._delegate = PlaylistEntryDelegate(self._table)
         self._table.setItemDelegate(self._delegate)
@@ -118,10 +119,13 @@ class PlaylistView(QWidget):
 
         self._add_button = QPushButton("ファイルを追加...")
         self._add_button.setObjectName("addFilesButton")
+        self._add_button.setAccessibleName("ファイルを追加")
         self._remove_button = QPushButton("選択項目を削除")
         self._remove_button.setObjectName("removeSelectedButton")
+        self._remove_button.setAccessibleName("選択項目を削除")
         self._clear_button = QPushButton("すべて消去")
         self._clear_button.setObjectName("clearPlaylistButton")
+        self._clear_button.setAccessibleName("プレイリストを全消去")
         self._count_label = QLabel()
         self._count_label.setObjectName("playlistCountLabel")
 

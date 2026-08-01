@@ -309,9 +309,17 @@ PyInstaller 6の`onedir`形式で、consoleを表示しない`dist\sdp\sdp.exe`�
 Pythonやuvをインストールしていない環境でも、このディレクトリ全体を維持すれば起動できる。
 `sdp.exe`だけを`_internal`から切り離してコピーしてはならない。
 
+実行環境はWindows 11 x64と、Microsoft Visual C++ v14 Redistributable x64を必要とする。
+sdpはMSVC／Universal CRTのDLLを同梱しない。`VCRUNTIME140.dll`または`MSVCP140.dll`が
+見つからないと表示される場合は、[Microsoft公式の最新サポート対象Visual C++
+Redistributable](https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist)を
+インストールする。installerは導入済みかを確認するだけで、Redistributableの同梱・
+自動install・UAC昇格は行わない。
+
 ```powershell
 pwsh -File scripts/build-package.ps1
 pwsh -File scripts/package-smoke.ps1
+pwsh -File scripts/package-gui-smoke.ps1
 ```
 
 ビルドスクリプトは以前の`build`／`dist`を安全確認後に削除し、
@@ -486,7 +494,7 @@ uv run python tools/installer_contract.py
 
 `assets/sdp.ico`（16／24／32／48／64／128／256px）はフォントやクリップアート等の
 第三者素材を使わず、`tools/gen_app_icon.py`の図形描画だけで生成した自作物で、
-sdp本体と同じMIT Licenseで扱える。再生成する場合のみ次を実行する（追加依存は不要）。
+sdp本体と同じGPL-3.0-onlyで扱う。再生成する場合のみ次を実行する（追加依存は不要）。
 
 ```powershell
 uv run python tools/gen_app_icon.py
@@ -566,4 +574,9 @@ FFmpeg CLI はテスト音源生成用の開発ツールであり、sdp 本体�
 
 ## ライセンス
 
-MIT
+sdpのcombined workはGPL-3.0-onlyで配布する。
+過去にMIT Licenseで公開された部分は、元の条件でも引き続き利用できる。
+[LICENSES/MIT.txt](./LICENSES/MIT.txt)とgit履歴を参照する。
+
+配布物に含まれる第三者componentと、対応source公開前の残課題は
+[docs/distribution-licenses.md](./docs/distribution-licenses.md)を参照する。
