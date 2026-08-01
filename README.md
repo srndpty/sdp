@@ -26,9 +26,8 @@ Defenderスキャンまで確認した。実音・実画面の受け入れ（可
 クリーン環境）と外部配布ライセンスの未解決事項は残っており、
 **外部公開可能な配布物とは扱わない**（[docs/distribution-licenses.md](./docs/distribution-licenses.md)）。
 
-P7-C（Inno Setupのper-userインストーラーとWindows関連付け）は実装・自動検証済み。
-silent install／same-version reinstall／upgrade失敗時の旧版復元／起動中の
-upgrade・uninstall中止／uninstallまでを実プロファイル上で通しで確認した
+P7-C（Inno Setupのper-machineインストーラーとWindows関連付け）は実装・自動検証済み。
+Program Files配置・HKLM登録へ変更後のinstaller smokeは未実施で、手動ゲートとして残っている
 （[installer smoke](#installerの動作確認)）。
 インストーラーも**ライセンスの未解決事項が残るあいだは技術検証用**であり、
 公開配布物として扱わない。
@@ -424,13 +423,17 @@ release/
 
 | 項目 | 内容 |
 |---|---|
-| 方式 | per-user（管理者権限・UAC昇格なし。Program Filesへ書かない） |
-| インストール先 | `%LOCALAPPDATA%\Programs\sdp` |
+| 方式 | per-machine（管理者権限・UAC昇格あり） |
+| インストール先 | `%ProgramFiles%\sdp` |
 | ユーザーデータ | `%LOCALAPPDATA%\sdp`（**インストール先とは別。上書きも削除もしない**） |
 | スタートメニュー | `sdp`（標準で作成） |
 | デスクトップ | 任意（インストーラーのチェックボックス。既定はオフ） |
-| レジストリ | HKCUのみ（`Software\Classes\sdp.AudioFile`、`Software\Classes\Applications\sdp.exe`、各拡張子の`OpenWithProgids`、`Software\sdp\Capabilities`、`Software\RegisteredApplications`） |
+| レジストリ | HKLMのみ（`Software\Classes\sdp.AudioFile`、`Software\Classes\Applications\sdp.exe`、各拡張子の`OpenWithProgids`、`Software\sdp\Capabilities`、`Software\RegisteredApplications`） |
 | 関連付け候補 | `.wav` `.mp3` `.flac` `.ogg` `.opus` `.m4a` `.aac`（ProgIDは`sdp.AudioFile`の1つ） |
+
+旧per-user版（`%LOCALAPPDATA%\Programs\sdp`）が導入済みの場合は、Program Files版を
+インストールする前に「アプリと機能」から旧版をアンインストールする。HKCUとHKLMでは
+アンインストール登録が別になるため、旧版を残したままでは二重インストールになる。
 
 ### 既定のアプリは変更しない
 
@@ -441,9 +444,9 @@ sdpは**「プログラムから開く」の候補として登録するだけ**�
 
 ### アンインストール
 
-「アプリと機能」または`%LOCALAPPDATA%\Programs\sdp\unins000.exe`から実行する。
+「アプリと機能」または`%ProgramFiles%\sdp\unins000.exe`から実行する。
 削除されるのはインストールしたファイル、ショートカット、インストーラーが作成した
-HKCUの登録、アンインストーラー自身だけである。
+HKLMの登録、アンインストーラー自身だけである。
 
 **設定・プレイリスト・UI状態・波形キャッシュ・ログは削除しない。**
 再インストールするとそのまま引き継がれる。手動で消す場合は次を削除する。
@@ -471,18 +474,18 @@ sdpを終了してからやり直すこと。ファイルの権限やセキュ�
 ### installerの動作確認
 
 ```powershell
-pwsh -File scripts/installer-smoke.ps1 -ConfirmProfileChanges
+pwsh -File scripts/installer-smoke.ps1 -ConfirmMachineChanges
 ```
 
 既存sdp.exeを含むディレクトリへの初回install（誤削除しないこと）→ silent install →
 install済みexeのselftestとcodec test → same-version reinstall →
 更新失敗時の旧版復元 → 起動中のupgrade・uninstallが中止されること → uninstall →
 ユーザーデータ保持、までを自動で確認する（136項目）。
-**実行ユーザーのプロファイル（`%LOCALAPPDATA%`、HKCU、
-スタートメニュー）を実際に変更する**ため`-ConfirmProfileChanges`を必須にしており、
-CIからは実行しない。可能ならWindows Sandboxか検証用の新規Windowsユーザーで実行する。
+**マシン全体（`%ProgramFiles%`、HKLM、全ユーザー用スタートメニュー）を実際に変更する**ため、
+管理者として起動したPowerShellと`-ConfirmMachineChanges`を必須にしている。
+CIからは実行しない。可能ならWindows Sandboxか検証用マシンで実行する。
 
-Inno Setup compilerが無くても、installer scriptの契約（per-user、HKCUのみ、
+Inno Setup compilerが無くても、installer scriptの契約（per-machine、HKLMのみ、
 UserChoice非変更、対象7拡張子、uninstall時のユーザーデータ保持など）は
 pytestと次のコマンドで検査できる。
 

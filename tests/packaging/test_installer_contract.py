@@ -1,6 +1,6 @@
 """Inno Setup scriptのparserと、installer契約の検査を検証する。
 
-Inno Setup compilerが無い環境でも、per-user／HKCUのみ／既定アプリ非変更／
+Inno Setup compilerが無い環境でも、per-machine／HKLMのみ／既定アプリ非変更／
 uninstall時のユーザーデータ保持といった契約を確認できるようにする。
 """
 
@@ -100,14 +100,13 @@ def test_real_installer_satisfies_the_contract(script: InnoScript) -> None:
     assert validate_installer_contract(script) == ()
 
 
-def test_installer_is_per_user_without_elevation(script: InnoScript) -> None:
-    """per-userで、UAC昇格もコマンドラインからの昇格指定も要求しない。"""
-    assert script.setup("PrivilegesRequired") == "lowest"
+def test_installer_is_per_machine_with_elevation(script: InnoScript) -> None:
+    """per-machineでUAC昇格を要求し、Program Filesへ導入する。"""
+    assert script.setup("PrivilegesRequired") == "admin"
     assert script.setup("PrivilegesRequiredOverridesAllowed") == ""
     assert install_directory(script) == INSTALL_DIRECTORY
-    assert "Program Files" not in script.source
-    assert "{commonpf" not in script.source
-    assert "{autopf" not in script.source
+    assert "{autopf}" in script.source
+    assert "{localappdata}\\Programs" not in script.source
 
 
 def test_app_id_is_stable_and_version_independent(script: InnoScript) -> None:
@@ -139,9 +138,9 @@ def test_files_come_from_the_verified_package_only(script: InnoScript) -> None:
     assert "sine440" not in script.source
 
 
-def test_registry_writes_stay_in_hkcu(script: InnoScript) -> None:
-    """registry書き込みはHKCUだけ。HKLMは前提runtimeの読み取りに限る。"""
-    assert registry_roots(script.section_entries("registry")) == ("HKCU",)
+def test_registry_writes_stay_in_hklm(script: InnoScript) -> None:
+    """registry書き込みはHKLMだけに限定する。"""
+    assert registry_roots(script.section_entries("registry")) == ("HKLM",)
 
 
 def test_default_application_is_never_taken(script: InnoScript) -> None:
@@ -151,7 +150,7 @@ def test_default_application_is_never_taken(script: InnoScript) -> None:
         assert term not in body
 
 
-def test_vc_runtime_is_checked_without_elevation_or_bundling(script: InnoScript) -> None:
+def test_vc_runtime_is_checked_without_bundling(script: InnoScript) -> None:
     """VC++ v14 x64をHKLMから読み、不足時は公式案内を出して中止する。"""
     assert "function IsVCRuntimeInstalled" in script.code
     assert r"SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" in script.code
@@ -236,7 +235,7 @@ def test_start_menu_is_default_and_desktop_shortcut_is_optional(script: InnoScri
     assert len(icons) == 2
     start_menu = next(entry for entry in icons if (entry.value("Name") or "").startswith("{group}"))
     desktop = next(
-        entry for entry in icons if (entry.value("Name") or "").startswith("{userdesktop}")
+        entry for entry in icons if (entry.value("Name") or "").startswith("{autodesktop}")
     )
     assert start_menu.value("Tasks") is None
     assert desktop.value("Tasks") == "desktopicon"
@@ -332,16 +331,16 @@ def _mutate(source: str, old: str, new: str) -> tuple[str, ...]:
 @pytest.mark.parametrize(
     ("old", "new", "expected"),
     [
-        ("PrivilegesRequired=lowest", "PrivilegesRequired=admin", "PrivilegesRequired=lowest"),
+        ("PrivilegesRequired=admin", "PrivilegesRequired=lowest", "PrivilegesRequired=admin"),
         (
+            "DefaultDirName={autopf}\\{#AppName}",
             "DefaultDirName={localappdata}\\Programs\\{#AppName}",
-            "DefaultDirName={commonpf}\\{#AppName}",
             "DefaultDirName",
         ),
         (
-            'Root: HKCU; Subkey: "Software\\Classes\\{#ProgId}";',
             'Root: HKLM; Subkey: "Software\\Classes\\{#ProgId}";',
-            "HKLM",
+            'Root: HKCU; Subkey: "Software\\Classes\\{#ProgId}";',
+            "HKCU",
         ),
         ("AppVersion={#AppVersion}", "AppVersion=0.0.1", "AppVersion"),
         ("Flags: unchecked", "Flags: checkedonce", "desktopicon"),
@@ -423,7 +422,7 @@ def _mutate(source: str, old: str, new: str) -> tuple[str, ...]:
         ("技術検証用です", "公開用です", "技術検証用"),
         ("設定・プレイリスト・キャッシュは保持されます", "削除します", "保持"),
         # shortcut
-        ('Name: "{userdesktop}\\{#AppName}"', 'Name: "{userstartup}\\{#AppName}"', "desktop"),
+        ('Name: "{autodesktop}\\{#AppName}"', 'Name: "{userstartup}\\{#AppName}"', "desktop"),
         ("; Tasks: desktopicon", "", "desktop shortcut"),
     ],
 )
@@ -438,7 +437,7 @@ def test_contract_violations_are_reported(old: str, new: str, expected: str) -> 
 def test_user_choice_write_is_reported() -> None:
     """UserChoiceへの書き込みを追加すると検査が落ちる。"""
     source = _INSTALLER.read_text(encoding="utf-8") + (
-        "\n[Registry]\nRoot: HKCU; "
+        "\n[Registry]\nRoot: HKLM; "
         'Subkey: "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts'
         '\\.wav\\UserChoice"; ValueType: string; ValueName: "ProgId"; ValueData: "sdp.AudioFile"\n'
     )

@@ -21,10 +21,10 @@ from sdp.installer_contract import (
 )
 
 INSTALLER_MANIFEST_SCHEMA_VERSION: Final = 1
-INSTALL_SCOPE: Final = "per-user"
-INSTALL_PRIVILEGES: Final = "lowest"
+INSTALL_SCOPE: Final = "per-machine"
+INSTALL_PRIVILEGES: Final = "admin"
 DEFAULT_APPLICATION_POLICY: Final = "not-modified"
-REGISTRY_SCOPE: Final = "HKCU"
+REGISTRY_SCOPE: Final = "HKLM"
 DISTRIBUTION_STATUS: Final = "technical-verification-only"
 """ライセンス未解決事項が残るため、公開配布物ではないことをmanifestにも残す。"""
 

@@ -33,7 +33,7 @@ Windows 11 向け個人用ローカル音声プレイヤー sdp (sound player) �
 | 項目 | 既定値 | 根拠 |
 |---|---|---|
 | 設定・プレイリスト永続化 | JSON ファイル（レジストリではない） | 可搬性と手編集のしやすさ |
-| パッケージング | PyInstaller onedir + Inno Setup（per-user） | 起動速度と AV 誤検知の観点で onefile より有利 |
+| パッケージング | PyInstaller onedir + Inno Setup（per-machine） | 起動速度と AV 誤検知の観点で onefile より有利。Program Filesへ配置し、関連付けをマシン単位で登録する |
 | 波形キャッシュ形式 | NumPy `.npz`、上限 500MB の LRU | 実装が単純で NumPy 以外の依存が不要 |
 | UI状態の保存 | `ui-state.json`（settings.jsonとは別ファイル、schema version 2、v1読込可、整数値で保存） | v2で現在曲の`entry_id`を追加する。v1は現在曲なしで補完し、読み込みだけでは移行保存しない。base64のsaveGeometryは手編集・DPI差・画面外補正に不利なため採らない |
 | 設定schema | JSON、schema version 3（v1／v2も読み込み可） | 古いversionに無い項目は既定値で補い、次の変更時に現在のversionで保存する。起動しただけでは書き換えない |
@@ -327,7 +327,7 @@ P6-C（UX仕上げと破損・失敗時の統合確認）**の3つへ分割す�
 P7-A（起動引数と単一instance）は実装・自動テスト済みで、
 Windows上の手動受け入れを残している。P7-B1（PyInstaller onedirビルドとselftest）、
 **P7-B2（配布版の実環境検証とZIPリリース生成）は完了**、
-**P7-C（Inno Setupのper-user installerとWindows関連付け）は実装・自動検証済み**で、
+**P7-C（Inno Setupのper-machine installerとWindows関連付け）は実装・自動検証済み**で、
 いずれも実画面・実音の手動受け入れと、外部配布ライセンスの未解決事項を残している。
 
 ### P7: Windows 統合と配布（P7-A: 単一instanceと引数、P7-B: パッケージとインストーラー）
@@ -350,7 +350,7 @@ Windows上の手動受け入れを残している。P7-B1（PyInstaller onedir�
   **外部配布ブロッカー**: GPL-3.0-only方針とMesa／MSVC runtime除外は決定済み。
   対応source archiveとPySide6／Qt binaryとの対応根拠
   （[distribution-licenses.md](./distribution-licenses.md)）。
-- **P7-C進捗**: Inno Setup 6のper-user installer（`packaging/installer.iss`）、
+- **P7-C進捗**: Inno Setup 6のper-machine installer（`packaging/installer.iss`）、
   `scripts/{build-installer,installer-smoke}.ps1`、自作app icon（`assets/sdp.ico`、
   7解像度）、Windows version resource、スタートメニューと任意のデスクトップ
   ショートカット、「プログラムから開く」登録、7拡張子のProgID（`sdp.AudioFile`）、
@@ -358,13 +358,14 @@ Windows上の手動受け入れを残している。P7-B1（PyInstaller onedir�
   `sdp/installer_contract.py`）を実装した。
   upgradeのcleanupは固定AppIdの登録済みinstall先に限定し、旧runtimeは削除ではなく
   `.upgrade-backup`へ退避して、展開失敗・中止時に復元する。
-  installer smokeで silent install／install済みselftest・codec test／
+  per-user版ではinstaller smokeで silent install／install済みselftest・codec test／
   same-version reinstall／**既存sdp.exeを含むdirectoryへの初回installで誤削除しないこと**／
   **cleanup後の展開失敗からの旧版復元**／**起動中のupgrade・uninstallの中止**／uninstall／
-  **ユーザーデータ保持**／**UserChoice非変更**の136項目を実測した
+  **ユーザーデータ保持**／**UserChoice非変更**の136項目を実測した。
+  per-machine化後の同じsmokeは未実施
   （[architecture.md §11、§12.5](./architecture.md)、
   [testing-strategy.md §6.18](./testing-strategy.md)）。
-  **未完了**: UAC非表示・Apps & Features表示・関連付け経由のダブルクリック・
+  **未完了**: per-machine installer smoke・UAC昇格表示・Apps & Features表示・関連付け経由のダブルクリック・
   旧version→新versionのupgrade・DPI・Sandbox／新規ユーザー・SmartScreenの手動確認。
   **ライセンスの未解決事項が残るあいだ、installerは技術検証用に留め、公開可能とは扱わない。**
 - **残るreleaseブロッカー**: (1) 対応source archiveとPySide6／Qt binaryとの対応根拠

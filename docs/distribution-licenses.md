@@ -31,7 +31,7 @@ release gateを管理するための資料である。
   ハッシュ付きMSVCP import名を標準の`MSVCP140.dll`へ戻し、処理前wheel、変換実装、lockfile、
   生成物hashを対応source資料へ含める。
   installerはHKLMを読み取って導入済みか確認し、不足時は公式ページを案内して中止する。
-  Redistributable自体は同梱・自動実行せず、per-user／UACなしの契約を維持する。
+  Redistributable自体は同梱・自動実行せず、per-machine installerが導入済みか確認する。
 - **libffi 3.4.6**: uvが使用するpython-build-standaloneの`BUILD=20260127`に対応する
   build sourceでversionと原文を確認し、原文を同梱する。
 - **原文**: GPL-3.0、LGPL-3.0、LGPL-2.1、Apache-2.0、libffiの原文を

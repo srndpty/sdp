@@ -116,8 +116,9 @@ def test_build_script_states_the_build_is_for_technical_verification(build_scrip
 
 
 def test_smoke_script_requires_explicit_confirmation(smoke_script: str) -> None:
-    """実プロファイルを変更するため、専用フラグを必須にする。"""
-    assert "ConfirmProfileChanges" in smoke_script
+    """マシン全体を変更するため、専用フラグと管理者権限を必須にする。"""
+    assert "ConfirmMachineChanges" in smoke_script
+    assert "WindowsBuiltInRole]::Administrator" in smoke_script
     assert "CIから無条件に実行しないでください" in smoke_script
 
 
@@ -131,7 +132,7 @@ def test_smoke_script_checks_the_full_install_lifecycle(smoke_script: str) -> No
         "install directoryが削除された",
         "ユーザーデータのファイルが保持されている",
         "sdp processが残っていない",
-        "HKLMへ書いていない",
+        "HKCUへ書いていない",
         "upgrade時に不要になったファイルが残らない",
         "初回install先の無関係ファイルが保持されている",
         "既存sdp.exeを含むdirectoryへの初回install",
@@ -179,4 +180,4 @@ def test_smoke_script_refuses_to_run_without_confirmation(tmp_path: Path) -> Non
     )
 
     assert completed.returncode != 0
-    assert "ConfirmProfileChanges" in completed.stderr
+    assert "ConfirmMachineChanges" in completed.stderr

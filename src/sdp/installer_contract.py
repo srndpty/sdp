@@ -6,8 +6,8 @@
 
 検査する主な契約:
 
-- per-user（``{localappdata}\\Programs\\sdp``）で、UAC昇格を要求しない
-- registryへの書き込みはHKCUだけ。HKLMはVC++ Runtimeの導入確認で読み取るだけ
+- per-machine（``{autopf}\\sdp``）で、UAC昇格を要求する
+- registryへの書き込みはHKLMだけ
 - 「プログラムから開く」候補として登録するが、既定アプリは変更しない
 - uninstallでユーザーデータ（``%LOCALAPPDATA%\\sdp``）を削除しない
 - versionと入力配布物を外部から注入し、.issへ手書きしない
@@ -25,8 +25,8 @@ from sdp.inno_script import InnoEntry, InnoScript
 
 APP_ID: Final = "{8F3B7C21-5D4E-4A96-9C2F-1E7A6B0D3F58}"
 PROG_ID: Final = "sdp.AudioFile"
-INSTALL_DIRECTORY: Final = r"{localappdata}\Programs\sdp"
-INSTALL_DIRECTORY_DISPLAY: Final = r"%LOCALAPPDATA%\Programs\sdp"
+INSTALL_DIRECTORY: Final = r"{autopf}\sdp"
+INSTALL_DIRECTORY_DISPLAY: Final = r"%ProgramFiles%\sdp"
 USER_DATA_DIRECTORY_DISPLAY: Final = r"%LOCALAPPDATA%\sdp"
 OPEN_COMMAND: Final = r'"{app}\sdp.exe" "%1"'
 ICON_REFERENCE: Final = r"{app}\sdp.exe,0"
@@ -62,8 +62,7 @@ copy／obsolete一覧）や中間ファイル名は契約に含めない。こ�
 
 _APPLICATIONS_KEY: Final = r"Software\Classes\Applications\sdp.exe"
 _CAPABILITIES_KEY: Final = r"Software\sdp\Capabilities"
-# コメント以外の行に現れてはならない語（既定アプリの奪取とmachine全体への書き込みの防止）。
-# HKLMはVC++ Runtimeの読み取りに限って許容し、[Registry]のroot検査で書き込みを拒否する。
+# コメント以外の行に現れてはならない語（既定アプリの奪取と曖昧なroot指定の防止）。
 _FORBIDDEN_TERMS: Final = (
     "UserChoice",
     "FileExts",
@@ -131,12 +130,12 @@ def validate_installer_contract(script: InnoScript) -> tuple[str, ...]:
 
 def _check_scope(script: InnoScript) -> list[str]:
     failures: list[str] = []
-    if script.setup("PrivilegesRequired") != "lowest":
-        failures.append("PrivilegesRequired=lowest ではありません（per-user installでなくなる）")
+    if script.setup("PrivilegesRequired") != "admin":
+        failures.append("PrivilegesRequired=admin ではありません（per-machine installでなくなる）")
     if script.setup("PrivilegesRequiredOverridesAllowed") != "":
         failures.append(
             "PrivilegesRequiredOverridesAllowed が空ではありません"
-            "（コマンドラインからの昇格を許してしまう）"
+            "（install scopeをコマンドラインから変更できてしまう）"
         )
     if install_directory(script) != INSTALL_DIRECTORY:
         failures.append(
@@ -199,8 +198,8 @@ def _check_registry(script: InnoScript) -> list[str]:
         return ["[Registry]の登録がありません"]
 
     roots = {(entry.value("Root") or "").upper() for entry in entries}
-    if roots != {"HKCU"}:
-        failures.append(f"[Registry]のRootがHKCU以外を含みます: {sorted(roots)}")
+    if roots != {"HKLM"}:
+        failures.append(f"[Registry]のRootがHKLM以外を含みます: {sorted(roots)}")
     failures.extend(_check_forbidden_terms(script))
 
     failures.extend(
@@ -303,7 +302,7 @@ def _check_shortcuts(script: InnoScript) -> list[str]:
     icons = script.section_entries("icons")
     start_menu = [entry for entry in icons if (entry.value("Name") or "").startswith("{group}\\")]
     desktop = [
-        entry for entry in icons if (entry.value("Name") or "").startswith("{userdesktop}\\")
+        entry for entry in icons if (entry.value("Name") or "").startswith("{autodesktop}\\")
     ]
     if len(start_menu) != 1:
         failures.append(f"スタートメニューshortcutが1件ではありません: {len(start_menu)}件")

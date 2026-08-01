@@ -64,15 +64,15 @@ def test_manifest_records_the_install_contract() -> None:
     assert manifest["platform"] == "windows"
     assert manifest["architecture"] == "x86_64"
     assert manifest["installer"] == "inno-setup"
-    assert manifest["scope"] == "per-user"
-    assert manifest["privileges"] == "lowest"
-    assert manifest["registry_scope"] == "HKCU"
+    assert manifest["scope"] == "per-machine"
+    assert manifest["privileges"] == "admin"
+    assert manifest["registry_scope"] == "HKLM"
     assert manifest["app_id"] == APP_ID
     assert manifest["prog_id"] == PROG_ID
     assert manifest["file_associations"] == list(AUDIO_FILE_EXTENSIONS)
     assert manifest["default_application"] == "not-modified"
     assert manifest["user_data_removed_on_uninstall"] is False
-    assert manifest["install_directory"] == r"%LOCALAPPDATA%\Programs\sdp"
+    assert manifest["install_directory"] == r"%ProgramFiles%\sdp"
     assert manifest["user_data_directory"] == r"%LOCALAPPDATA%\sdp"
 
 
