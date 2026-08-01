@@ -1,4 +1,4 @@
-# sdpのWindows per-user installer（Inno Setup 6.3以降）を、検証込みで生成する。
+# sdpのWindows per-machine installer（Inno Setup 6.3以降）を、検証込みで生成する。
 #
 #   pwsh -File scripts/build-installer.ps1
 #   pwsh -File scripts/build-installer.ps1 -SkipBuild            # 既存のrelease成果物を使う

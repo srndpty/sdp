@@ -1,39 +1,49 @@
-# sdp installerのinstall／upgrade／uninstall契約を、実Windowsユーザープロファイル上で検査する。
+# sdp installerのinstall／upgrade／uninstall契約を、実Windows環境上で検査する。
 #
-#   pwsh -File scripts/installer-smoke.ps1 -ConfirmProfileChanges
+#   管理者として起動したPowerShellで:
+#   pwsh -File scripts/installer-smoke.ps1 -ConfirmMachineChanges
+#   既存machine-wide版を置き換える場合だけ:
+#   pwsh -File scripts/installer-smoke.ps1 -ConfirmMachineChanges -AllowReplaceExistingInstall
 #
-# **このscriptは実行ユーザーのプロファイルを変更する。**
-#   - %LOCALAPPDATA%\Programs\sdp へinstall／uninstallする
-#   - HKCU配下のsdp関連キーを作成・削除する
-#   - スタートメニュー／デスクトップのsdpショートカットを作成・削除する
+# **このscriptはマシン全体のインストール状態を変更する。**
+#   - %ProgramFiles%\sdp へinstall／uninstallする
+#   - HKLM配下のsdp関連キーを作成・削除する
+#   - 全ユーザー用スタートメニュー／デスクトップのsdpショートカットを作成・削除する
 #   - 既にsdpをinstallしている場合、その導入は置き換えられ、最後に削除される
-# そのため -ConfirmProfileChanges を必須にしており、CIから無条件に実行してはならない。
-# 可能ならWindows Sandboxか検証用の新規Windowsユーザーで実行する。
+# そのため -ConfirmMachineChanges を必須にしており、CIから無条件に実行してはならない。
+# 原則としてWindows Sandboxまたは破棄可能な検証用VMで実行する。
 #
-# 変更しないもの: %LOCALAPPDATA%\sdp（ユーザーデータ）、HKLM、UserChoice（既定アプリ）。
+# 変更しないもの: %LOCALAPPDATA%\sdp（ユーザーデータ）、UserChoice（既定アプリ）。
 
 [CmdletBinding()]
 param(
-    [switch]$ConfirmProfileChanges,
+    [switch]$ConfirmMachineChanges,
+    [switch]$AllowReplaceExistingInstall,
     [string]$SetupExecutable
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-if (-not $ConfirmProfileChanges) {
+if (-not $ConfirmMachineChanges) {
     throw @'
-このscriptは実行ユーザーのプロファイル（%LOCALAPPDATA%、HKCU、スタートメニュー）を変更します。
-内容を確認したうえで -ConfirmProfileChanges を付けて実行してください。
+このscriptはマシン全体（%ProgramFiles%、HKLM、全ユーザー用ショートカット）を変更します。
+内容を確認したうえで -ConfirmMachineChanges を付けて実行してください。
 CIから無条件に実行しないでください。
 '@
+}
+
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = [Security.Principal.WindowsPrincipal]::new($identity)
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw 'installer smokeは管理者として起動したPowerShellから実行してください。'
 }
 
 $repoRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $appId = '{8F3B7C21-5D4E-4A96-9C2F-1E7A6B0D3F58}'
 $progId = 'sdp.AudioFile'
 $extensions = @('.wav', '.mp3', '.flac', '.ogg', '.opus', '.m4a', '.aac')
-$installDirectory = Join-Path $env:LOCALAPPDATA 'Programs\sdp'
+$installDirectory = Join-Path $env:ProgramFiles 'sdp'
 $userDataDirectory = Join-Path $env:LOCALAPPDATA 'sdp'
 # 実行ごとに固有名にして、途中終了した過去の実行の残骸と取り違えないようにする。
 $smokeRunId = [Guid]::NewGuid().ToString('N')
@@ -41,9 +51,10 @@ $markerFileName = "installer-smoke-marker-$smokeRunId.txt"
 $rollbackMarkerFileName = "installer-smoke-rollback-marker-$smokeRunId.txt"
 $markerFile = Join-Path $userDataDirectory $markerFileName
 $rollbackMarkerFile = Join-Path $userDataDirectory $rollbackMarkerFileName
-$startMenuShortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\sdp\sdp.lnk'
-$desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'sdp.lnk'
-$uninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\${appId}_is1"
+$startMenuShortcut = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'sdp\sdp.lnk'
+$desktopShortcut = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'sdp.lnk'
+$uninstallKey = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\${appId}_is1"
+$legacyUninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\${appId}_is1"
 $userChoiceRoot = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts'
 $codecFixtureNames = @(
     'sine440.wav', 'sine440.mp3', 'sine440.flac',
@@ -73,6 +84,92 @@ function Get-RegistryValue {
         return $null
     }
     return $item.$Name
+}
+
+function Get-RegistryValueSnapshot {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Name)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return '<key-missing>'
+    }
+    $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+    $registryName = if ($Name -eq '(default)') { '' } else { $Name }
+    if (-not ($key.GetValueNames() -contains $registryName)) {
+        return '<value-missing>'
+    }
+    $kind = $key.GetValueKind($registryName).ToString()
+    $value = $key.GetValue(
+        $registryName,
+        $null,
+        [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+    )
+    return "$kind|$(ConvertTo-Json -InputObject $value -Compress -Depth 5)"
+}
+
+function Add-RegistryTreeSnapshot {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$RelativePath,
+        [Parameter(Mandatory)][Collections.Generic.List[string]]$Records
+    )
+
+    $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+    $Records.Add("key|$RelativePath")
+    foreach ($valueName in @($key.GetValueNames() | Sort-Object)) {
+        $displayName = if ($valueName -eq '') { '(default)' } else { $valueName }
+        $kind = $key.GetValueKind($valueName).ToString()
+        $value = $key.GetValue(
+            $valueName,
+            $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+        )
+        $json = ConvertTo-Json -InputObject $value -Compress -Depth 5
+        $Records.Add("value|$RelativePath|$displayName|$kind|$json")
+    }
+    foreach ($childName in @($key.GetSubKeyNames() | Sort-Object)) {
+        Add-RegistryTreeSnapshot -Path (Join-Path $Path $childName) `
+            -RelativePath "$RelativePath\$childName" -Records $Records
+    }
+}
+
+function Get-RegistryTreeSnapshot {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return '<missing>'
+    }
+    $records = [Collections.Generic.List[string]]::new()
+    Add-RegistryTreeSnapshot -Path $Path -RelativePath '.' -Records $records
+    return ($records -join "`n")
+}
+
+function Get-HkcuInstallerSnapshot {
+    $snapshot = [ordered]@{
+        ProgId                 = Get-RegistryTreeSnapshot -Path "HKCU:\Software\Classes\$progId"
+        Application           = Get-RegistryTreeSnapshot -Path 'HKCU:\Software\Classes\Applications\sdp.exe'
+        Capabilities          = Get-RegistryTreeSnapshot -Path 'HKCU:\Software\sdp\Capabilities'
+        RegisteredApplication = Get-RegistryValueSnapshot `
+            -Path 'HKCU:\Software\RegisteredApplications' -Name 'sdp'
+        Uninstall             = Get-RegistryTreeSnapshot -Path $legacyUninstallKey
+    }
+    foreach ($extension in $extensions) {
+        $snapshot["OpenWith:$extension"] = Get-RegistryValueSnapshot `
+            -Path "HKCU:\Software\Classes\$extension\OpenWithProgids" -Name $progId
+    }
+    return $snapshot
+}
+
+function Assert-HkcuInstallerSnapshotUnchanged {
+    param(
+        [Parameter(Mandatory)][Collections.IDictionary]$Before,
+        [Parameter(Mandatory)][string]$Label
+    )
+
+    $after = Get-HkcuInstallerSnapshot
+    foreach ($name in $Before.Keys) {
+        Assert-True -Condition ($Before[$name] -ceq $after[$name]) `
+            -Label "$Label`: HKCU $name が不変"
+    }
 }
 
 function Get-UserChoiceSnapshot {
@@ -130,22 +227,20 @@ function Assert-InstalledState {
             -Label 'desktop shortcutを既定では作らない'
     }
 
-    Assert-True -Condition ((Get-RegistryValue -Path "HKCU:\Software\Classes\$progId\shell\open\command" -Name '(default)') `
+    Assert-True -Condition ((Get-RegistryValue -Path "HKLM:\Software\Classes\$progId\shell\open\command" -Name '(default)') `
             -eq "`"$installDirectory\sdp.exe`" `"%1`"") -Label 'ProgIDのopen commandが正しい'
-    Assert-True -Condition ((Get-RegistryValue -Path "HKCU:\Software\Classes\Applications\sdp.exe\shell\open\command" -Name '(default)') `
+    Assert-True -Condition ((Get-RegistryValue -Path "HKLM:\Software\Classes\Applications\sdp.exe\shell\open\command" -Name '(default)') `
             -eq "`"$installDirectory\sdp.exe`" `"%1`"") -Label 'Open Withのopen commandが正しい'
-    Assert-True -Condition ((Get-RegistryValue -Path 'HKCU:\Software\Classes\Applications\sdp.exe' -Name 'FriendlyAppName') -eq 'sdp') `
+    Assert-True -Condition ((Get-RegistryValue -Path 'HKLM:\Software\Classes\Applications\sdp.exe' -Name 'FriendlyAppName') -eq 'sdp') `
         -Label 'Open WithのFriendlyAppNameがある'
     foreach ($extension in $extensions) {
-        Assert-True -Condition ($null -ne (Get-RegistryValue -Path "HKCU:\Software\Classes\$extension\OpenWithProgids" -Name $progId)) `
+        Assert-True -Condition ($null -ne (Get-RegistryValue -Path "HKLM:\Software\Classes\$extension\OpenWithProgids" -Name $progId)) `
             -Label "$extension のOpenWithProgidsへ登録済み"
-        Assert-True -Condition ((Get-RegistryValue -Path 'HKCU:\Software\sdp\Capabilities\FileAssociations' -Name $extension) -eq $progId) `
+        Assert-True -Condition ((Get-RegistryValue -Path 'HKLM:\Software\sdp\Capabilities\FileAssociations' -Name $extension) -eq $progId) `
             -Label "$extension のCapabilities登録がある"
     }
-    Assert-True -Condition ((Get-RegistryValue -Path 'HKCU:\Software\RegisteredApplications' -Name 'sdp') -eq 'Software\sdp\Capabilities') `
+    Assert-True -Condition ((Get-RegistryValue -Path 'HKLM:\Software\RegisteredApplications' -Name 'sdp') -eq 'Software\sdp\Capabilities') `
         -Label 'RegisteredApplicationsへ登録済み'
-    Assert-True -Condition (-not (Test-Path -LiteralPath 'HKLM:\Software\Classes\sdp.AudioFile')) `
-        -Label 'HKLMへ書いていない'
     Assert-True -Condition (Test-Path -LiteralPath $uninstallKey) `
         -Label 'Apps & Featuresへ登録されている'
 }
@@ -254,11 +349,54 @@ foreach ($name in $codecFixtureNames) {
     $fixtures += $fixture
 }
 
+if (Test-Path -LiteralPath $legacyUninstallKey) {
+    throw @"
+旧per-user版のsdpがインストールされています。
+先に旧版をアンインストールしてからinstaller smokeを実行してください:
+$legacyUninstallKey
+"@
+}
+if ((Test-Path -LiteralPath $uninstallKey) -and -not $AllowReplaceExistingInstall) {
+    throw @"
+既存のmachine-wide sdpがインストールされています。
+このsmokeは既存installを置き換え、最後に削除します。
+Windows Sandboxまたは破棄可能VMで実行するか、影響を確認したうえで
+-AllowReplaceExistingInstallを明示してください。
+"@
+}
+
 Write-Host "installer smoke: $([IO.Path]::GetFileName($setupPath))" -ForegroundColor Green
 Assert-NoRunningProcess
 
 $userChoiceBefore = Get-UserChoiceSnapshot
 $userDataExistedBefore = Test-Path -LiteralPath $userDataDirectory -PathType Container
+
+# --- -0.5 旧per-user版の拒否 -----------------------------------------------
+# 実在する旧版は上で拒否済み。ここでは一時的なHKCU uninstall登録だけを作り、
+# installerが自動削除やHKLMへの導入を行わず、PrepareToInstallのexit code 7で止まることを確認する。
+Write-Host '=== -0.5 旧per-user版の拒否 ===' -ForegroundColor Cyan
+$legacyProbeDirectory = Join-Path ([IO.Path]::GetTempPath()) "sdp-smoke-legacy-$smokeRunId"
+$machineUninstallBeforeLegacyProbe = Get-RegistryTreeSnapshot -Path $uninstallKey
+try {
+    New-Item -Path $legacyUninstallKey -Force | Out-Null
+    New-ItemProperty -Path $legacyUninstallKey -Name 'UninstallString' `
+        -Value "`"$legacyProbeDirectory\unins000.exe`"" -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path $legacyUninstallKey -Name 'Inno Setup: App Path' `
+        -Value $legacyProbeDirectory -PropertyType String -Force | Out-Null
+
+    Invoke-Executable -FilePath $setupPath -Label '旧per-user版がある場合のsilent install拒否' `
+        -Arguments @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -ExpectedExitCode 7
+    Assert-True `
+        -Condition ($machineUninstallBeforeLegacyProbe -ceq (Get-RegistryTreeSnapshot -Path $uninstallKey)) `
+        -Label '旧per-user版の拒否時にHKLM install登録を変更しない'
+}
+finally {
+    if (Test-Path -LiteralPath $legacyUninstallKey) {
+        Remove-Item -LiteralPath $legacyUninstallKey -Recurse -Force
+    }
+}
+
+$hkcuInstallerBefore = Get-HkcuInstallerSnapshot
 
 # --- 0. 既存installの除去 ---------------------------------------------------
 # 「初回installではdesktop shortcutを作らない」等はクリーンな状態でしか判定できない。
@@ -271,6 +409,8 @@ if (Test-Path -LiteralPath $uninstallKey) {
     Wait-ForRemoval -Path $installDirectory
     Assert-True -Condition (-not (Test-Path -LiteralPath $uninstallKey)) `
         -Label '既存installを除去できた'
+    Assert-HkcuInstallerSnapshotUnchanged -Before $hkcuInstallerBefore `
+        -Label '既存machine install除去後'
 }
 
 # --- 0.5 初回install先の誤cleanup防止 ---------------------------------------
@@ -293,6 +433,8 @@ try {
     Assert-True -Condition (Test-Path -LiteralPath $trapInternalMarker -PathType Leaf) `
         -Label '初回install先の無関係_internalファイルが保持されている'
     Assert-NoUserChoiceChange -Before $userChoiceBefore
+    Assert-HkcuInstallerSnapshotUnchanged -Before $hkcuInstallerBefore `
+        -Label '初回install先誤cleanup検査のinstall後'
 
     $trapUninstall = Get-Uninstaller
     Invoke-Executable -FilePath $trapUninstall.Path -Label '初回install誤cleanup検査後のuninstall' `
@@ -300,6 +442,8 @@ try {
     Assert-True -Condition (-not (Test-Path -LiteralPath $uninstallKey)) `
         -Label '初回install誤cleanup検査後にuninstall登録が消えている'
     Assert-NoUserChoiceChange -Before $userChoiceBefore
+    Assert-HkcuInstallerSnapshotUnchanged -Before $hkcuInstallerBefore `
+        -Label '初回install先誤cleanup検査のuninstall後'
 }
 finally {
     Remove-SmokeTempDirectory -Path $trapDirectory
@@ -311,6 +455,7 @@ Invoke-Executable -FilePath $setupPath -Label 'silent install' `
     -Arguments @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
 Assert-InstalledState -Label '初回install後の状態' -ExpectDesktopIcon:$false
 Assert-NoUserChoiceChange -Before $userChoiceBefore
+Assert-HkcuInstallerSnapshotUnchanged -Before $hkcuInstallerBefore -Label '初回install後'
 
 # --- 2. install済みexeの検査 -------------------------------------------------
 Write-Host '=== 2. install済みexeの検査 ===' -ForegroundColor Cyan
@@ -342,6 +487,7 @@ Assert-InstalledState -Label 'reinstall後の状態' -ExpectDesktopIcon:$true
 Assert-True -Condition (-not (Test-Path -LiteralPath $obsoleteMarker)) `
     -Label 'upgrade時に不要になったファイルが残らない'
 Assert-NoUserChoiceChange -Before $userChoiceBefore
+Assert-HkcuInstallerSnapshotUnchanged -Before $hkcuInstallerBefore -Label 'reinstall後'
 Invoke-Executable -FilePath $installedExecutable -Arguments @('--selftest') `
     -Label 'reinstall後のselftest'
 Write-Host '  [OK] reinstall後のselftest' -ForegroundColor DarkGray
@@ -374,6 +520,7 @@ Assert-True -Condition (Test-Path -LiteralPath $uninstallKey) `
 Assert-True -Condition ((Get-RegistryValue -Path $uninstallKey -Name 'Inno Setup: App Path') -eq $installDirectory) `
     -Label 'upgrade失敗後もuninstall情報のinstall directoryが不変'
 Assert-UserDataFileSnapshot -Before $userDataBeforeRollback
+Assert-HkcuInstallerSnapshotUnchanged -Before $hkcuInstallerBefore -Label 'upgrade失敗後'
 Invoke-Executable -FilePath $installedExecutable -Arguments @('--selftest') `
     -Label 'upgrade失敗後のselftest'
 Write-Host '  [OK] upgrade失敗後のselftest' -ForegroundColor DarkGray
@@ -406,6 +553,8 @@ try {
     Assert-True -Condition ($blockedUninstall.ExitCode -ne 0) -Label '起動中のuninstallは中止される'
     Assert-True -Condition (Test-Path -LiteralPath $installedExecutable -PathType Leaf) `
         -Label '中止されたuninstallでinstall先を壊さない'
+    Assert-HkcuInstallerSnapshotUnchanged -Before $hkcuInstallerBefore `
+        -Label '起動中upgrade／uninstall拒否後'
 }
 finally {
     if (-not $running.HasExited) {
@@ -434,21 +583,22 @@ Assert-True -Condition (-not (Test-Path -LiteralPath $startMenuShortcut)) `
     -Label 'スタートメニューshortcutが削除された'
 Assert-True -Condition (-not (Test-Path -LiteralPath $desktopShortcut)) `
     -Label 'desktop shortcutが削除された'
-Assert-True -Condition (-not (Test-Path -LiteralPath "HKCU:\Software\Classes\$progId")) `
+Assert-True -Condition (-not (Test-Path -LiteralPath "HKLM:\Software\Classes\$progId")) `
     -Label 'ProgIDが削除された'
-Assert-True -Condition (-not (Test-Path -LiteralPath 'HKCU:\Software\Classes\Applications\sdp.exe')) `
+Assert-True -Condition (-not (Test-Path -LiteralPath 'HKLM:\Software\Classes\Applications\sdp.exe')) `
     -Label 'Open With登録が削除された'
-Assert-True -Condition (-not (Test-Path -LiteralPath 'HKCU:\Software\sdp\Capabilities')) `
+Assert-True -Condition (-not (Test-Path -LiteralPath 'HKLM:\Software\sdp\Capabilities')) `
     -Label 'Capabilitiesが削除された'
-Assert-True -Condition ($null -eq (Get-RegistryValue -Path 'HKCU:\Software\RegisteredApplications' -Name 'sdp')) `
+Assert-True -Condition ($null -eq (Get-RegistryValue -Path 'HKLM:\Software\RegisteredApplications' -Name 'sdp')) `
     -Label 'RegisteredApplicationsの値が削除された'
 foreach ($extension in $extensions) {
-    Assert-True -Condition ($null -eq (Get-RegistryValue -Path "HKCU:\Software\Classes\$extension\OpenWithProgids" -Name $progId)) `
+    Assert-True -Condition ($null -eq (Get-RegistryValue -Path "HKLM:\Software\Classes\$extension\OpenWithProgids" -Name $progId)) `
         -Label "$extension のOpenWithProgidsから削除された"
 }
 Assert-True -Condition (-not (Test-Path -LiteralPath $uninstallKey)) `
     -Label 'Apps & Featuresの登録が削除された'
 Assert-NoUserChoiceChange -Before $userChoiceBefore
+Assert-HkcuInstallerSnapshotUnchanged -Before $hkcuInstallerBefore -Label '最終uninstall後'
 Assert-NoRunningProcess
 
 Assert-True -Condition (Test-Path -LiteralPath $userDataDirectory -PathType Container) `
@@ -468,4 +618,4 @@ if (-not $userDataExistedBefore) {
 
 Write-Host ''
 Write-Host ("installer smokeに成功しました（検査{0}件）。" -f $script:checkCount) -ForegroundColor Green
-Write-Host 'UserChoice（既定アプリ）とHKLMは変更していません。' -ForegroundColor Green
+Write-Host 'UserChoice（既定アプリ）は変更していません。' -ForegroundColor Green

@@ -1,7 +1,7 @@
 """Inno Setup scriptの限定parser（Qt非依存の純粋ロジック）。
 
 Inno Setup compilerが無い環境でも、installerの契約
-（per-user、HKCUのみ、対象拡張子、uninstall時のユーザーデータ保持など）を
+（per-machine、HKLMのみ、対象拡張子、uninstall時のユーザーデータ保持など）を
 pytestで検査できるようにするためのもの。
 
 **完全なInno Setup言語のparserではない。** 次だけを扱う。

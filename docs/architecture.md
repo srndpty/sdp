@@ -1442,17 +1442,17 @@ Pathに変換できない引数だけを無視する。
 
 ## 11. Windows ファイル関連付け（P7-C で実装）
 
-インストーラー（Inno Setup、per-user）で登録する。**書き込み先は HKCU だけ**で、
-HKLM へは一切書かない。ProgID は形式ごとに分けず `sdp.AudioFile` の 1 つにまとめる
+インストーラー（Inno Setup、per-machine）で登録する。**書き込み先は HKLM だけ**とする。
+ProgID は形式ごとに分けず `sdp.AudioFile` の 1 つにまとめる
 （sdp は 7 形式をすべて同じ「音声ファイル」として開くため、形式別に分ける利点がない）。
 
 | キー | 内容 | uninstall |
 |---|---|---|
-| `HKCU\Software\Classes\sdp.AudioFile` | 表示名、`DefaultIcon`＝`sdp.exe,0`、`shell\open\command`＝`"<install>\sdp.exe" "%1"`、`FriendlyAppName` | `uninsdeletekey`（自分のキーごと削除） |
-| `HKCU\Software\Classes\Applications\sdp.exe` | `FriendlyAppName`、`DefaultIcon`、`shell\open\command`、`SupportedTypes`（7 拡張子） | `uninsdeletekey` |
-| `HKCU\Software\Classes\<ext>\OpenWithProgids` | 値名 `sdp.AudioFile` | `uninsdeletevalue`（**自分の値だけ**。他アプリの登録を壊さない） |
-| `HKCU\Software\sdp\Capabilities` | ApplicationName / ApplicationDescription と FileAssociations（7 拡張子 → `sdp.AudioFile`） | `uninsdeletekey` |
-| `HKCU\Software\RegisteredApplications` | 値名 `sdp` → `Software\sdp\Capabilities` | `uninsdeletevalue` |
+| `HKLM\Software\Classes\sdp.AudioFile` | 表示名、`DefaultIcon`＝`sdp.exe,0`、`shell\open\command`＝`"<install>\sdp.exe" "%1"`、`FriendlyAppName` | `uninsdeletekey`（自分のキーごと削除） |
+| `HKLM\Software\Classes\Applications\sdp.exe` | `FriendlyAppName`、`DefaultIcon`、`shell\open\command`、`SupportedTypes`（7 拡張子） | `uninsdeletekey` |
+| `HKLM\Software\Classes\<ext>\OpenWithProgids` | 値名 `sdp.AudioFile` | `uninsdeletevalue`（**自分の値だけ**。他アプリの登録を壊さない） |
+| `HKLM\Software\sdp\Capabilities` | ApplicationName / ApplicationDescription と FileAssociations（7 拡張子 → `sdp.AudioFile`） | `uninsdeletekey` |
+| `HKLM\Software\RegisteredApplications` | 値名 `sdp` → `Software\sdp\Capabilities` | `uninsdeletevalue` |
 
 対象拡張子は `.wav` `.mp3` `.flac` `.ogg` `.opus` `.m4a` `.aac` の 7 種類。
 一覧の source of truth は `packaging/installer.iss` で、installer manifest も
@@ -1572,12 +1572,18 @@ P7-B2の要件にしない。
 
 #### scope とユーザーデータ
 
-- per-user。`PrivilegesRequired=lowest`、`PrivilegesRequiredOverridesAllowed=`（空）で
-  コマンドラインからの昇格指定も許さない。install先は`{localappdata}\Programs\sdp`。
-- **install先（`%LOCALAPPDATA%\Programs\sdp`）とユーザーデータ
+- per-machine。`PrivilegesRequired=admin`、`PrivilegesRequiredOverridesAllowed=`（空）で
+  UAC昇格を要求し、scopeのコマンドライン上書きを許さない。install先は`{autopf}\sdp`。
+- x64配布物であるため`ArchitecturesAllowed=x64compatible`と
+  `ArchitecturesInstallIn64BitMode=x64compatible`を明示し、native Program Files、
+  64-bit registry view、x64 VC++ Runtimeの検出を同じinstall modeへ揃える。
+- **install先（`%ProgramFiles%\sdp`）とユーザーデータ
   （`%LOCALAPPDATA%\sdp`）は別directory**。installerはユーザーデータへ書かず、
   uninstallでも消さない。install先へはsettings／playlist／ui-state／cacheを置かない。
 - AppIdはversionを含まない固定GUID。upgradeで同じ登録を引き継ぐ。
+- 旧per-user版のuninstall登録はHKCUにあり、同じAppIdでもHKLM版のupgrade対象にはならない。
+  またmerged Classes viewではHKCU側が優先され得るため、`PrepareToInstall`で旧登録を検出したら
+  自動削除せず、先に旧版をuninstallするよう表示して中止する。silent時の終了コードは7。
 
 #### upgrade
 
@@ -1585,7 +1591,7 @@ P7-B2の要件にしない。
   `{app}\.upgrade-backup`へ移動する。対象は`{app}\_internal`と、`unins*`以外の
   直下ファイル。onedirの単純上書きでは旧runtime DLLや不要になったpluginが残るため。
   **アンインストーラーは消さない。**
-- cleanup対象は、固定AppIdのHKCU uninstall登録が存在し、その
+- cleanup対象は、固定AppIdのHKLM uninstall登録が存在し、その
   `Inno Setup: App Path`と現在の`{app}`が一致し、かつ`{app}\sdp.exe`が存在する場合だけ。
   初回installで利用者が既存directoryを指定し、偶然`sdp.exe`があっても旧sdpと誤認しない。
 - 展開が成功して`ssPostInstall`へ進んだらbackupを削除する。展開中の失敗や中止で
@@ -1636,6 +1642,9 @@ P7-B2の要件にしない。
 - installer manifestは`sdp/installer_manifest.py`が組み立てる。ZIPのmanifestと
   同じ方針で、timestampを持たず、絶対path・username・build hostを含めない。
   `distribution: technical-verification-only`を明示的に記録する。
+- installer manifestの`schema_version`はJSON構造のversionとする。既存fieldである
+  `scope`、`privileges`、`registry_scope`、`install_directory`の値変更では上げず、
+  fieldの追加・削除・意味変更などconsumerのparser契約が変わる場合に上げる。
 
 **ライセンスの未解決事項が残っている間は、installerも技術検証用に留め、
 公開可能な配布物として扱わない。** コード署名も行っていない。

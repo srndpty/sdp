@@ -6,8 +6,10 @@
 
 検査する主な契約:
 
-- per-user（``{localappdata}\\Programs\\sdp``）で、UAC昇格を要求しない
-- registryへの書き込みはHKCUだけ。HKLMはVC++ Runtimeの導入確認で読み取るだけ
+- per-machine（``{autopf}\\sdp``）で、UAC昇格を要求する
+- x64配布物をx64compatible環境の64-bit install modeで導入する
+- registryへの書き込みはHKLMだけ
+- 旧per-user版のHKCU uninstall登録を検出したら、安全のため導入を中止する
 - 「プログラムから開く」候補として登録するが、既定アプリは変更しない
 - uninstallでユーザーデータ（``%LOCALAPPDATA%\\sdp``）を削除しない
 - versionと入力配布物を外部から注入し、.issへ手書きしない
@@ -25,8 +27,8 @@ from sdp.inno_script import InnoEntry, InnoScript
 
 APP_ID: Final = "{8F3B7C21-5D4E-4A96-9C2F-1E7A6B0D3F58}"
 PROG_ID: Final = "sdp.AudioFile"
-INSTALL_DIRECTORY: Final = r"{localappdata}\Programs\sdp"
-INSTALL_DIRECTORY_DISPLAY: Final = r"%LOCALAPPDATA%\Programs\sdp"
+INSTALL_DIRECTORY: Final = r"{autopf}\sdp"
+INSTALL_DIRECTORY_DISPLAY: Final = r"%ProgramFiles%\sdp"
 USER_DATA_DIRECTORY_DISPLAY: Final = r"%LOCALAPPDATA%\sdp"
 OPEN_COMMAND: Final = r'"{app}\sdp.exe" "%1"'
 ICON_REFERENCE: Final = r"{app}\sdp.exe,0"
@@ -41,6 +43,8 @@ EXTERNAL_DEFINES: Final = ("AppVersion", "VersionInfoVersion", "SourceDir")
 
 CONTRACT_CODE_SYMBOLS: Final = (
     "function FileUseState",
+    "function LegacyPerUserInstallExists",
+    "function LegacyPerUserInstallError",
     "function IsRegisteredPreviousInstall",
     "function CleanPreviousInstall(): Boolean",
     "function RestoreUpgradeBackup",
@@ -62,8 +66,7 @@ copy／obsolete一覧）や中間ファイル名は契約に含めない。こ�
 
 _APPLICATIONS_KEY: Final = r"Software\Classes\Applications\sdp.exe"
 _CAPABILITIES_KEY: Final = r"Software\sdp\Capabilities"
-# コメント以外の行に現れてはならない語（既定アプリの奪取とmachine全体への書き込みの防止）。
-# HKLMはVC++ Runtimeの読み取りに限って許容し、[Registry]のroot検査で書き込みを拒否する。
+# コメント以外の行に現れてはならない語（既定アプリの奪取と曖昧なroot指定の防止）。
 _FORBIDDEN_TERMS: Final = (
     "UserChoice",
     "FileExts",
@@ -131,16 +134,23 @@ def validate_installer_contract(script: InnoScript) -> tuple[str, ...]:
 
 def _check_scope(script: InnoScript) -> list[str]:
     failures: list[str] = []
-    if script.setup("PrivilegesRequired") != "lowest":
-        failures.append("PrivilegesRequired=lowest ではありません（per-user installでなくなる）")
+    if script.setup("PrivilegesRequired") != "admin":
+        failures.append("PrivilegesRequired=admin ではありません（per-machine installでなくなる）")
     if script.setup("PrivilegesRequiredOverridesAllowed") != "":
         failures.append(
             "PrivilegesRequiredOverridesAllowed が空ではありません"
-            "（コマンドラインからの昇格を許してしまう）"
+            "（install scopeをコマンドラインから変更できてしまう）"
         )
     if install_directory(script) != INSTALL_DIRECTORY:
         failures.append(
             f"DefaultDirNameが{INSTALL_DIRECTORY}ではありません: {install_directory(script)!r}"
+        )
+    if script.setup("ArchitecturesAllowed") != "x64compatible":
+        failures.append("ArchitecturesAllowed=x64compatible ではありません")
+    if script.setup("ArchitecturesInstallIn64BitMode") != "x64compatible":
+        failures.append(
+            "ArchitecturesInstallIn64BitMode=x64compatible ではありません"
+            "（x64配布物が64-bit install modeになりません）"
         )
     if app_id(script) != APP_ID:
         failures.append(f"AppIdが固定値ではありません: {app_id(script)!r}")
@@ -199,8 +209,8 @@ def _check_registry(script: InnoScript) -> list[str]:
         return ["[Registry]の登録がありません"]
 
     roots = {(entry.value("Root") or "").upper() for entry in entries}
-    if roots != {"HKCU"}:
-        failures.append(f"[Registry]のRootがHKCU以外を含みます: {sorted(roots)}")
+    if roots != {"HKLM"}:
+        failures.append(f"[Registry]のRootがHKLM以外を含みます: {sorted(roots)}")
     failures.extend(_check_forbidden_terms(script))
 
     failures.extend(
@@ -303,7 +313,7 @@ def _check_shortcuts(script: InnoScript) -> list[str]:
     icons = script.section_entries("icons")
     start_menu = [entry for entry in icons if (entry.value("Name") or "").startswith("{group}\\")]
     desktop = [
-        entry for entry in icons if (entry.value("Name") or "").startswith("{userdesktop}\\")
+        entry for entry in icons if (entry.value("Name") or "").startswith("{autodesktop}\\")
     ]
     if len(start_menu) != 1:
         failures.append(f"スタートメニューshortcutが1件ではありません: {len(start_menu)}件")
@@ -409,6 +419,10 @@ def _check_running_instance(script: InnoScript) -> list[str]:
         )
     if "if not CleanPreviousInstall() then" not in script.code:
         failures.append("退避の失敗でinstallを中止していません（新旧runtimeが混在し得る）")
+    if "if LegacyPerUserInstallExists(" not in script.code:
+        failures.append("旧per-user版のHKCU uninstall登録を検出していません")
+    if "Result := LegacyPerUserInstallError(" not in script.code:
+        failures.append("旧per-user版を検出してもinstallを中止していません")
     if "GetLastError" not in script.code or "ERROR_SHARING_VIOLATION" not in script.code:
         failures.append("open失敗の理由を区別していません（ACL・I/O errorを実行中と誤判定し得る）")
     if "unins" not in script.code:

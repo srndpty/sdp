@@ -1,4 +1,4 @@
-; sdp の Windows per-user インストーラー定義（Inno Setup 6.3 以降）。
+; sdp の Windows per-machine インストーラー定義（Inno Setup 6.3 以降）。
 ;
 ; この .iss が installer 仕様の source of truth である。Inno Setup の GUI で
 ; 設定したローカル状態には依存しない。compile は scripts\build-installer.ps1 から行い、
@@ -7,7 +7,7 @@
 ;   ISCC.exe /DAppVersion=0.0.1 /DVersionInfoVersion=0.0.1.0 /DSourceDir=<dist\sdp> ...
 ;
 ; 重要な契約:
-;   - per-user（%LOCALAPPDATA%\Programs\sdp）。UAC 昇格を要求せず HKLM へ書かない。
+;   - per-machine（%ProgramFiles%\sdp）。UAC 昇格を要求して HKLM へ登録する。
 ;   - VC++ v14 Redistributable x64は同梱せず、HKLMを読み取って導入済みか確認する。
 ;   - 「プログラムから開く」候補として登録するだけで、既定アプリは変更しない。
 ;     UserChoice には一切触れない。
@@ -43,10 +43,10 @@ AppVerName={#AppName} {#AppVersion}
 AppPublisher={#AppPublisher}
 UninstallDisplayName={#AppName}
 UninstallDisplayIcon={app}\sdp.exe
-; per-user インストール。UAC 昇格を求めず、コマンドラインからの昇格指定も許可しない。
-PrivilegesRequired=lowest
+; per-machine インストール。Program Files と HKLM へ書くため UAC 昇格を要求する。
+PrivilegesRequired=admin
 PrivilegesRequiredOverridesAllowed=
-DefaultDirName={localappdata}\Programs\{#AppName}
+DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 DisableDirPage=auto
@@ -84,49 +84,49 @@ Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "settings.json,playlist.js
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\sdp.exe"; IconFilename: "{app}\sdp.exe"; Comment: "sdp を起動する"
-Name: "{userdesktop}\{#AppName}"; Filename: "{app}\sdp.exe"; IconFilename: "{app}\sdp.exe"; Tasks: desktopicon
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\sdp.exe"; IconFilename: "{app}\sdp.exe"; Tasks: desktopicon
 
 [Registry]
 ; --- ProgID（形式別に分けず 1 つへまとめる。sdp は全形式を同じ扱いで開くため） ---
-Root: HKCU; Subkey: "Software\Classes\{#ProgId}"; ValueType: string; ValueName: ""; ValueData: "sdp 音声ファイル"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\{#ProgId}"; ValueType: string; ValueName: "FriendlyTypeName"; ValueData: "sdp 音声ファイル"
-Root: HKCU; Subkey: "Software\Classes\{#ProgId}\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\sdp.exe,0"
-Root: HKCU; Subkey: "Software\Classes\{#ProgId}\shell\open"; ValueType: string; ValueName: "FriendlyAppName"; ValueData: "{#AppName}"
-Root: HKCU; Subkey: "Software\Classes\{#ProgId}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\sdp.exe"" ""%1"""
+Root: HKLM; Subkey: "Software\Classes\{#ProgId}"; ValueType: string; ValueName: ""; ValueData: "sdp 音声ファイル"; Flags: uninsdeletekey
+Root: HKLM; Subkey: "Software\Classes\{#ProgId}"; ValueType: string; ValueName: "FriendlyTypeName"; ValueData: "sdp 音声ファイル"
+Root: HKLM; Subkey: "Software\Classes\{#ProgId}\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\sdp.exe,0"
+Root: HKLM; Subkey: "Software\Classes\{#ProgId}\shell\open"; ValueType: string; ValueName: "FriendlyAppName"; ValueData: "{#AppName}"
+Root: HKLM; Subkey: "Software\Classes\{#ProgId}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\sdp.exe"" ""%1"""
 
-; --- 「プログラムから開く」候補（HKCU\Software\Classes\Applications\sdp.exe） ---
-Root: HKCU; Subkey: "Software\Classes\Applications\sdp.exe"; ValueType: string; ValueName: "FriendlyAppName"; ValueData: "{#AppName}"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\Applications\sdp.exe\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\sdp.exe,0"
-Root: HKCU; Subkey: "Software\Classes\Applications\sdp.exe\shell\open"; ValueType: string; ValueName: "FriendlyAppName"; ValueData: "{#AppName}"
-Root: HKCU; Subkey: "Software\Classes\Applications\sdp.exe\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\sdp.exe"" ""%1"""
-Root: HKCU; Subkey: "Software\Classes\Applications\sdp.exe\SupportedTypes"; ValueType: string; ValueName: ".wav"; ValueData: ""
-Root: HKCU; Subkey: "Software\Classes\Applications\sdp.exe\SupportedTypes"; ValueType: string; ValueName: ".mp3"; ValueData: ""
-Root: HKCU; Subkey: "Software\Classes\Applications\sdp.exe\SupportedTypes"; ValueType: string; ValueName: ".flac"; ValueData: ""
-Root: HKCU; Subkey: "Software\Classes\Applications\sdp.exe\SupportedTypes"; ValueType: string; ValueName: ".ogg"; ValueData: ""
-Root: HKCU; Subkey: "Software\Classes\Applications\sdp.exe\SupportedTypes"; ValueType: string; ValueName: ".opus"; ValueData: ""
-Root: HKCU; Subkey: "Software\Classes\Applications\sdp.exe\SupportedTypes"; ValueType: string; ValueName: ".m4a"; ValueData: ""
-Root: HKCU; Subkey: "Software\Classes\Applications\sdp.exe\SupportedTypes"; ValueType: string; ValueName: ".aac"; ValueData: ""
+; --- 「プログラムから開く」候補（HKLM\Software\Classes\Applications\sdp.exe） ---
+Root: HKLM; Subkey: "Software\Classes\Applications\sdp.exe"; ValueType: string; ValueName: "FriendlyAppName"; ValueData: "{#AppName}"; Flags: uninsdeletekey
+Root: HKLM; Subkey: "Software\Classes\Applications\sdp.exe\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\sdp.exe,0"
+Root: HKLM; Subkey: "Software\Classes\Applications\sdp.exe\shell\open"; ValueType: string; ValueName: "FriendlyAppName"; ValueData: "{#AppName}"
+Root: HKLM; Subkey: "Software\Classes\Applications\sdp.exe\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\sdp.exe"" ""%1"""
+Root: HKLM; Subkey: "Software\Classes\Applications\sdp.exe\SupportedTypes"; ValueType: string; ValueName: ".wav"; ValueData: ""
+Root: HKLM; Subkey: "Software\Classes\Applications\sdp.exe\SupportedTypes"; ValueType: string; ValueName: ".mp3"; ValueData: ""
+Root: HKLM; Subkey: "Software\Classes\Applications\sdp.exe\SupportedTypes"; ValueType: string; ValueName: ".flac"; ValueData: ""
+Root: HKLM; Subkey: "Software\Classes\Applications\sdp.exe\SupportedTypes"; ValueType: string; ValueName: ".ogg"; ValueData: ""
+Root: HKLM; Subkey: "Software\Classes\Applications\sdp.exe\SupportedTypes"; ValueType: string; ValueName: ".opus"; ValueData: ""
+Root: HKLM; Subkey: "Software\Classes\Applications\sdp.exe\SupportedTypes"; ValueType: string; ValueName: ".m4a"; ValueData: ""
+Root: HKLM; Subkey: "Software\Classes\Applications\sdp.exe\SupportedTypes"; ValueType: string; ValueName: ".aac"; ValueData: ""
 
 ; --- 拡張子ごとの OpenWithProgids（自分の値だけを足し、自分の値だけを消す） ---
-Root: HKCU; Subkey: "Software\Classes\.wav\OpenWithProgids"; ValueType: string; ValueName: "{#ProgId}"; ValueData: ""; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Classes\.mp3\OpenWithProgids"; ValueType: string; ValueName: "{#ProgId}"; ValueData: ""; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Classes\.flac\OpenWithProgids"; ValueType: string; ValueName: "{#ProgId}"; ValueData: ""; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Classes\.ogg\OpenWithProgids"; ValueType: string; ValueName: "{#ProgId}"; ValueData: ""; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Classes\.opus\OpenWithProgids"; ValueType: string; ValueName: "{#ProgId}"; ValueData: ""; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Classes\.m4a\OpenWithProgids"; ValueType: string; ValueName: "{#ProgId}"; ValueData: ""; Flags: uninsdeletevalue
-Root: HKCU; Subkey: "Software\Classes\.aac\OpenWithProgids"; ValueType: string; ValueName: "{#ProgId}"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\Classes\.wav\OpenWithProgids"; ValueType: string; ValueName: "{#ProgId}"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\Classes\.mp3\OpenWithProgids"; ValueType: string; ValueName: "{#ProgId}"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\Classes\.flac\OpenWithProgids"; ValueType: string; ValueName: "{#ProgId}"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\Classes\.ogg\OpenWithProgids"; ValueType: string; ValueName: "{#ProgId}"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\Classes\.opus\OpenWithProgids"; ValueType: string; ValueName: "{#ProgId}"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\Classes\.m4a\OpenWithProgids"; ValueType: string; ValueName: "{#ProgId}"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\Classes\.aac\OpenWithProgids"; ValueType: string; ValueName: "{#ProgId}"; ValueData: ""; Flags: uninsdeletevalue
 
 ; --- Capabilities（Windows の「既定のアプリ」画面へ sdp を列挙させるため） ---
-Root: HKCU; Subkey: "Software\{#AppName}\Capabilities"; ValueType: string; ValueName: "ApplicationName"; ValueData: "{#AppName}"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\{#AppName}\Capabilities"; ValueType: string; ValueName: "ApplicationDescription"; ValueData: "Windows 11 向け個人用ローカル音声プレイヤー"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\{#AppName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".wav"; ValueData: "{#ProgId}"
-Root: HKCU; Subkey: "Software\{#AppName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".mp3"; ValueData: "{#ProgId}"
-Root: HKCU; Subkey: "Software\{#AppName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".flac"; ValueData: "{#ProgId}"
-Root: HKCU; Subkey: "Software\{#AppName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".ogg"; ValueData: "{#ProgId}"
-Root: HKCU; Subkey: "Software\{#AppName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".opus"; ValueData: "{#ProgId}"
-Root: HKCU; Subkey: "Software\{#AppName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".m4a"; ValueData: "{#ProgId}"
-Root: HKCU; Subkey: "Software\{#AppName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".aac"; ValueData: "{#ProgId}"
-Root: HKCU; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "{#AppName}"; ValueData: "Software\{#AppName}\Capabilities"; Flags: uninsdeletevalue
+Root: HKLM; Subkey: "Software\{#AppName}\Capabilities"; ValueType: string; ValueName: "ApplicationName"; ValueData: "{#AppName}"; Flags: uninsdeletekey
+Root: HKLM; Subkey: "Software\{#AppName}\Capabilities"; ValueType: string; ValueName: "ApplicationDescription"; ValueData: "Windows 11 向け個人用ローカル音声プレイヤー"; Flags: uninsdeletekey
+Root: HKLM; Subkey: "Software\{#AppName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".wav"; ValueData: "{#ProgId}"
+Root: HKLM; Subkey: "Software\{#AppName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".mp3"; ValueData: "{#ProgId}"
+Root: HKLM; Subkey: "Software\{#AppName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".flac"; ValueData: "{#ProgId}"
+Root: HKLM; Subkey: "Software\{#AppName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".ogg"; ValueData: "{#ProgId}"
+Root: HKLM; Subkey: "Software\{#AppName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".opus"; ValueData: "{#ProgId}"
+Root: HKLM; Subkey: "Software\{#AppName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".m4a"; ValueData: "{#ProgId}"
+Root: HKLM; Subkey: "Software\{#AppName}\Capabilities\FileAssociations"; ValueType: string; ValueName: ".aac"; ValueData: "{#ProgId}"
+Root: HKLM; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "{#AppName}"; ValueData: "Software\{#AppName}\Capabilities"; Flags: uninsdeletevalue
 
 [UninstallDelete]
 ; インストール先に残った実行時生成物だけを消す。%LOCALAPPDATA%\sdp（ユーザーデータ）は消さない。
@@ -178,11 +178,41 @@ end;
 function RegisteredInstallDirectory(var Directory: String): Boolean;
 begin
   Result := RegQueryStringValue(
-    HKEY_CURRENT_USER,
+    HKEY_LOCAL_MACHINE,
     UninstallKey(),
     'Inno Setup: App Path',
     Directory
   ) and (Directory <> '');
+end;
+
+{ per-user版とper-machine版は同じAppIdでもuninstall rootが異なるため、Inno Setupの
+  upgrade対象にはならない。HKCU側を残すとmerged Classes viewで旧関連付けが優先され
+  得るので、自動削除はせず、利用者へ旧版のuninstallを依頼して中止する。 }
+function LegacyPerUserInstallExists(var Directory: String; var Uninstaller: String): Boolean;
+begin
+  Result := RegQueryStringValue(
+    HKEY_CURRENT_USER,
+    UninstallKey(),
+    'UninstallString',
+    Uninstaller
+  );
+  if not Result then
+    Exit;
+
+  if not RegQueryStringValue(
+    HKEY_CURRENT_USER,
+    UninstallKey(),
+    'Inno Setup: App Path',
+    Directory
+  ) then
+    Directory := ExpandConstant('{localappdata}\Programs\sdp');
+end;
+
+function LegacyPerUserInstallError(const Directory: String): String;
+begin
+  Result := '旧per-user版のsdpがインストールされています。' + #13#10 + #13#10 +
+    '先に旧版をアンインストールしてから、このセットアップを再実行してください。' + #13#10 + #13#10 +
+    '旧版のインストール先:' + #13#10 + Directory;
 end;
 
 function IsVCRuntimeInstalled(): Boolean;
@@ -514,8 +544,18 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ErrorMessage: String;
+  LegacyDirectory: String;
+  LegacyUninstaller: String;
 begin
   Result := '';
+  if LegacyPerUserInstallExists(LegacyDirectory, LegacyUninstaller) then
+  begin
+    Log(Format('旧per-user版を検出したためinstallを中止します: path=%s uninstaller=%s', [LegacyDirectory,
+      LegacyUninstaller]));
+    Result := LegacyPerUserInstallError(LegacyDirectory);
+    Exit;
+  end;
+
   ErrorMessage := ExecutableAvailabilityError(InstalledExecutable());
   if ErrorMessage <> '' then
     Result := ErrorMessage;

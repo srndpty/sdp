@@ -636,18 +636,21 @@ uv run python tools/license_audit.py dist/sdp
 `sdp/inno_script.py`の限定parserで`packaging/installer.iss`を読み、次を検査する。
 文字列grepだけに頼らず、section・`#define`・パラメータ行として解釈したうえで判定する。
 
-- **scope**: `PrivilegesRequired=lowest`、`PrivilegesRequiredOverridesAllowed`が空、
-  install先が`{localappdata}\Programs\sdp`、`MinVersion`指定、Program Files非使用。
+- **scope**: `PrivilegesRequired=admin`、`PrivilegesRequiredOverridesAllowed`が空、
+  install先が`{autopf}\sdp`、`MinVersion`指定。`ArchitecturesAllowed`と
+  `ArchitecturesInstallIn64BitMode`がともに`x64compatible`で、64-bit install modeになること。
 - **前提runtime**: VC++ v14 Redistributable x64をHKLMから読み取りだけで検出し、不足時は
   Microsoft公式ページを案内して中止する。Redistributableを同梱・自動実行しない。
 - **upgrade**: AppIdが固定でversionを含まない、`OutputBaseFilename`へversionが入る、
   cleanup対象を固定AppIdの登録済みinstall directoryに限定すること、旧runtimeを
   backupへ退避して失敗時に復元すること、アンインストーラーの保護。
+- **旧per-user版**: HKCUの固定AppId uninstall登録を`PrepareToInstall`で検出し、
+  自動削除せず旧版のuninstallを案内して中止すること。
 - **version注入**: `AppVersion`／`VersionInfoVersion`／`SourceDir`を.iss内で定義せず、
   参照だけしていること（二重管理の防止）。
 - **入力**: `[Files]`が外部注入の配布物1件だけで、settings／playlist／ui-state／
   `*.py`を除外していること。テスト音源を含まないこと。
-- **registry**: RootがHKCUのみ。`UserChoice`・`FileExts`・`HKLM`・`HKCR`が
+- **registry**: RootがHKLMのみ。`UserChoice`・`FileExts`・`HKCR`・`HKA`が
   コメント以外に現れないこと。
 - **関連付け**: ProgID・Open With・SupportedTypes・Capabilitiesが7拡張子を覆い、
   commandが`"{app}\sdp.exe" "%1"`（exeと`%1`の双方を引用）、iconが`sdp.exe,0`、
@@ -671,28 +674,32 @@ SHA-256・絶対path/username非混入・JSON往復・key順固定）も単体�
 
 build scriptとsmoke scriptは、実行せずに検証できる性質をテキストとして検査する
 （staging位置、失敗時の旧成果物の復元、compiler未導入時のエラー、exit code伝播、
-hash生成、命名、`-ConfirmProfileChanges`必須）。
+hash生成、命名、`-ConfirmMachineChanges`と管理者権限の必須化、既存machine-wide版を
+`-AllowReplaceExistingInstall`なしでは置き換えないこと、HKCU関連登録のsnapshot比較）。
 
 ```powershell
 uv run pytest tests/packaging
 uv run python tools/installer_contract.py
 ```
 
-### installer smoke（実プロファイルを変更する。手動実行のみ）
+### installer smoke（マシン全体を変更する。手動実行のみ）
 
 ```powershell
 pwsh -File scripts/build-installer.ps1
-pwsh -File scripts/installer-smoke.ps1 -ConfirmProfileChanges
+pwsh -File scripts/installer-smoke.ps1 -ConfirmMachineChanges
 ```
 
-`-ConfirmProfileChanges`が無ければ何もせず失敗する。**CIから実行しない。**
-既存installがあれば先に除去してクリーンな状態から始める。自動確認は136項目:
+管理者として起動したPowerShellで実行する。`-ConfirmMachineChanges`が無ければ何もせず失敗する。
+既存machine-wide版がある場合は`-AllowReplaceExistingInstall`もなければ何もせず失敗する。
+**CIから実行せず、原則としてWindows Sandboxまたは破棄可能VMで実行する。**
+既存installを置き換える場合は明示許可後に先に除去し、クリーンな状態から始める。
+自動確認する主な観点:
 
 1. silent install（`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`、終了コード0）
 2. install先のsdp.exe・`_internal`・LICENSE、ユーザーデータとPythonソースの非混入
 3. スタートメニューshortcut（重複なし）、desktop shortcutが既定では作られないこと
 4. ProgID・Open With・7拡張子の`OpenWithProgids`・Capabilities・RegisteredApplications
-5. HKLMへ書いていないこと、Apps & Featuresへの登録
+5. HKCUへ書いていないこと、HKLMのApps & Featuresへの登録
 6. install済みexeの`--selftest`と6形式の`--codec-test`
 7. version resource（ProductName／InternalName／OriginalFilename／FileVersion）と
    Apps & FeaturesのDisplayVersionの一致
@@ -709,8 +716,28 @@ pwsh -File scripts/installer-smoke.ps1 -ConfirmProfileChanges
 14. uninstall後にinstall先・shortcut・registry・processが残らないこと
 15. **`%LOCALAPPDATA%\sdp`とその中のファイルが保持されること**
 16. 全工程で7拡張子の`UserChoice`（既定アプリ）が変化しないこと
+17. 旧per-user版のHKCU uninstall登録があるとsilent installを終了コード7で拒否し、
+    HKLMのinstall登録を変更しないこと
+18. HKCUのProgID、Applications、7拡張子のOpenWithProgids、Capabilities、
+    RegisteredApplications、uninstall登録が、値の型・データを含め全工程で不変であること
 
-### 実測（Windows 11 build 26200 / Inno Setup 6.7.3）
+### 非昇格ユーザー検査
+
+管理者フェーズのinstall後、実際に利用する通常権限ユーザーのPowerShellで実行する。
+
+```powershell
+pwsh -File scripts/installer-user-smoke.ps1 -ConfirmUserProfileChanges
+```
+
+`%ProgramFiles%\sdp\sdp.exe --selftest`、ユーザー別の
+`%LOCALAPPDATA%\sdp\logs\sdp.log`作成、HKLM関連付けの参照、Program Filesへの
+書き込み拒否、終了後にsdp processが残らないことを自動確認する。GUIからのsettings／
+playlist保存と関連付け経由起動は、ユーザー操作を伴うため下記の手動ゲートで確認する。
+
+### 旧per-user版の実測（Windows 11 build 26200 / Inno Setup 6.7.3）
+
+以下はper-machine化前の実測記録であり、現在のProgram Files／HKLM版の合格実績ではない。
+per-machine版では上記installer smokeを再実行する。
 
 | 項目 | 結果 |
 |---|---|
@@ -747,10 +774,11 @@ pwsh -File scripts/installer-smoke.ps1 -ConfirmProfileChanges
 
 ### 手動ゲート（未完了）
 
-- [ ] 通常ユーザーでUACプロンプトが出ないこと
+- [ ] 通常ユーザーでUACプロンプトが出て、管理者の承認または資格情報を要求すること
 - [ ] スタートメニューから起動できること
 - [ ] Apps & Featuresの表示名・version・アイコン
 - [ ] wizardでLICENSEが表示され、技術検証用である旨が読めること
+- [ ] 旧per-user版がある対話installで、旧install先と先行uninstallの案内が表示されること
 - [ ] 7形式それぞれで「プログラムから開く」にsdpが出ること
 - [ ] Windowsの設定から既定アプリとして選べること（installerが勝手に変えていないこと）
 - [ ] 関連付け経由のダブルクリックで既存instanceへ追加され、processが増え続けないこと
@@ -760,6 +788,8 @@ pwsh -File scripts/installer-smoke.ps1 -ConfirmProfileChanges
 - [ ] 起動中にGUIでupgradeしたときの案内表示（silent経路は自動確認済み）
 - [ ] 100%／150%（可能なら200%）DPIでのwizard表示
 - [ ] Windows Sandboxまたは新規Windowsユーザーでのinstall→起動→uninstall
+- [ ] 別の標準ユーザーで設定変更・playlist保存・再起動後の復元
+- [ ] 別の標準ユーザーで関連付け経由起動し、そのユーザーの`%LOCALAPPDATA%\sdp`だけへ保存されること
 - [ ] SmartScreenの表示（**未署名のため、MOTW付きでダウンロードすると警告が出る想定。
       実機で記録する。** ローカル生成物の直接実行では確認できない）
 - [ ] 日本語ユーザー名の環境
@@ -772,7 +802,7 @@ pwsh -File scripts/installer-smoke.ps1 -ConfirmProfileChanges
 
 - [x] `scripts/build-release.ps1`が成功する
 - [x] `scripts/build-installer.ps1`が成功する
-- [x] `scripts/installer-smoke.ps1 -ConfirmProfileChanges`が成功する
+- [ ] `scripts/installer-smoke.ps1 -ConfirmMachineChanges`が成功する
 - [x] SHA-256が`release/*.sha256`と一致する
 - [x] manifestのversion・runtime・pluginが期待どおり
 - [x] installer manifestのscope・privileges・関連付け・SHA-256が期待どおり

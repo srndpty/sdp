@@ -8,7 +8,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from sdp.inno_script import parse_inno_script
+from sdp.inno_script import parse_inno_script, registry_roots
 from sdp.installer_contract import (
     app_id,
     file_associations,
@@ -35,7 +35,11 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"installerの契約は正常です: {arguments.script.name}")
     print(f"  AppId={app_id(script)} ProgID={prog_id(script)}")
-    print(f"  install先={install_directory(script)}（per-user / 昇格なし）")
+    roots = ",".join(registry_roots(script.section_entries("registry")))
+    print(
+        f"  install先={install_directory(script)} "
+        f"権限={script.setup('PrivilegesRequired')} registry={roots}"
+    )
     print(f"  関連付け={' '.join(file_associations(script))}")
     return 0
 
