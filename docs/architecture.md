@@ -201,7 +201,7 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
   個々の操作ロジックを持たない。
 - 再生、停止、相対シーク、前後曲、音量、mute、速度、pitch、repeat、shuffleを
   `README.md`の固定表へ割り当てる。連続入力が必要なシーク・音量・速度だけauto repeatを許可する。
-- 文字／数値入力、編集可能なComboBox、ボタン上のSpace、モーダル表示中は
+- 文字／数値入力、編集可能なComboBox、モーダル表示中は
   `ShortcutOverride`で明示的に抑止し、通常のWidget操作を奪わない。抑止対象は
   `ShortcutSpec`に登録されたキー組合せだけとし、既存のCtrl+O／Ctrl+Shift+Oや
   編集Widget自身のCtrl+C／Ctrl+Vは通過させる。
@@ -214,17 +214,16 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 | キー | 操作 | auto repeat |
 |---|---|---|
 | `Space` | 再生／一時停止 | なし |
-| `S` | 停止 | なし |
 | `J` / `L` | 10秒戻る／進む | あり |
 | `Shift+J` / `Shift+L` | 60秒戻る／進む | あり |
-| `Alt+Left` / `Alt+Right` | 前の曲／次の曲 | なし |
+| `Page Up` / `Page Down` | 前の曲／次の曲 | なし |
 | `Ctrl+Up` / `Ctrl+Down` | 音量を0.05上げる／下げる | あり |
 | `M` | mute切替 | なし |
 | `X` / `C` | 速度を0.05下げる／上げる | あり |
 | `Z` | 速度を1.00倍へ戻す | なし |
 | `P` | ピッチ補正切替 | なし |
 | `R` | リピートモード切替 | なし |
-| `Ctrl+H` | シャッフル切替 | なし |
+| `S` | シャッフル切替 | なし |
 
 #### QtMultimediaBackend（P1-B）
 
@@ -300,12 +299,13 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
   `run()` が保持する `PlayerComposition` への参照でイベントループ中の寿命を保証する。
   グローバル変数へは置かず、MainWindow に Backend を所有も参照もさせない。
 - **`MainWindow`**: レイアウト骨格、「ファイル」メニュー（開く / 終了）、
-  現在のファイル名表示（フルパスはツールチップ）、ウィンドウタイトル、ステータスバー。
+  現在のファイル名を含むウィンドウタイトル、ステータスバー。
   再生操作は持たず `PlayerControls` へ委譲する。ファイルダイアログのフィルターは
   ユーザー補助にすぎず、「すべてのファイル」を必ず選べるようにする
   （拡張子や `QMediaFormat` で再生可否を断定しないため）。
 - **`PlayerControls`**: 再生 / 一時停止 / 停止、シークバー、現在時間と総時間、
   音量、ミュート、再生状態ラベル。受け取るのは `PlaybackController` だけ。
+  シーク以外の操作は白いアイコンの1行へまとめ、音量スライダーも同じ行へ置く。
   状態に応じた表示と活性の更新は 1 つのメソッドへ集約する。
   ミリ秒 → 表示文字列の変換は純粋関数（`m:ss` / `h:mm:ss`、負値は 0 表示）。
 - **シークバー**: 値はミリ秒。`duration_changed` で最大値を更新し、0 なら無効化して
@@ -811,7 +811,7 @@ L / R リングバッファと `snapshot_stereo` / `channel_count` / `channel_co
 
 ## 8. プレイリストモデル
 
-- `QAbstractTableModel` を使う。列は 状態アイコン / タイトル / アーティスト / アルバム / 長さ。
+- `QAbstractTableModel` を使う。列はタイトル / サイズ / ビットレート / 長さ / パス。
   `Qt.UserRole` で entry_id とパスを保持する。
 - D&D は外部から `text/uri-list` を受理し、受理順をそのまま表示順とする（PL-01）。
   内部の並べ替えは `moveRows` を用いる。
@@ -863,11 +863,15 @@ Mutagen による非同期メタデータ取得と表示（P2-D）。
 リピート・シャッフルはP2-C、メタデータはP2-Dで実装済み。
 
 - **`PlaylistView`**: 受け取るのは `PlaylistModel` だけ。表示、ファイル追加、
-  削除、全消去、選択に応じたボタン活性、短いステータスメッセージの要求
+  Deleteキーによる選択行の削除、全消去、短いステータスメッセージの要求
   （`message_requested`）まで。再生操作は持たず、`playlist.json` も知らない。
+  追加・削除・全消去のボタン行は重複操作なので表示しない。追加はファイルメニューか
+  D&D、全行削除はCtrl+A後のDeleteで行える。
+  高さは最低240pxを確保し、復元されたSplitter比率で一覧が潰れないようにする。
 - **`MainWindow`**: `PlaybackController` と `PlaylistModel` だけを受け取り、
   `PlayerControls` と `PlaylistView` を QSplitter へ配置して
   `message_requested` をステータスバーへ流すだけ。追加・削除・D&D の処理は持たない。
+  上側の再生・可視化パネルは内容以上に拡張せず、各Panel間の余白を設けない。
   単曲用の「開く...」と、プレイリストの「プレイリストに追加...」は別操作として共存する。
 - **テーブル設定**: 行単位・複数選択、編集不可、ドラッグ有効、外部ドロップ受理、
   ドロップ位置表示、`dragDropOverwriteMode(False)`（行と行の「間」へ落とす）。
@@ -989,20 +993,24 @@ Mutagen による非同期メタデータ取得と表示（P2-D）。
 ### 8.2 メタデータ（P2-D）
 
 - **`TrackMetadata`**（`core/metadata/types.py`。Qt 非依存の不変 dataclass）:
-  `title` / `artist` / `album` / `duration_ms`（いずれも省略可）。
+  `title` / `artist` / `album` / `duration_ms` / `bitrate_bps`（いずれも省略可）。
+  durationは0以上、bitrateは正の値だけを受理し、不正値を0表示へ丸めない。
   entry_id・path・読み込み状態・エラー文字列・UI の表現は持たない。
   Mutagen のオブジェクトはワーカースレッドの外へ出さない。
 - **`MetadataStatus`**: `NOT_REQUESTED` →（要求）→ `LOADING` →
   `LOADED` または `FAILED`。ファイルの欠損は `FileStatus` が表すので
   ここへ `MISSING` は入れない。**タグが 1 件も無くても `LOADED`**（失敗ではない）。
   欠損になったら値を捨てて `NOT_REQUESTED` へ戻し、復活したら読み直せるようにする。
-- **`PlaylistEntry`**: `metadata`（不変値）と `metadata_status` を持つだけで、
-  読み取りはしない。`LOADED` のときだけ値を持ち、それ以外は `None`。
+- **`PlaylistEntry`**: `metadata`（不変値）、`metadata_status`、メタデータ解析と独立した
+  `file_size_bytes`を持つが、読み取りはしない。`metadata`は`LOADED`のときだけ値を持ち、
+  それ以外は`None`。ファイルサイズはワーカーの`stat()`が成功すれば解析失敗時も保持する。
   メタデータ更新で entry_id・path・file_status は変えず、内部限定のcloneは
   `__post_init__`を通さないためGUIスレッドでファイル状態を再調査しない。
 - **タグの正規化**: easy tags の複数値に備え、title / album は最初の非空値、
   artist は非空値を順序どおり `/` で結合（1 件なら区切りなし）。前後の空白は除去し、
-  空だけなら `None`。文字列でない値は無理に文字列化せず無視する。
+  空だけなら `None`。文字列でない値は無理に文字列化せず無視する。CP932補正は
+  **MP3の生ID3 text frameがLatin-1を宣言している場合だけ**検討し、round-trip成立と
+  日本語比率を確認する。FLAC等のUnicodeタグや来歴を失ったeasy tagsは補正しない。
 - **長さ**: `info.length`（秒）を `round(seconds * 1000)` でミリ秒へ。
   取得できない・NaN・inf・負値は `None`（0:00 と偽らない）。
   長さが取れないだけでタグは捨てない。**再生中の `PlaybackController.duration_ms`
@@ -1027,10 +1035,12 @@ Mutagen による非同期メタデータ取得と表示（P2-D）。
   結果を無視する論理キャンセルとする。ただしQThreadPool破棄は実行中タスクを待つため、
   ネットワークドライブや故障媒体でI/O自体が戻らない場合、**プロセス終了の3秒上限は
   保証しない**。厳密な終了期限が必要になった場合は読取を終了可能な子プロセスへ隔離する。
-- **列と role**: タイトル / アーティスト / アルバム / 長さ / パスの 5 列
+- **列と role**: タイトル / サイズ / ビットレート / 長さ / パスの 5 列
   （`Column.NAME` は `TITLE` の別名として残す）。
   role は `TITLE_ROLE` / `ARTIST_ROLE` / `ALBUM_ROLE` / `DURATION_MS_ROLE` /
-  `METADATA_STATUS_ROLE` で、表示文字列ではなく意味上の値を返す。
+  `FILE_SIZE_BYTES_ROLE` / `BITRATE_BPS_ROLE` / `METADATA_STATUS_ROLE` で、
+  表示文字列ではなく意味上の値を返す。アーティストとアルバムは読み取り値として
+  保持するが、日常利用で優先度が低いため列には表示しない。
 - **タイトルのフォールバック**: 表示は `metadata.title` → ファイル名 → パス全体の順。
   未要求・読み取り中・失敗のいずれでも常にファイル名が出るので、
   追加直後から曲を識別できる（「読み込み中...」でタイトルを置き換えない）。
@@ -1429,10 +1439,12 @@ Pathに変換できない引数だけを無視する。
 2. `QApplication`を作成し、`PlayerComposition`より先に単一instanceを判定する。
 3. secondaryは受理確認後にevent loopもcompositionも作らず終了する。
 4. primaryは設定と保存済みplaylistを復元し、初回起動引数をその末尾へ追加する。
-   追加だけで自動再生はしない。
+   pathがあれば今回追加した先頭entryを自動再生する。引数なしの通常起動と、保存済みの
+   current entry復元だけでは自動再生しない。
 5. primaryのIPC threadはlisten直後から要求をqueueへ受理し、composition構築中でもACKを返す。
 6. Window表示後に受信Signalを`LaunchRequestHandler`へ接続し、`start_delivery()`でqueueを1回だけ適用する。
-7. 転送要求は同じWindowとPlaylistModelの末尾へ追加する。`activate_window=True`ならpathの有無にかかわらず、
+7. 転送要求は同じWindowとPlaylistModelの末尾へ追加し、今回追加した先頭entryを自動再生する。
+   `activate_window=True`ならpathの有無にかかわらず、
    最小化flagだけを外し、`show()` / `raise_()` / `activateWindow()`を試みる。
    最大化flagは維持し、OS制約でactiveにできなければ`QApplication.alert()`を要求する。
 8. shutdownの最初にSignalを切断し、socket、server thread、endpoint、lockを解放する。

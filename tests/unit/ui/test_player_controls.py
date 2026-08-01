@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtTest import QSignalSpy
-from PySide6.QtWidgets import QLabel, QPushButton, QSlider
+from PySide6.QtWidgets import QLabel, QPushButton, QSlider, QWidget
 from pytestqt.qtbot import QtBot
 
 from fakes.fake_playback_backend import FakePlaybackBackend
@@ -93,7 +93,6 @@ def test_format_duration_ms(milliseconds: int, expected: str) -> None:
 def test_initial_state_disables_playback_widgets(controls: PlayerControls) -> None:
     """source 未設定では再生系操作とシークが無効で、初期表示が 0:00。"""
     assert not button(controls, "playButton").isEnabled()
-    assert not button(controls, "pauseButton").isEnabled()
     assert not button(controls, "stopButton").isEnabled()
     assert not slider(controls, "seekSlider").isEnabled()
     assert label_text(controls, "positionLabel") == "0:00"
@@ -105,22 +104,22 @@ def test_initial_state_disables_playback_widgets(controls: PlayerControls) -> No
 
 
 def test_stopped_state_enables_play(controls: PlayerControls, backend: FakePlaybackBackend) -> None:
-    """STOPPED では再生が有効、一時停止は無効。"""
+    """STOPPED では再生／一時停止トグルが再生操作として有効。"""
     backend.emit_state(PlaybackState.STOPPED)
 
     assert button(controls, "playButton").isEnabled()
-    assert not button(controls, "pauseButton").isEnabled()
+    assert button(controls, "playButton").accessibleName() == "再生"
     assert label_text(controls, "stateLabel") == "停止"
 
 
 def test_playing_state_enables_pause_and_stop(
     controls: PlayerControls, backend: FakePlaybackBackend
 ) -> None:
-    """PLAYING では一時停止と停止が有効、再生は無効。"""
+    """PLAYING ではトグルが一時停止操作になり、停止も有効。"""
     backend.emit_state(PlaybackState.PLAYING)
 
-    assert not button(controls, "playButton").isEnabled()
-    assert button(controls, "pauseButton").isEnabled()
+    assert button(controls, "playButton").isEnabled()
+    assert button(controls, "playButton").accessibleName() == "一時停止"
     assert button(controls, "stopButton").isEnabled()
     assert label_text(controls, "stateLabel") == "再生中"
 
@@ -128,11 +127,11 @@ def test_playing_state_enables_pause_and_stop(
 def test_paused_state_enables_play_and_stop(
     controls: PlayerControls, backend: FakePlaybackBackend
 ) -> None:
-    """PAUSED では再生と停止が有効、一時停止は無効。"""
+    """PAUSED ではトグルが再生操作になり、停止も有効。"""
     backend.emit_state(PlaybackState.PAUSED)
 
     assert button(controls, "playButton").isEnabled()
-    assert not button(controls, "pauseButton").isEnabled()
+    assert button(controls, "playButton").accessibleName() == "再生"
     assert button(controls, "stopButton").isEnabled()
     assert label_text(controls, "stateLabel") == "一時停止"
 
@@ -143,13 +142,61 @@ def test_paused_state_enables_play_and_stop(
 def test_transport_buttons_call_the_controller(
     controls: PlayerControls, backend: FakePlaybackBackend
 ) -> None:
-    """再生・一時停止・停止が Controller 経由で Backend へ届く。"""
+    """同じボタンの再生・一時停止トグルと停止がController経由で届く。"""
     backend.emit_state(PlaybackState.STOPPED)
     button(controls, "playButton").click()
-    button(controls, "pauseButton").click()
+    backend.emit_state(PlaybackState.PLAYING)
+    button(controls, "playButton").click()
     button(controls, "stopButton").click()
 
     assert backend.call_names() == ["play", "pause", "stop"]
+
+
+def test_transport_and_mute_controls_use_white_icons(controls: PlayerControls) -> None:
+    """主要な再生操作はダークテーマでも読める白いアイコンで表示する。"""
+    for name in (
+        "previousTrackButton",
+        "playButton",
+        "stopButton",
+        "nextTrackButton",
+        "muteButton",
+    ):
+        control = button(controls, name)
+        assert control.text() == ""
+        assert not control.icon().isNull()
+        image = control.icon().pixmap(20, 20).toImage()
+        opaque_colors = [
+            image.pixelColor(x, y)
+            for y in range(image.height())
+            for x in range(image.width())
+            if image.pixelColor(x, y).alpha() > 0
+        ]
+        assert opaque_colors
+        assert all(color.red() == color.green() == color.blue() == 255 for color in opaque_colors)
+
+
+def test_buttons_and_volume_share_one_row(controls: PlayerControls, qtbot: QtBot) -> None:
+    """再生・モード・音量の操作を同じ横一列へ配置する。"""
+    controls.show()
+    qtbot.waitExposed(controls)
+    centers: list[int] = []
+    for name in (
+        "previousTrackButton",
+        "playButton",
+        "stopButton",
+        "nextTrackButton",
+        "repeatModeButton",
+        "shuffleButton",
+        "volumeSlider",
+        "muteButton",
+    ):
+        widget = controls.findChild(QWidget, name)
+        assert widget is not None
+        centers.append(widget.geometry().center().y())
+    assert max(centers) - min(centers) <= 1
+    play_width = button(controls, "playButton").width()
+    assert button(controls, "repeatModeButton").width() == play_width
+    assert button(controls, "shuffleButton").width() == play_width
 
 
 # -- シークバー -------------------------------------------------------------

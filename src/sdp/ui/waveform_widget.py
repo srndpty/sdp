@@ -32,7 +32,7 @@ class WaveformWidget(QWidget):
         super().__init__(parent)
         self.setObjectName("waveformWidget")
         self.setAccessibleName("波形")
-        self.setMinimumHeight(110)
+        self.setMinimumHeight(55)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
 

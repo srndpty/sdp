@@ -18,6 +18,8 @@ from typing import Any, cast
 
 import mutagen
 from mutagen import MutagenError
+from mutagen.id3 import ID3, Encoding, ID3NoHeaderError
+from mutagen.mp3 import EasyMP3
 from PySide6.QtCore import QModelIndex, QObject, QRunnable, QThread, QThreadPool, Signal
 
 from sdp.core.metadata.types import MetadataStatus, TrackMetadata
@@ -70,11 +72,16 @@ def read_track_metadata(path: Path) -> TrackMetadata:
     # 変換すると traceback が失われ、不具合を診断できなくなる。
     tags: object = getattr(audio, "tags", None)
     info: object = getattr(audio, "info", None)
+    try:
+        id3_tags = _read_id3_tags(path) if isinstance(audio, EasyMP3) else None
+    except (MutagenError, OSError) as error:
+        raise MetadataReadError(f"ID3タグを読み取れません: {path}") from error
     return TrackMetadata(
-        title=_first_text(tags, "title"),
-        artist=_joined_text(tags, "artist"),
-        album=_first_text(tags, "album"),
+        title=_first_text(tags, "title", id3_tags=id3_tags, frame_id="TIT2"),
+        artist=_joined_text(tags, "artist", id3_tags=id3_tags, frame_id="TPE1"),
+        album=_first_text(tags, "album", id3_tags=id3_tags, frame_id="TALB"),
         duration_ms=_duration_ms(info),
+        bitrate_bps=_bitrate_bps(info),
     )
 
 
@@ -110,17 +117,90 @@ def _tag_values(tags: object, key: str) -> list[str]:
     return [value.strip() for value in cast("list[Any]", raw) if isinstance(value, str)]
 
 
-def _first_text(tags: object, key: str) -> str | None:
+def _read_id3_tags(path: Path) -> ID3 | None:
+    """MP3の生ID3タグを読み、各frameの文字encoding情報を保持する。"""
+    try:
+        return ID3(path)
+    except ID3NoHeaderError:
+        return None
+
+
+def _id3_tag_values(tags: ID3 | None, frame_id: str) -> list[str] | None:
+    """ID3 text frameを宣言encoding付きで取り出す。frameが無ければfallbackさせる。"""
+    if tags is None:
+        return None
+    frames = cast("list[Any]", cast("Any", tags).getall(frame_id))
+    if not frames:
+        return None
+    values: list[str] = []
+    for frame in frames:
+        raw = getattr(frame, "text", None)
+        if not isinstance(raw, list):
+            continue
+        declared_latin1 = getattr(frame, "encoding", None) == Encoding.LATIN1
+        values.extend(
+            _repair_mojibake(value, declared_latin1=declared_latin1).strip()
+            for value in cast("list[Any]", raw)
+            if isinstance(value, str)
+        )
+    return values
+
+
+def _repair_mojibake(value: str, *, declared_latin1: bool) -> str:
+    """Latin-1指定が確認できたID3文字列だけをCP932として補正する。
+
+    古いタグ編集ソフトには、Shift-JISのバイト列をID3上でLatin-1と宣言するものがある。
+    EasyTagやFLAC等の来歴が不明な文字列へは適用しない。宣言を確認した値でも、
+    round-tripが成立し、日本語が文字列の半分以上を占める場合だけ採用する。
+    """
+    if not declared_latin1 or _contains_japanese(value):
+        return value
+    try:
+        original_bytes = value.encode("latin-1")
+        repaired = original_bytes.decode("cp932")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return value
+    if repaired.encode("cp932") != original_bytes:
+        return value
+    visible = [character for character in repaired if not character.isspace()]
+    japanese = sum(1 for character in visible if _is_japanese(character))
+    return repaired if visible and japanese / len(visible) >= 0.5 else value
+
+
+def _contains_japanese(value: str) -> bool:
+    return any(_is_japanese(character) for character in value)
+
+
+def _is_japanese(character: str) -> bool:
+    return "\u3040" <= character <= "\u30ff" or "\u3400" <= character <= "\u9fff"
+
+
+def _first_text(
+    tags: object,
+    key: str,
+    *,
+    id3_tags: ID3 | None = None,
+    frame_id: str = "",
+) -> str | None:
     """最初の非空値。すべて空なら ``None``。"""
-    for value in _tag_values(tags, key):
+    id3_values = _id3_tag_values(id3_tags, frame_id) if frame_id else None
+    for value in _tag_values(tags, key) if id3_values is None else id3_values:
         if value:
             return value
     return None
 
 
-def _joined_text(tags: object, key: str) -> str | None:
+def _joined_text(
+    tags: object,
+    key: str,
+    *,
+    id3_tags: ID3 | None = None,
+    frame_id: str = "",
+) -> str | None:
     """非空値を順序どおり結合する。1 件なら区切りを付けない。"""
-    values = [value for value in _tag_values(tags, key) if value]
+    id3_values = _id3_tag_values(id3_tags, frame_id) if frame_id else None
+    source_values = _tag_values(tags, key) if id3_values is None else id3_values
+    values = [value for value in source_values if value]
     if not values:
         return None
     return ARTIST_SEPARATOR.join(values)
@@ -141,6 +221,25 @@ def _duration_ms(info: object) -> int | None:
     return round(seconds * 1000)
 
 
+def _bitrate_bps(info: object) -> int | None:
+    """``info.bitrate``を正のbit/sとして取得する。"""
+    bitrate = getattr(info, "bitrate", None)
+    if not isinstance(bitrate, (int, float)) or isinstance(bitrate, bool):
+        return None
+    value = float(bitrate)
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return round(value)
+
+
+def _file_size_bytes(path: Path) -> int:
+    """ファイルサイズを取得し、I/O失敗をメタデータ読取失敗へ揃える。"""
+    try:
+        return path.stat().st_size
+    except OSError as error:
+        raise MetadataReadError(f"ファイル情報を読み取れません: {path}") from error
+
+
 @dataclass(frozen=True, slots=True)
 class MetadataRequest:
     """1 件の読み取り要求。ワーカーへ渡す不変値。"""
@@ -158,6 +257,7 @@ class MetadataResult:
     path: Path
     token: int
     metadata: TrackMetadata | None
+    file_size_bytes: int | None = None
 
 
 ReadFunction = Callable[[Path], TrackMetadata]
@@ -187,6 +287,11 @@ class _MetadataWorker(QRunnable):
 
     def run(self) -> None:
         metadata: TrackMetadata | None = None
+        file_size_bytes: int | None = None
+        try:
+            file_size_bytes = _file_size_bytes(self._request.path)
+        except MetadataReadError as error:
+            _logger.info("ファイルサイズを取得できませんでした: %s", error)
         try:
             metadata = self._read_function(self._request.path)
         except (MetadataReadError, OSError, MutagenError, ValueError) as error:
@@ -211,6 +316,7 @@ class _MetadataWorker(QRunnable):
                 path=self._request.path,
                 token=self._request.token,
                 metadata=metadata,
+                file_size_bytes=file_size_bytes,
             )
         )
 
@@ -500,6 +606,7 @@ class MetadataReader(QObject):
             return
 
         self._tokens.pop(result.entry_id, None)
+        self._playlist.apply_file_size(result.entry_id, result.file_size_bytes)
         if result.metadata is None:
             self._playlist.mark_metadata_failed(result.entry_id)
         else:

@@ -1,6 +1,6 @@
 """メインウィンドウ。
 
-レイアウト骨格・メニュー・現在のファイル表示・ステータス表示だけを担当し、
+レイアウト骨格・メニュー・ウィンドウタイトル・ステータス表示だけを担当し、
 再生操作の細部は PlayerControls へ委譲する（god class にしない）。
 """
 
@@ -13,8 +13,8 @@ from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QAction, QGuiApplication, QMoveEvent, QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QFileDialog,
-    QLabel,
     QMainWindow,
+    QSizePolicy,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -47,7 +47,6 @@ from sdp.ui.waveform_panel import WaveformPanel
 _logger = logging.getLogger(__name__)
 
 WINDOW_TITLE = "sdp"
-NO_FILE_TEXT = "ファイル未選択"
 
 # ファイルダイアログのフィルターはユーザー補助にすぎない。拡張子で再生可否を
 # 断定しないため（ADR-0001 の制約 3）、「すべてのファイル」も必ず選べるようにする。
@@ -115,9 +114,6 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(WINDOW_TITLE)
 
-        self._file_name_label = QLabel(NO_FILE_TEXT)
-        self._file_name_label.setObjectName("fileNameLabel")
-        self._file_name_label.setAccessibleName("現在のファイル")
         self._controls = PlayerControls(controller)
         self._speed_panel = SpeedPanel(controller)
         self._waveform_panel = WaveformPanel(controller, waveform_analysis)
@@ -126,9 +122,13 @@ class MainWindow(QMainWindow):
         self._playlist_view = PlaylistView(playlist_model)
 
         player_panel = QWidget()
+        player_panel.setObjectName("playerPanel")
+        player_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        self._player_panel = player_panel
+        self._player_panel_unbounded_height = player_panel.maximumHeight()
         player_layout = QVBoxLayout(player_panel)
         player_layout.setContentsMargins(0, 0, 0, 0)
-        player_layout.addWidget(self._file_name_label)
+        player_layout.setSpacing(0)
         player_layout.addWidget(self._controls)
         player_layout.addWidget(self._speed_panel)
         player_layout.addWidget(self._waveform_panel)
@@ -144,6 +144,7 @@ class MainWindow(QMainWindow):
         splitter.splitterMoved.connect(self._on_ui_state_changed)
         self._splitter = splitter
         self.setCentralWidget(splitter)
+        self._fit_player_panel_to_contents()
         # 波形とスペクトラムが増えた分だけ既定の高さを広げ、プレイリスト領域を残す。
         self.resize(720, 700)
 
@@ -442,6 +443,30 @@ class MainWindow(QMainWindow):
         total = sum(self._splitter.sizes())
         player, playlist = distribute_splitter_sizes(state, total)
         self._splitter.setSizes([player, playlist])
+        # playerPanel は内容高を上限にしている。保存値がその上限を超えると、
+        # QSplitter は要求した領域だけ確保する一方、子Widget自体は上限高で止まり、
+        # playerPanel とプレイリストの間に描画されない空間が残る。復元後にも
+        # 実際の内容高で再配分し、確保領域とWidget geometryを一致させる。
+        self._fit_player_panel_to_contents()
+
+    def _fit_player_panel_to_contents(self) -> None:
+        """上側Panelを内容高へ固定し、Splitterの余剰をプレイリストへ渡す。
+
+        QBoxLayoutは非伸長Widgetだけで親が内容より高い場合、余剰をWidget間へ
+        均等に配る。Splitterの保存比率で上側が過大になると、各バーの前後へ
+        空白が現れるため、可視な子のsizeHintを上限として発生源を断つ。
+        """
+        self._player_panel.setMaximumHeight(self._player_panel_unbounded_height)
+        layout = self._player_panel.layout()
+        if layout is None:
+            return
+        layout.invalidate()
+        layout.activate()
+        content_height = max(1, layout.sizeHint().height())
+        self._player_panel.setMaximumHeight(content_height)
+        total = sum(self._splitter.sizes())
+        if total > 0:
+            self._splitter.setSizes([content_height, max(0, total - content_height)])
 
     def _screen_rects(self) -> list[ScreenRect]:
         """現在の画面の利用可能領域（primaryを先頭にする）。"""
@@ -471,14 +496,9 @@ class MainWindow(QMainWindow):
     def _on_source_changed(self, source: object) -> None:
         self._has_current_source_error = False
         if not isinstance(source, Path):
-            self._file_name_label.setText(NO_FILE_TEXT)
-            self._file_name_label.setToolTip("")
             self.setWindowTitle(WINDOW_TITLE)
             self.statusBar().showMessage("音声ファイルを開いてください。")
             return
-        # メタデータ（タイトル・アーティスト）は P2 の責務。ここではファイル名だけ。
-        self._file_name_label.setText(source.name)
-        self._file_name_label.setToolTip(str(source))
         self.setWindowTitle(f"{WINDOW_TITLE} — {source.name}")
         self.statusBar().showMessage(_MEDIA_STATUS_MESSAGES[MediaStatus.LOADING])
 
@@ -537,6 +557,7 @@ class MainWindow(QMainWindow):
         self._waveform_panel.setVisible(settings.waveform_visible)
         self._spectrum_panel.set_spectrum_visible(settings.spectrum_visible)
         self._spectrum_panel.set_level_meter_visible(settings.level_meter_visible)
+        self._fit_player_panel_to_contents()
 
     # -- Controller からの通知（続き）---------------------------------------
 

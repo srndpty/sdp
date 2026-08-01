@@ -7,7 +7,7 @@
 from pathlib import Path
 
 from PySide6.QtGui import QShowEvent
-from PySide6.QtWidgets import QVBoxLayout, QWidget
+from PySide6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
 from sdp.core.analysis.waveform import WaveformData
 from sdp.core.playback.controller import PlaybackController
@@ -29,6 +29,7 @@ class WaveformPanel(QWidget):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("waveformPanel")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         self._playback = playback
         self._waveform_analysis = waveform_analysis
         self._active_path: Path | None = None
@@ -39,6 +40,7 @@ class WaveformPanel(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         layout.addWidget(self._widget)
 
         playback.source_changed.connect(self._on_source_changed)

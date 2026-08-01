@@ -6,6 +6,7 @@ from PySide6.QtCore import QObject, Qt, Slot
 from PySide6.QtWidgets import QApplication
 
 from sdp.core.playlist.model import PlaylistModel
+from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.services.launch_request import LaunchRequest
 from sdp.ui.main_window import MainWindow
 
@@ -18,11 +19,13 @@ class LaunchRequestHandler(QObject):
     def __init__(
         self,
         playlist: PlaylistModel,
+        playlist_playback: PlaylistPlaybackController,
         window: MainWindow,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._playlist = playlist
+        self._playlist_playback = playlist_playback
         self._window = window
 
     def apply_initial(self, request: LaunchRequest) -> None:
@@ -44,14 +47,19 @@ class LaunchRequestHandler(QObject):
                 len(request.ignored_arguments),
                 request.ignored_arguments,
             )
+        added_entry_ids: tuple[str, ...] = ()
         if request.paths:
-            self._playlist.add_paths(request.paths)
+            added_entry_ids = self._playlist.add_paths(request.paths)
             message = f"{len(request.paths)}曲をプレイリストへ追加しました。"
             if request.ignored_arguments:
                 message += f" {len(request.ignored_arguments)}件の引数を無視しました。"
             self._window.show_status_message(message)
         elif request.ignored_arguments:
             self._window.show_status_message("追加できるファイルがありませんでした。")
+        # argvはExplorerの関連付け起動と明示的な引数付き起動を表す。保存済みの
+        # current entryではなく、今回追加した先頭entryを再生する。
+        if added_entry_ids:
+            self._playlist_playback.play_entry(added_entry_ids[0])
         if not initial and request.activate_window:
             self._activate_window()
 

@@ -5,16 +5,18 @@
 
 import inspect
 from collections.abc import Callable, Iterator
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QDialogButtonBox,
     QDoubleSpinBox,
-    QLabel,
+    QSizePolicy,
     QSplitter,
     QTableView,
     QWidget,
@@ -33,14 +35,7 @@ from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.core.playlist.types import RepeatMode
 from sdp.services.pcm_tap import PcmTap
 from sdp.services.settings import AppSettings, AppSettingsController
-from sdp.services.ui_state import (
-    MINIMUM_SPLITTER_SIZE,
-    ScreenRect,
-    SplitterState,
-    UiState,
-    WindowState,
-    distribute_splitter_sizes,
-)
+from sdp.services.ui_state import ScreenRect, SplitterState, UiState, WindowState
 from sdp.services.waveform_analysis import WaveformAnalysisService
 from sdp.ui import main_window as main_window_module
 from sdp.ui.legal_dialog import LegalDocumentDialog
@@ -107,12 +102,6 @@ def audio_file(tmp_path: Path) -> Path:
     return path
 
 
-def file_name_text(window: MainWindow) -> str:
-    label = window.findChild(QLabel, "fileNameLabel")
-    assert label is not None
-    return label.text()
-
-
 def stub_open_dialog(selected: str) -> Callable[..., tuple[str, str]]:
     """`QFileDialog.getOpenFileName` の差し替え。空文字はキャンセルを表す。"""
 
@@ -132,9 +121,7 @@ def action_of(window: MainWindow, name: str) -> QAction:
 @pytest.mark.parametrize(
     ("object_name", "accessible_name"),
     [
-        ("fileNameLabel", "現在のファイル"),
         ("playButton", "再生"),
-        ("pauseButton", "一時停止"),
         ("stopButton", "停止"),
         ("seekSlider", "再生位置"),
         ("volumeSlider", "音量"),
@@ -328,28 +315,24 @@ def test_all_files_filter_is_available() -> None:
     assert "すべてのファイル (*)" in main_window_module.FILE_DIALOG_FILTER
 
 
-def test_source_change_updates_file_name_and_title(
+def test_source_change_updates_the_window_title(
     window: MainWindow, controller: PlaybackController, audio_file: Path
 ) -> None:
-    """source_changed でファイル名表示・ツールチップ・タイトルが更新される。"""
+    """source_changedでファイル名をウィンドウタイトルへ表示する。"""
     controller.load(audio_file)
 
-    assert file_name_text(window) == audio_file.name
     assert window.windowTitle() == f"sdp — {audio_file.name}"
-    label = window.findChild(QLabel, "fileNameLabel")
-    assert label is not None
-    assert label.toolTip() == str(audio_file.resolve())
+    assert window.findChild(QWidget, "fileNameLabel") is None
 
 
 def test_cleared_source_restores_the_initial_title(
     window: MainWindow, controller: PlaybackController, audio_file: Path
 ) -> None:
-    """source が無くなったらファイル名表示とタイトルを初期状態へ戻す。"""
+    """sourceが無くなったらタイトルを初期状態へ戻す。"""
     controller.load(audio_file)
 
     controller.source_changed.emit(None)
 
-    assert file_name_text(window) == main_window_module.NO_FILE_TEXT
     assert window.windowTitle() == main_window_module.WINDOW_TITLE
     assert window.statusBar().currentMessage() == "音声ファイルを開いてください。"
 
@@ -395,7 +378,7 @@ def test_error_message_is_shown_without_technical_detail(
 
     assert window.statusBar().currentMessage() == error.message
     assert error.detail not in window.statusBar().currentMessage()
-    assert error.detail not in file_name_text(window)
+    assert error.detail not in window.windowTitle()
 
 
 @pytest.mark.parametrize("error_first", [True, False])
@@ -712,6 +695,45 @@ def test_toggling_settings_shows_and_hides_each_visualization(
     assert panel.is_level_meter_visible
 
 
+def test_playlist_keeps_a_useful_height_and_player_panel_does_not_expand(
+    window: MainWindow, qtbot: QtBot
+) -> None:
+    """保存済み比率が上側へ偏ってもプレイリストを狭くせず、余白を作らない。"""
+    window.resize(880, 768)
+    window.show()
+    qtbot.waitExposed(window)
+    splitter = window.findChild(QSplitter, "mainSplitter")
+    player_panel = window.findChild(QWidget, "playerPanel")
+    playlist = window.findChild(PlaylistView)
+    assert splitter is not None
+    assert player_panel is not None
+    assert playlist is not None
+
+    splitter.setSizes([10_000, 1])
+    QApplication.processEvents()
+
+    assert playlist.minimumHeight() == 240
+    assert playlist.height() >= 240
+    assert player_panel.sizePolicy().verticalPolicy() is QSizePolicy.Policy.Maximum
+    player_layout = player_panel.layout()
+    assert player_layout is not None
+    assert player_layout.spacing() == 0
+    assert player_panel.height() <= player_layout.sizeHint().height()
+
+    packed_widgets = [
+        window.findChild(QWidget, name) for name in ("speedPanel", "waveformPanel", "spectrumPanel")
+    ]
+    controls = window.findChild(PlayerControls)
+    assert controls is not None
+    assert all(widget is not None for widget in packed_widgets)
+    widgets = [controls, *[widget for widget in packed_widgets if widget is not None]]
+    gaps = [
+        following.geometry().top() - current.geometry().bottom() - 1
+        for current, following in pairwise(widgets)
+    ]
+    assert gaps == [0, 0, 0]
+
+
 def test_hidden_waveform_panel_stops_following_the_position(
     window: MainWindow, controller: PlaybackController, audio_file: Path, qtbot: QtBot
 ) -> None:
@@ -756,19 +778,18 @@ def window_state_of(window: MainWindow) -> WindowState:
     return state
 
 
-def expected_player_ratio(window: MainWindow, saved: SplitterState, total: int) -> float:
-    """保存比率を子Widgetのminimum sizeで補正した期待値。"""
+def assert_player_and_playlist_are_packed(window: MainWindow) -> None:
+    """上側Panelとプレイリストの間にはSplitter handle以外の空間がない。"""
     splitter = window.findChild(QSplitter, "mainSplitter")
     assert splitter is not None
     player = splitter.widget(0)
     playlist = splitter.widget(1)
     assert player is not None
     assert playlist is not None
-    player_minimum = max(player.minimumHeight(), player.minimumSizeHint().height(), 0)
-    playlist_minimum = max(playlist.minimumHeight(), playlist.minimumSizeHint().height(), 0)
-    requested_player, _ = distribute_splitter_sizes(saved, total)
-    fitted_player = max(player_minimum, min(total - playlist_minimum, requested_player))
-    return fitted_player / total
+    player_layout = player.layout()
+    assert player_layout is not None
+    assert player.height() == player_layout.sizeHint().height()
+    assert playlist.geometry().top() - player.geometry().bottom() - 1 == splitter.handleWidth()
 
 
 def test_capture_returns_the_current_geometry(window: MainWindow, qtbot: QtBot) -> None:
@@ -894,8 +915,8 @@ def test_restore_moves_an_offscreen_window_back(window: MainWindow) -> None:
     assert window.geometry().y() >= 0
 
 
-def test_restore_and_capture_round_trip_the_splitter(window: MainWindow, qtbot: QtBot) -> None:
-    """Splitterは比率として復元され、captureで取り出せる。"""
+def test_restore_does_not_leave_a_gap_below_the_player(window: MainWindow, qtbot: QtBot) -> None:
+    """上側へ偏った保存値でもRMSとプレイリストの間に空間を残さない。"""
     window.resize(800, 900)
     window.show()
     qtbot.waitExposed(window)
@@ -903,19 +924,13 @@ def test_restore_and_capture_round_trip_the_splitter(window: MainWindow, qtbot: 
     saved = SplitterState(600, 200)
     window.restore_ui_state(UiState(main_splitter=saved), screens())
     qtbot.wait(20)
-    captured = window.capture_ui_state().main_splitter
-
-    assert captured is not None
-    assert captured.player_size > captured.playlist_size
-    assert captured.player_ratio == pytest.approx(
-        expected_player_ratio(window, saved, captured.total), abs=0.03
-    )
+    assert_player_and_playlist_are_packed(window)
 
 
 def test_splitter_restore_adapts_to_the_current_window_size(
     window: MainWindow, qtbot: QtBot
 ) -> None:
-    """保存時と違うWindow高さでも、比率を保って再配分する。"""
+    """保存時と違うWindow高さでも、内容を詰めてプレイリストへ割り当てる。"""
     window.resize(800, 500)
     window.show()
     qtbot.waitExposed(window)
@@ -929,9 +944,7 @@ def test_splitter_restore_adapts_to_the_current_window_size(
     assert captured is not None
     assert captured.total <= window.height()
     assert captured.playlist_size > 0
-    assert captured.player_ratio == pytest.approx(
-        expected_player_ratio(window, saved, captured.total), abs=0.03
-    )
+    assert_player_and_playlist_are_packed(window)
 
 
 def test_splitter_restore_works_with_every_visualization_hidden(
@@ -957,10 +970,8 @@ def test_splitter_restore_works_with_every_visualization_hidden(
     captured = window.capture_ui_state().main_splitter
 
     assert captured is not None
-    assert captured.playlist_size >= MINIMUM_SPLITTER_SIZE
-    assert captured.player_ratio == pytest.approx(
-        expected_player_ratio(window, saved, captured.total), abs=0.03
-    )
+    assert captured.playlist_size >= window._playlist_view.minimumHeight()  # pyright: ignore[reportPrivateUsage]
+    assert_player_and_playlist_are_packed(window)
 
 
 def test_splitter_restore_works_with_every_visualization_visible(
@@ -977,10 +988,8 @@ def test_splitter_restore_works_with_every_visualization_visible(
     captured = window.capture_ui_state().main_splitter
 
     assert captured is not None
-    assert captured.playlist_size >= MINIMUM_SPLITTER_SIZE
-    assert captured.player_ratio == pytest.approx(
-        expected_player_ratio(window, saved, captured.total), abs=0.03
-    )
+    assert captured.playlist_size >= window._playlist_view.minimumHeight()  # pyright: ignore[reportPrivateUsage]
+    assert_player_and_playlist_are_packed(window)
 
 
 # -- 前回フォルダー ---------------------------------------------------------

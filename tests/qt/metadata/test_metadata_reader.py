@@ -193,6 +193,7 @@ def test_successful_read_becomes_loaded(
 
     wait_for_status(qtbot, playlist, 0, MetadataStatus.LOADED)
     assert playlist.entry_at(0).metadata == SAMPLE
+    assert playlist.entry_at(0).file_size_bytes == audio_files[0].stat().st_size
 
 
 def test_failed_read_becomes_failed_and_is_logged(
@@ -212,6 +213,7 @@ def test_failed_read_becomes_failed_and_is_logged(
         wait_for_status(qtbot, playlist, 0, MetadataStatus.FAILED)
 
     assert playlist.entry_at(0).metadata is None
+    assert playlist.entry_at(0).file_size_bytes == audio_files[0].stat().st_size
     assert "メタデータを読み取れませんでした" in caplog.text
     reader.shutdown(timeout_ms=2_000)
 

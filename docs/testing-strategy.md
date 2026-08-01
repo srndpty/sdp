@@ -35,9 +35,9 @@
 | `analysis/level.py`（P5-B） | StereoLevelFrameの不変性／bool拒否／有限性／floor〜0dB／`RMS ≦ Peak ≦ Peak hold`、無音・空入力・定値1.0（0dB）・定値0.5（約-6.02dB）・正弦波1.0のPeak約0dBとRMS約-3.01dB・正弦波0.5のRMS約-9.03dB、絶対値によるPeak、clipping入力の0dB clamp、floor clamp、epsilonによるlog(0)防御、RMS≦Peak、200万sampleでの精度（float64昇格）、入力配列を変更しないこと、NaN／inf／dtype／次元の拒否。Peak holdは即時上昇・保持時間中の維持・保持後の減衰・elapsedへの比例（tick数に依存しない）・現在Peak未満へ落ちないこと・floor未満へ落ちないこと・左右独立・process未呼出時の不変・reset・負／非有限／boolのelapsed拒否・不正な設定値の拒否 |
 | `analysis/waveform.py` | WaveformDataのread-only／shape／dtype／有限性／範囲検証、UInt8／Int16／Int32／Float正規化、stereo mono化、frame境界、無音／正弦波／clipping、増分chunk境界、端数bucket、1sample追加、旧snapshot不変、60分相当18万bucket |
 | `analysis/waveform_cache.py` | path／size／mtime／analysis version／bucket／format versionのkey無効化matrix、SHA-256名、日本語path、float32往復、必須field／dtype／shape／NaN／inf／min>max／duration／completeの破損matrix、allow_pickle=False、write／fsync／replace失敗、temp回収、hit時刻、決定的500MB LRU、個別削除失敗継続 |
-| `metadata/reader.py` の純粋読取 | タグあり（MP3 / FLAC）・タグなし・壊れたファイル・未対応形式・欠損・ディレクトリ。日本語と空白、複数アーティストの結合、空文字の `None` 化、長さの丸めと NaN / inf / 負値の防御、長さ不明でもタグを捨てないこと、既知の解析・I/O失敗だけを`MetadataReadError`へ正規化し、属性取得などの予期しない例外は変換せず伝播すること、読み取りで元ファイルを書き換えないこと。タグ付きファイルはテスト音源を tmp_path へ複製して Mutagen 自身で書き込む（外部プロセスを起動しない） |
-| `metadata/types.py` | `MetadataStatus` の値、`TrackMetadata` の不変性、長さの表示整形 |
-| `playlist/entry.py` | entry_id の一意性と復元時の保持、パスの絶対化（相対・`~`・日本語・空白）、直接構築を含む欠損の検出と再確認、不変性 |
+| `metadata/reader.py` の純粋読取 | タグあり（MP3 / FLAC）・タグなし・壊れたファイル・未対応形式・欠損・ディレクトリ。日本語と空白、**MP3の生ID3 frameでLatin-1宣言を確認できた場合だけ**のCP932補正、正常な欧文・記号・C1制御文字の非変換、複数アーティストの結合、空文字の `None` 化、長さ・ビットレートの取得と不正値防御、長さ不明でもタグを捨てないこと、既知の解析・I/O失敗だけを`MetadataReadError`へ正規化し、属性取得などの予期しない例外は変換せず伝播すること、読み取りで元ファイルを書き換えないこと。タグ付きファイルはテスト音源を tmp_path へ複製して Mutagen 自身で書き込む（外部プロセスを起動しない） |
+| `metadata/types.py` | `MetadataStatus` の値、`TrackMetadata` の不変性、duration／bitrateの数値不変条件、長さ・サイズ・bitrate整形で不正値を0へ丸めないこと |
+| `playlist/entry.py` | entry_id の一意性と復元時の保持、パスの絶対化（相対・`~`・日本語・空白）、直接構築を含む欠損の検出と再確認、不変性、ファイルサイズをメタデータ解析成否と独立して保持すること |
 | `PlaylistPlaybackController` | FakeBackend + 実 PlaybackController + 実 PlaylistModel で、現在 entry の管理（重複パスを entry_id で区別、直接 load による解除）、次 / 前 / 自動次曲の欠損スキップ（存在確認直後に消えるTOCTOUを含む）、末尾で折り返さないこと、source世代ごとの`END_OF_MEDIA`一度だけ消費・遅延重複・手動切替への防御、Model の並べ替え / 削除 / 全消去中の current 追跡（削除で stop しないこと）、再生エラーで自動スキップしないこと |
 | リピート | OFF / ALL / ONE の組合せ、ALL の前後折り返しと自動次曲、1 件だけの再実行、ONE が**手動 next/previous を妨げない**こと、ONE が直接単曲へ適用されないこと、モード変更で再生へ触れないこと、不正値の `TypeError` |
 | シャッフル | seed 付き `random.Random` を注入して決定性を確保。厳密なbool設定、1 サイクル内で重複しないこと、同じパスの異なる entry_id がそれぞれ候補になること、Repeat ALL の新サイクルとサイクル境界での同曲回避、欠損と TOCTOU のスキップ、同期的な再生拒否を末尾到達と区別すること、全候補欠損でも有限で終わること、Model の行順が変わらないこと |
@@ -62,15 +62,15 @@
 | `PlaybackController` | **FakeBackend**（`IPlaybackBackend` のテストダブル）を使い、状態遷移・曲終了時の次曲送り・エラー時の方針を `qtbot.waitSignal` で検証 |
 | `QtMultimediaBackend` | Qt enum 写像の完全性（値が増えたら失敗する）、エラー変換、故障注入による変換失敗・再入ガード、状態通知の重複抑制、音を鳴らさない load・source差し替え・再ロード、**load 世代の identity（旧 player の遅延 status／error／PCM が旧世代として届くこと、旧 player が state／position／duration を動かさないこと、旧世代 player の破棄、速度・ピッチ補正の引き継ぎ）**。所有する QMediaPlayer / QAudioOutput は `findChildren` で取得し、テストのために公開 API を増やさない |
 | `SingleInstanceService` | テストごとの固有server名を注入し、primary／別processのsecondary判定、1件・複数件の要求往復、順序・重複・Unicode・`activate_window`、composition構築中のdelivery開始前でもtimeoutせずprimary queueへ受理ACKを返し、delivery後に1回だけ通知すること、header／payloadの分割受信、1socketの連続message、不正JSON、未知version、不正`activate_window`、256KiB上限、stale endpoint回復、shutdown後の同名再起動を実`QLocalServer` / `QLocalSocket`で検証する。UI・playlist・playback・保存JSONに依存しないことも固定する |
-| `PlayerControls` | **FakeBackend + 実 PlaybackController** で、状態ごとのボタン活性、シーク（ドラッグ中の非同期更新の抑止、有効なpress/releaseでの1回だけのseek、source・duration変更による古い操作の取消）、音量・ミュートの往復とフィードバックループの不在を検証する。子ウィジェットは `objectName` で取得する |
+| `PlayerControls` | **FakeBackend + 実 PlaybackController** で、状態ごとのボタン活性、フォントfallbackに依存しない白い自作SVGアイコンと操作部の1行配置、リピートのOFF／ALLをチェック背景・ONEを大きな1と単一循環矢印で区別することとテキスト代替、シーク（ドラッグ中の非同期更新の抑止、有効なpress/releaseでの1回だけのseek、source・duration変更による古い操作の取消）、音量・ミュートの往復とフィードバックループの不在を検証する。子ウィジェットは `objectName` で取得する |
 | `MainWindow`（UI状態） | captureがnormal geometryとSplitterサイズを返すこと、**最大化中でもnormal geometryを返すこと**、最小化状態を保存しないこと、restoreでgeometryと最大化を適用しnormal復元では既存の最大化／最小化を解除すること、画面外の保存値を画面内へ戻すこと、Splitterの往復と現在Window高さへの適応、可視化が全ON／全OFFのどちらでも保存比率を許容誤差内で復元すること、前回フォルダーを同期I/Oなしでファイルダイアログへ渡すこと、ファイル選択で親フォルダーを更新し**Cancelでは更新しないこと**、D&Dで更新しないこと、相対パスの無視、Unicodeパス、move／resizeの通知、**復元適用が通知しないこと**、JSON・schema version・保存先・保存タイマーを持たないことを検証する |
-| `MainWindow` | `QFileDialog.getOpenFileName` を差し替え、キャンセル / 選択、ファイル名とタイトルの更新、`MediaStatus` とエラー表示（具体的エラーの優先、`detail` を出さないこと）、source解除、終了アクションを検証する。**設定アクションでダイアログが開くこと、二重に開かないこと、閉じた後に再度開けること、開き直しで最新設定が入ること、ダイアログの要求が調停サービス経由でControllerと各Panelへ届くこと、JSON・schema version・保存タイマーを持たないこと、復元済み表示設定をWindow表示前に反映すること、3つの可視化を個別にON/OFFできること、波形非表示中は位置追従を止め再表示で現在位置へ復帰すること**を検証する |
+| `MainWindow` | `QFileDialog.getOpenFileName` を差し替え、キャンセル / 選択、現在ファイルを含むタイトルの更新、`MediaStatus` とエラー表示（具体的エラーの優先、`detail` を出さないこと）、source解除、終了アクションを検証する。上側Panelが内容以上に伸びず、PlaylistViewが240px以上を確保することも検証する。**設定アクションでダイアログが開くこと、二重に開かないこと、閉じた後に再度開けること、開き直しで最新設定が入ること、ダイアログの要求が調停サービス経由でControllerと各Panelへ届くこと、JSON・schema version・保存タイマーを持たないこと、復元済み表示設定をWindow表示前に反映すること、3つの可視化を個別にON/OFFできること、波形非表示中は位置追従を止め再表示で現在位置へ復帰すること**を検証する |
 | `app.py` の配線（P6-C） | settings v1／v2／v3とui-state v1／v2の起動matrix、現在曲がWindow表示前に復元され**自動再生せず位置0のまま**であること、削除済みentry_idでも現在曲なしで起動し次の保存で取り除かれること、曲を選ぶとui-stateへ保存されること、**3ファイルの破損8通り**（健全なファイルだけ保存でき、破損ファイルのbytesが変わらず、再生・可視化が継続し、メッセージに生の例外もパスも出ないこと）、3カテゴリすべての保存失敗通知と抑制・復旧通知、保存失敗が再生と他ファイルを妨げないこと、終了処理が1カテゴリの**例外**で後続を飛ばさないこと、終了後にworkerとtimerが残らないこと、設定ダイアログを開いたままでも安全に終了できることを検証する |
-| `app.py` の配線（P7-A） | `QApplication`作成後・composition構築前の単一instance判定、secondaryがevent loopと`PlayerComposition`を作らず終了すること、転送失敗で二重起動しないこと、初回引数が復元済みplaylist末尾へ追加され自動再生しないこと、実行中の受信が同じWindow／PlaylistModelへ適用されること、引数なし・無視引数だけでも前面化すること、`activate_window=False`では追加だけを行うこと、最小化解除・最大化維持・前面化要求、IPC threadがshutdownの最初に解放されることを検証する。settings／playlist／ui-state schemaと`PlaybackBackend`の既存契約テスも変更しない |
+| `app.py` の配線（P7-A） | `QApplication`作成後・composition構築前の単一instance判定、secondaryがevent loopと`PlayerComposition`を作らず終了すること、転送失敗で二重起動しないこと、初回引数が復元済みplaylist末尾へ追加され**今回指定した先頭曲を自動再生**すること、実行中の受信も同じWindow／PlaylistModelへ追加して先頭曲を自動再生すること、引数なし・無視引数だけでも前面化すること、`activate_window=False`では再生するが前面化しないこと、最小化解除・最大化維持・前面化要求、IPC threadがshutdownの最初に解放されることを検証する。引数なしの通常起動と保存済みcurrent entryの復元だけでは自動再生せず、settings／playlist／ui-state schemaと`PlaybackBackend`の既存契約も変更しない |
 | `app.py` の配線（UI状態） | PlayerCompositionがUiStateSessionを保持しbuild時に監視しないこと、既定パスが`%LOCALAPPDATA%\sdp\ui-state.json`で設定ファイルと別であること、Window表示前にgeometryと前回フォルダーが復元されること、可視化の表示設定を適用したあとにSplitterが復元されること、復元だけではファイルを書き換えないこと、終了時flushで保存されること、破損時に既定位置で起動し元ファイルを上書きしないこと、ui-state／settings／playlistの障害と保存可否が互いに独立であること、3つのschemaが混ざらないこと、`run()`がstopより前にflushすること、UI層がui-stateのJSON I/Oを持たないことを検証する |
 | `app.py` の配線（設定） | AppSettingsControllerを保持しSettingsSessionと同じsnapshotを使うこと、保存済み表示設定をWindow表示前に反映すること、version 1設定から正常起動し起動だけでは書き換えないこと、初期読込で保存が走らないこと、設定ダイアログの変更がControllerと各Panelへ届くこと、終了時flushでversion 2として保存されること、設定保存失敗がプレイリスト保存と再生を妨げないこと、UI層が設定JSONを読み書きしないことを検証する |
 | `app.py` の配線 | Backend → Controller → PlaylistModel → 永続化サービス → MainWindow を組み立て、復元済みModelの前後曲可否をWindow構築時に反映できること。イベントループは起動しない。PcmTapを保持しBackendのQAudioBufferOutputへ接続されていること、SpectrumPanelが同じPcmTapを使うこと、**LevelMeterWidgetが1つでSpectrumPanel内にあり同じPcmTapを共有すること、mono／L／Rの3本が同じ固定容量であること、本番配線のPCM通知で3本が埋まること、MainWindowがLevelProcessorやリングバッファを持たないこと、UI層がQAudioBuffer系を参照しないこと**、SpectrumWidgetとWaveformWidgetが1つずつ共存すること、buildだけではタイマーを開始しないこと、source変更でPCMがclearされること、shutdownでタイマーとPCM受信が残らないこと、PlaybackBackend IF・FakeBackend・settings／playlist／波形cache schemaが不変であること |
-| `ShortcutManager` | 実QTestキー入力で全割当、auto repeat設定、相対値の境界、sourceなし、入力Widget・ボタンSpace・modalでの抑止、管理外のCtrl+O／Ctrl+Shift+O／Ctrl+C／Ctrl+Vの通過、QObject削除後の安全性を検証する |
+| `ShortcutManager` | 実QTestキー入力で全割当、auto repeat設定、相対値の境界、sourceなし、文字入力Widget・modalでの抑止、**ボタンフォーカス中もSpaceをplay/pauseへグローバル上書きする仕様**、管理外のCtrl+O／Ctrl+Shift+O／Ctrl+C／Ctrl+Vの通過、QObject削除後の安全性を検証する |
 | `services/ui_state.py`（P6-C） | schema v1／v2の読み分け、v1に現在曲が無いこと、v1がv2キーを無視すること、v2のentry_id往復、None・空文字（Noneへ統一）・非文字列の拒否、Unicode entry_id、値オブジェクトが空文字を拒否すること、再生位置・再生状態・選択行を保存しないことを検証する |
 | `PlaylistPlaybackController.select_entry_by_id`（P6-C） | 再生を始めずsourceだけ読み込むこと（`play` を呼ばない・位置0・STOPPEDのまま）、削除済み・欠損entryで何もしないこと、重複pathをentry_idで区別すること、並べ替え後も同じentryへ戻ること、復元後にPrevious／Nextが使えること、Repeat全モード・Shuffleとの共存を検証する |
 | `PlaylistUiStateSource`（P6-C） | WindowのUI状態へ現在曲を合成すること、現在曲が無ければNoneであること、現在曲の削除・全消去で保存対象がNoneになること、復元でWindow状態と現在曲の両方を適用すること（自動再生しない）、未知entry_idを無視して復元全体を失敗にしないこと、現在曲の変更が保存契機として通知されること、購読解除後は通知しないことを検証する |
@@ -82,7 +82,7 @@
 | `SettingsDialog` | objectName／accessibleName、速度入力の範囲・刻み・小数桁、OK／Cancel／Applyの存在、開いた時点の適用済み設定表示、編集だけでは要求しないこと、Applyで閉じずに要求すること、OKで要求して成功時だけ閉じること、調停側が成功通知しなければ適用済み扱いにせずエラーを表示すること、Cancel／EscがApply後の変更を戻さず未適用編集だけ破棄すること、同値Applyでも1回だけ要求すること、`set_settings`での再反映、開いたダイアログの再前面化で全入力の未適用編集を維持すること、プログラム経由の不正値を適用せず短いエラーを出すこと（不正・適用失敗のままOKで閉じないこと）、成功時のエラー消去、JSON・schema version・PlaybackControllerを参照しないこと、破棄後にcallbackを残さないことを検証する |
 | プレイリストの永続化ライフサイクル | 保存先の決定、ファイル未作成での空起動、順序・entry_id・重複行・日本語パス・欠損行の復元、並べ替え / 削除 / 全消去後の保存、読み書き I/O エラーのログ記録。**破損ファイルではクラッシュせず空で起動し、その起動の保存を無効化して既存ファイルを上書きしないこと** |
 | UI 層の依存 | `src/sdp/ui/` 配下を再帰走査し、`qt_backend` / `QMediaPlayer` / `QAudioOutput` / `QAudioBufferOutput` / `QAudioBuffer` / `QAudioDecoder` 自身またはその配下をimportしていないことを標準ライブラリの `ast` で検査する（親モジュール経由も完全修飾して判定し、新しい依存は追加しない） |
-| `MetadataReader` | 実ファイルに対する非同期完了、GUIスレッドでの反映、entry_id・token・path照合、削除・欠損・不適用結果のtoken回収、shutdown後の論理キャンセル、専用poolの並列上限。実行中の同期I/Oを強制停止できないことは協調的shutdownの制約として扱う |
+| `MetadataReader` | 実ファイルに対する非同期完了、GUIスレッドでの反映、**Mutagen解析失敗時も独立したstat結果をサイズ列へ反映すること**、entry_id・token・path照合、削除・欠損・不適用結果のtoken回収、shutdown後の論理キャンセル、専用poolの並列上限。実行中の同期I/Oを強制停止できないことは協調的shutdownの制約として扱う |
 | `WaveformAnalysisService` | fake decode境界でstart冪等、source監視、source変更時の即時clear、事前確認失敗でも同一tokenのstarted→failedとなること、partial／完了／失敗、cache hit／破損miss、request tokenと回収、source切替cancel、stale結果・旧cache保存防止、解析中のsize／mtime変更を終端失敗にすること、読取中削除、GUI thread受信、stat再確認とLRUがworker側であること、縮約中のGUI heartbeat、60分相当stream、timeout後もthread終了まで待つshutdown／QObject削除を検証する |
 | 実`QAudioDecoder` | 音声出力deviceを使わず、WAVとMP3のPCM、実duration、有限min/max、partial、decoderのthread affinity、不正ファイル、decoder生成後のsource切替cancel、shutdown後のthread終了を通常CIで検証する |
 | `WaveformColumns` / 投影 | 配列の不変性、固定60秒窓、0幅・空・無音、1対1、複数bucketのpixel集約、1bucketの複数pixel展開、peak保持、先頭／末尾空白、partial未解析範囲、x→時刻とclamp、180,000 bucketから固定幅だけを生成することを純粋テストする |
@@ -188,7 +188,7 @@ GUIの基本操作と実音Backendは別々に自動検証している。画面�
 
 - [x] アプリが起動する
 - [x] 「開く...」から WAV を選べる
-- [x] ファイル名表示とウィンドウタイトルが更新される
+- [x] 現在ファイル名を含むウィンドウタイトルが更新される
 - [x] 再生 / 一時停止 / 再開 / 停止
 - [x] シーク（つまみを離した時点で位置が変わる）
 - [x] 音量変更とミュート
@@ -208,7 +208,7 @@ MP3は実 `QMediaPlayer` のaudio testで再生とPCM受信を確認した。可
 
 D&D は実際のマウス操作でしか確認できないため自動化しない。
 
-- [ ] 「ファイルを追加...」で複数選択し、選択順のまま追加される
+- [ ] ファイルメニューまたはD&Dで複数選択し、選択順のまま追加される
 - [ ] 同じファイルを 2 回追加でき、2 行として並ぶ
 - [ ] Explorer から 3 件以上を D&D で追加でき、元の順序が保たれる
 - [ ] 日本語・空白を含むパスを D&D できる
@@ -218,7 +218,7 @@ D&D は実際のマウス操作でしか確認できないため自動化しな�
 - [ ] 並べ替え後に行が重複も消失もしない
 - [ ] 非連続の複数行を D&D しても壊れない（移動しないだけ）
 - [ ] 複数選択した行をまとめて削除できる
-- [ ] 全消去のキャンセルで消えない / 確認で消える
+- [ ] 選択行をDeleteで削除でき、Ctrl+A後のDeleteで全行を削除できる
 - [ ] 見つからないファイルがグレー表示になり、行は残る
 - [ ] アプリを終了して再起動すると、順序と重複行が復元される
 - [ ] `%LOCALAPPDATA%\sdp\playlist.json` の内容が想定どおり
@@ -269,11 +269,11 @@ D&D は実際のマウス操作でしか確認できないため自動化しな�
 
 ## 6.5 P2-D 手動スモーク（メタデータ）
 
-- [ ] タグ付き MP3 のタイトル・アーティスト・アルバムが表示される
-- [ ] タグ付き FLAC でも表示される
+- [ ] タグ付き MP3 のタイトルと、サイズ・ビットレートが表示される
+- [ ] タグ付き FLAC でもタイトルと音声情報が表示される
 - [ ] タグなし WAV はファイル名のまま
 - [ ] 再生時間が表示される
-- [ ] 日本語タグ・空白を含むタグが崩れない
+- [ ] 日本語タグ・空白を含むタグが崩れず、Latin-1指定のCP932タグも補正される
 - [ ] 同じファイルを複数行追加しても、各行へ正しく入る
 - [ ] 読み取り中に行を D&D しても壊れない
 - [ ] 読み取り中に行を削除してもクラッシュしない
@@ -305,7 +305,8 @@ D&D は実際のマウス操作でしか確認できないため自動化しな�
 実ウィンドウをアクティブにして行い、P3-Aの聴感確認と合わせてMVP受け入れとする。
 
 - [ ] READMEの全ショートカットが動作し、J/L、音量、速度の長押しだけが連続動作する
-- [ ] 数値入力中の文字キー、ボタン上のSpace、ファイル選択／確認dialog中のキー操作を奪わない
+- [ ] 数値入力中の文字キー、ファイル選択／確認dialog中のキー操作を奪わない
+- [ ] ボタンにフォーカスがあってもSpaceで再生／一時停止が切り替わる
 - [ ] 速度とピッチを変更し、約1.5秒後の`settings.json`がその2項目だけを含む
 - [ ] 変更直後に終了しても値が保存され、再起動後のSpeedPanelへ復元される
 - [ ] 再生位置と「再生中だったか」は再起動後に復元されない
@@ -478,7 +479,7 @@ RSSは60.9→65.5MBでt=30s以降横ばい、リングバッファ3本合計1,03
 - [x] リピートとシャッフルを変更して再起動すると復元される
 - [x] 設定ダイアログとPlayerControlsの表示が一致する（片方で変えても矛盾しない）
 - [ ] 曲を選んで終了すると、次回同じ曲が選ばれている
-- [x] **起動しただけでは音が鳴らない**（自動再生しない）
+- [x] **引数なしで起動しただけでは音が鳴らない**（保存済みの現在曲を自動再生しない）
 - [ ] 復元直後の再生位置が先頭（0:00）である
 - [ ] 復元直後に「前の曲」「次の曲」が期待どおり使える
 - [ ] 前回の曲を削除してから再起動しても落ちず、曲なしで起動する
@@ -781,7 +782,7 @@ per-machine版では上記installer smokeを再実行する。
 - [ ] 旧per-user版がある対話installで、旧install先と先行uninstallの案内が表示されること
 - [ ] 7形式それぞれで「プログラムから開く」にsdpが出ること
 - [ ] Windowsの設定から既定アプリとして選べること（installerが勝手に変えていないこと）
-- [ ] 関連付け経由のダブルクリックで既存instanceへ追加され、processが増え続けないこと
+- [ ] 関連付け経由のダブルクリックで既存instanceへ追加され、その曲が自動再生され、processが増え続けないこと
 - [ ] 日本語・空白を含むpath、長いpathの関連付け起動
 - [ ] 旧version→新versionのupgrade（同一versionのreinstallは自動確認済み）
 - [ ] upgrade後にsettings／playlist／ui-state／cacheが維持されること

@@ -22,7 +22,13 @@ from PySide6.QtCore import (
     Qt,
 )
 
-from sdp.core.metadata.types import MetadataStatus, TrackMetadata, format_duration_ms
+from sdp.core.metadata.types import (
+    MetadataStatus,
+    TrackMetadata,
+    format_bitrate,
+    format_duration_ms,
+    format_file_size,
+)
 from sdp.core.playlist.entry import FileStatus, PlaylistEntry, create_entry
 
 _logger = logging.getLogger(__name__)
@@ -62,6 +68,12 @@ DURATION_MS_ROLE = int(Qt.ItemDataRole.UserRole) + 6
 METADATA_STATUS_ROLE = int(Qt.ItemDataRole.UserRole) + 7
 """メタデータの読み込み状態（:class:`MetadataStatus`）。"""
 
+FILE_SIZE_BYTES_ROLE = int(Qt.ItemDataRole.UserRole) + 8
+"""ファイルサイズ（``int | None``、バイト）。"""
+
+BITRATE_BPS_ROLE = int(Qt.ItemDataRole.UserRole) + 9
+"""ビットレート（``int | None``、bit/s）。"""
+
 METADATA_FAILED_TOOLTIP = "メタデータを読み取れませんでした。"
 """読み取り失敗のツールチップ。例外文字列やトレースバックは出さない。"""
 
@@ -70,6 +82,8 @@ METADATA_ROLES: tuple[int, ...] = (
     ARTIST_ROLE,
     ALBUM_ROLE,
     DURATION_MS_ROLE,
+    FILE_SIZE_BYTES_ROLE,
+    BITRATE_BPS_ROLE,
     METADATA_STATUS_ROLE,
 )
 """メタデータ由来の role。再生制御はこれだけの変化では何もしない。"""
@@ -93,21 +107,21 @@ class Column(IntEnum):
 
     TITLE = 0
     NAME = 0
-    ARTIST = 1
-    ALBUM = 2
+    FILE_SIZE = 1
+    BITRATE = 2
     DURATION = 3
     PATH = 4
 
 
 _HEADERS: dict[Column, str] = {
     Column.TITLE: "タイトル",
-    Column.ARTIST: "アーティスト",
-    Column.ALBUM: "アルバム",
+    Column.FILE_SIZE: "サイズ",
+    Column.BITRATE: "ビットレート",
     Column.DURATION: "長さ",
     Column.PATH: "パス",
 }
 
-_METADATA_COLUMNS = (Column.TITLE, Column.ARTIST, Column.ALBUM, Column.DURATION)
+_METADATA_COLUMNS = (Column.TITLE, Column.FILE_SIZE, Column.BITRATE, Column.DURATION)
 """メタデータで表示が変わる列の範囲（先頭から長さまで）。"""
 
 
@@ -155,6 +169,8 @@ class PlaylistModel(QAbstractTableModel):
                 ARTIST_ROLE: QByteArray(b"artist"),
                 ALBUM_ROLE: QByteArray(b"album"),
                 DURATION_MS_ROLE: QByteArray(b"durationMs"),
+                FILE_SIZE_BYTES_ROLE: QByteArray(b"fileSizeBytes"),
+                BITRATE_BPS_ROLE: QByteArray(b"bitrateBps"),
                 METADATA_STATUS_ROLE: QByteArray(b"metadataStatus"),
             }
         )
@@ -182,6 +198,10 @@ class PlaylistModel(QAbstractTableModel):
             return None if entry.metadata is None else entry.metadata.album
         if role == DURATION_MS_ROLE:
             return None if entry.metadata is None else entry.metadata.duration_ms
+        if role == FILE_SIZE_BYTES_ROLE:
+            return entry.file_size_bytes
+        if role == BITRATE_BPS_ROLE:
+            return None if entry.metadata is None else entry.metadata.bitrate_bps
         if role == METADATA_STATUS_ROLE:
             return entry.metadata_status
         if role == int(Qt.ItemDataRole.ToolTipRole):
@@ -198,13 +218,13 @@ class PlaylistModel(QAbstractTableModel):
             return entry.display_title
         if column == Column.PATH:
             return str(entry.path)
+        if column == Column.FILE_SIZE:
+            return "" if entry.file_size_bytes is None else format_file_size(entry.file_size_bytes)
         metadata = entry.metadata
         if metadata is None:
             return "" if column in _METADATA_COLUMNS else None
-        if column == Column.ARTIST:
-            return metadata.artist or ""
-        if column == Column.ALBUM:
-            return metadata.album or ""
+        if column == Column.BITRATE:
+            return "" if metadata.bitrate_bps is None else format_bitrate(metadata.bitrate_bps)
         if column == Column.DURATION:
             return "" if metadata.duration_ms is None else format_duration_ms(metadata.duration_ms)
         return None
@@ -508,6 +528,14 @@ class PlaylistModel(QAbstractTableModel):
         """読み取れたメタデータを反映する。"""
         return self._replace_entry(entry_id, lambda entry: entry.with_metadata(metadata))
 
+    def apply_file_size(self, entry_id: str, file_size_bytes: int | None) -> bool:
+        """背景で取得したファイルサイズだけを反映する。"""
+        return self._replace_entry(
+            entry_id,
+            lambda entry: entry.with_file_size(file_size_bytes),
+            roles=[FILE_SIZE_BYTES_ROLE, int(Qt.ItemDataRole.DisplayRole)],
+        )
+
     def mark_metadata_failed(self, entry_id: str) -> bool:
         """読み取り失敗にする。表示はファイル名フォールバックへ戻る。"""
         return self._replace_entry(entry_id, lambda entry: entry.with_metadata_failed())
@@ -532,7 +560,7 @@ class PlaylistModel(QAbstractTableModel):
             return False
         entry = self._entries[row]
         updated = transform(entry)
-        if updated.metadata == entry.metadata and updated.metadata_status is entry.metadata_status:
+        if updated == entry:
             return False
         self._entries[row] = updated
         changed_roles = (

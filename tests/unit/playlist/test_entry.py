@@ -256,3 +256,19 @@ def test_becoming_missing_drops_metadata(audio_file: Path) -> None:
 
     assert gone.metadata is None
     assert gone.metadata_status is MetadataStatus.NOT_REQUESTED
+
+
+def test_file_size_is_independent_from_metadata_status(audio_file: Path) -> None:
+    """サイズはタグ解析の成否と独立し、メタデータ失敗でも保持する。"""
+    entry = create_entry(audio_file).with_file_size(1234).with_metadata_failed()
+
+    assert entry.file_size_bytes == 1234
+    assert entry.metadata is None
+    assert entry.metadata_status is MetadataStatus.FAILED
+
+
+@pytest.mark.parametrize("value", [-1, True])
+def test_file_size_rejects_invalid_values(audio_file: Path, value: int) -> None:
+    """不正なサイズを0として保持しない。"""
+    with pytest.raises(ValueError):
+        create_entry(audio_file).with_file_size(value)

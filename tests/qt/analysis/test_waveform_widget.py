@@ -36,7 +36,7 @@ def test_initial_contract_and_empty_paint(qtbot: QtBot) -> None:
     widget.resize(600, 120)
     widget.show()
     assert widget.objectName() == "waveformWidget"
-    assert widget.minimumHeight() >= 100
+    assert widget.minimumHeight() == 55
     assert widget.accessibleName() == "波形"
     assert not widget.grab().isNull()
 

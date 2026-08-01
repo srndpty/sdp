@@ -9,7 +9,7 @@ Peak／RMSの計算、Peak hold、タイマーは持たない（SpectrumPanelの
 import math
 
 from PySide6.QtCore import QEvent, QLineF, QRectF, Qt
-from PySide6.QtGui import QPainter, QPaintEvent, QPalette, QPen
+from PySide6.QtGui import QFont, QFontMetricsF, QPainter, QPaintEvent, QPalette, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from sdp.core.analysis.level import LEVEL_DB_FLOOR, StereoLevelFrame
@@ -19,12 +19,12 @@ NO_SOURCE_MESSAGE = "音声を再生するとレベルを表示します"
 GRID_DB_STEPS = (-60.0, -40.0, -20.0, -6.0)
 """dB基準線と目盛の文字。状態を色だけで伝えないため位置と数値を併記する。"""
 
-_MINIMUM_HEIGHT = 78
-_MARGIN = 6.0
+_MARGIN = 3.0
 _LABEL_WIDTH = 14.0
-_ROW_GAP = 6.0
-_SCALE_HEIGHT = 12.0
-_MAX_BAR_HEIGHT = 20.0
+_ROW_GAP = 3.0
+_SCALE_PADDING = 1.0
+_MIN_BAR_HEIGHT = 6.0
+_MAX_BAR_HEIGHT = 10.0
 _PEAK_PEN_WIDTH = 1.0
 _PEAK_HOLD_PEN_WIDTH = 3.0
 
@@ -39,7 +39,7 @@ class LevelMeterWidget(QWidget):
         super().__init__(parent)
         self.setObjectName("levelMeterWidget")
         self.setAccessibleName("レベルメーター")
-        self.setMinimumHeight(_MINIMUM_HEIGHT)
+        self._update_minimum_height()
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         # 可視化専用のためキーボード操作もマウス操作も受け取らない。
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -136,7 +136,11 @@ class LevelMeterWidget(QWidget):
         painter.end()
 
     def changeEvent(self, event: QEvent) -> None:
-        if event.type() is QEvent.Type.PaletteChange:
+        if event.type() is QEvent.Type.FontChange:
+            self._update_minimum_height()
+            self.updateGeometry()
+            self.update()
+        elif event.type() is QEvent.Type.PaletteChange:
             self.update()
         super().changeEvent(event)
 
@@ -147,7 +151,7 @@ class LevelMeterWidget(QWidget):
         width = float(self.width())
         height = float(self.height())
         left = _MARGIN + _LABEL_WIDTH
-        available = height - 2.0 * _MARGIN - _SCALE_HEIGHT - _ROW_GAP
+        available = height - 2.0 * _MARGIN - self._scale_height() - _ROW_GAP
         bar_height = min(_MAX_BAR_HEIGHT, max(2.0, available / 2.0))
         return QRectF(left, _MARGIN, max(0.0, width - left - _MARGIN), bar_height * 2.0 + _ROW_GAP)
 
@@ -160,21 +164,38 @@ class LevelMeterWidget(QWidget):
             x = self._level_x(level_db, track)
             painter.drawLine(QLineF(x, track.top(), x, track.bottom()))
 
-        font = painter.font()
-        font.setPointSizeF(max(6.0, font.pointSizeF() - 2.0))
+        font = self._scale_font()
         painter.setFont(font)
         painter.setPen(QPen(palette.color(QPalette.ColorRole.PlaceholderText), 1.0))
         scale_top = track.bottom() + 1.0
+        scale_height = self._scale_height()
         for level_db in (*GRID_DB_STEPS, 0.0):
             if level_db < self._db_floor:
                 continue
             x = self._level_x(level_db, track)
             text = f"{level_db:.0f}"
             painter.drawText(
-                QRectF(x - 14.0, scale_top, 28.0, _SCALE_HEIGHT),
+                QRectF(x - 14.0, scale_top, 28.0, scale_height),
                 Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
                 text,
             )
+
+    def _scale_font(self) -> QFont:
+        """目盛用フォント。point/pixel指定のどちらでも過度に小さくしない。"""
+        font = QFont(self.font())
+        if font.pointSizeF() > 0:
+            font.setPointSizeF(max(6.0, font.pointSizeF() - 2.0))
+        elif font.pixelSize() > 0:
+            font.setPixelSize(max(8, font.pixelSize() - 2))
+        return font
+
+    def _scale_height(self) -> float:
+        return QFontMetricsF(self._scale_font()).height() + 2.0 * _SCALE_PADDING
+
+    def _update_minimum_height(self) -> None:
+        """目盛文字をクリップしない高さを現在フォントから算出する。"""
+        height = 2.0 * _MARGIN + 2.0 * _MIN_BAR_HEIGHT + _ROW_GAP + self._scale_height()
+        self.setMinimumHeight(math.ceil(height))
 
     def _draw_channels(
         self,

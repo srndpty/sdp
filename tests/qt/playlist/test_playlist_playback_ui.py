@@ -499,10 +499,20 @@ def test_main_window_has_no_track_search_logic(
 def test_repeat_and_shuffle_buttons_exist_with_initial_state(
     controls: PlayerControls,
 ) -> None:
-    """リピートは「オフ」表示、シャッフルは未チェックで始まる。"""
-    assert control_button(controls, "repeatModeButton").text() == "リピート: オフ"
-    assert not control_button(controls, "shuffleButton").isChecked()
-    assert control_button(controls, "shuffleButton").isCheckable()
+    """リピートとシャッフルはフォント非依存アイコンで始まる。"""
+    repeat = control_button(controls, "repeatModeButton")
+    shuffle = control_button(controls, "shuffleButton")
+    assert repeat.text() == ""
+    assert not repeat.icon().isNull()
+    assert (repeat.iconSize().width(), repeat.iconSize().height()) == (18, 18)
+    assert repeat.isCheckable()
+    assert not repeat.isChecked()
+    assert "オフ" in repeat.toolTip()
+    assert shuffle.text() == ""
+    assert not shuffle.icon().isNull()
+    assert (shuffle.iconSize().width(), shuffle.iconSize().height()) == (18, 18)
+    assert not shuffle.isChecked()
+    assert shuffle.isCheckable()
 
 
 def test_repeat_button_emits_a_request_once(controls: PlayerControls) -> None:
@@ -513,7 +523,7 @@ def test_repeat_button_emits_a_request_once(controls: PlayerControls) -> None:
     control_button(controls, "repeatModeButton").click()
 
     assert requests == [1]
-    assert control_button(controls, "repeatModeButton").text() == "リピート: オフ"
+    assert not control_button(controls, "repeatModeButton").icon().isNull()
 
 
 def test_shuffle_button_emits_a_bool_once(controls: PlayerControls) -> None:
@@ -528,20 +538,40 @@ def test_shuffle_button_emits_a_bool_once(controls: PlayerControls) -> None:
 
 
 @pytest.mark.parametrize(
-    ("mode", "text"),
+    ("mode", "description"),
     [
-        (RepeatMode.OFF, "リピート: オフ"),
-        (RepeatMode.ALL, "リピート: 全曲"),
-        (RepeatMode.ONE, "リピート: 1曲"),
+        (RepeatMode.OFF, "オフ"),
+        (RepeatMode.ALL, "全曲"),
+        (RepeatMode.ONE, "1曲"),
     ],
 )
-def test_repeat_mode_is_displayed_as_text(
-    controls: PlayerControls, mode: RepeatMode, text: str
+def test_repeat_mode_has_an_icon_and_text_alternative(
+    controls: PlayerControls, mode: RepeatMode, description: str
 ) -> None:
-    """モードは色ではなく文字列で区別できる。"""
+    """モードはアイコンに加えてツールチップとアクセシビリティ文でも区別できる。"""
     controls.set_repeat_mode(mode)
 
-    assert control_button(controls, "repeatModeButton").text() == text
+    button = control_button(controls, "repeatModeButton")
+    assert button.text() == ""
+    assert not button.icon().isNull()
+    assert description in button.toolTip()
+    assert description in button.accessibleDescription()
+
+
+def test_repeat_modes_use_icon_and_checked_state(controls: PlayerControls) -> None:
+    """OFF／ALLは背景状態で、ONEは大きな1を循環矢印で囲んで区別する。"""
+    button = control_button(controls, "repeatModeButton")
+    controls.set_repeat_mode(RepeatMode.OFF)
+    base_icon_key = button.icon().cacheKey()
+    assert not button.isChecked()
+
+    controls.set_repeat_mode(RepeatMode.ALL)
+    assert button.icon().cacheKey() == base_icon_key
+    assert button.isChecked()
+
+    controls.set_repeat_mode(RepeatMode.ONE)
+    assert button.icon().cacheKey() != base_icon_key
+    assert button.isChecked()
 
 
 def test_unknown_repeat_mode_is_not_rounded(controls: PlayerControls) -> None:
@@ -572,7 +602,7 @@ def test_playback_state_changes_do_not_break_repeat_and_shuffle(
 
     control_button(controls, "playButton").click()
 
-    assert control_button(controls, "repeatModeButton").text() == "リピート: 1曲"
+    assert not control_button(controls, "repeatModeButton").icon().isNull()
     assert control_button(controls, "shuffleButton").isChecked()
 
 
@@ -588,11 +618,12 @@ def test_repeat_and_shuffle_requests_reach_the_controller(
     shuffle_button = control_button(controls, "shuffleButton")
 
     repeat_button.click()
-    assert repeat_button.text() == "リピート: 全曲"
+    assert repeat_button.isChecked()
+    base_icon_key = repeat_button.icon().cacheKey()
     repeat_button.click()
-    assert repeat_button.text() == "リピート: 1曲"
+    assert repeat_button.icon().cacheKey() != base_icon_key
     repeat_button.click()
-    assert repeat_button.text() == "リピート: オフ"
+    assert not repeat_button.isChecked()
 
     shuffle_button.click()
     assert shuffle_button.isChecked()
@@ -623,7 +654,7 @@ def test_initial_repeat_and_shuffle_state_is_applied_on_wiring(
 
     controls = window.findChild(PlayerControls)
     assert controls is not None
-    assert control_button(controls, "repeatModeButton").text() == "リピート: 全曲"
+    assert "全曲" in control_button(controls, "repeatModeButton").toolTip()
     assert control_button(controls, "shuffleButton").isChecked()
     waveform_analysis.shutdown()
 

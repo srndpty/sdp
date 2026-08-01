@@ -12,7 +12,9 @@ from sdp.core.metadata.types import MetadataStatus, TrackMetadata
 from sdp.core.playlist.model import (
     ALBUM_ROLE,
     ARTIST_ROLE,
+    BITRATE_BPS_ROLE,
     DURATION_MS_ROLE,
+    FILE_SIZE_BYTES_ROLE,
     FILE_STATUS_ROLE,
     METADATA_FAILED_TOOLTIP,
     METADATA_STATUS_ROLE,
@@ -22,7 +24,13 @@ from sdp.core.playlist.model import (
 )
 from sdp.core.playlist.persistence import load_playlist, save_playlist
 
-SAMPLE = TrackMetadata(title="曲名", artist="奏者", album="盤", duration_ms=65_000)
+SAMPLE = TrackMetadata(
+    title="曲名",
+    artist="奏者",
+    album="盤",
+    duration_ms=65_000,
+    bitrate_bps=320_000,
+)
 
 
 @pytest.fixture
@@ -61,14 +69,14 @@ def record_changes(model: PlaylistModel) -> list[tuple[int, int, tuple[int, ...]
 # -- 初期状態と列 -----------------------------------------------------------
 
 
-def test_columns_are_title_artist_album_duration_path(model: PlaylistModel) -> None:
-    """列はタイトル・アーティスト・アルバム・長さ・パス。"""
+def test_columns_are_title_size_bitrate_duration_path(model: PlaylistModel) -> None:
+    """列はタイトル・サイズ・ビットレート・長さ・パス。"""
     headers = [
         model.headerData(column, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole)
         for column in Column
     ]
 
-    assert headers == ["タイトル", "アーティスト", "アルバム", "長さ", "パス"]
+    assert headers == ["タイトル", "サイズ", "ビットレート", "長さ", "パス"]
     assert Column.NAME is Column.TITLE
 
 
@@ -89,8 +97,8 @@ def test_title_falls_back_to_the_file_name(model: PlaylistModel, audio_files: li
     model.add_paths(audio_files)
 
     assert display(model, 0, Column.TITLE) == audio_files[0].name
-    assert display(model, 0, Column.ARTIST) == ""
-    assert display(model, 0, Column.ALBUM) == ""
+    assert display(model, 0, Column.FILE_SIZE) == ""
+    assert display(model, 0, Column.BITRATE) == ""
     assert display(model, 0, Column.DURATION) == ""
     assert display(model, 0, Column.PATH) == str(audio_files[0])
 
@@ -112,28 +120,32 @@ def test_loaded_metadata_is_displayed(model: PlaylistModel, audio_files: list[Pa
     """取得できたら各列へ反映する。"""
     entry_ids = model.add_paths(audio_files)
     model.mark_metadata_loading(entry_ids[0])
+    model.apply_file_size(entry_ids[0], 1_572_864)
 
     assert model.apply_metadata(entry_ids[0], SAMPLE) is True
 
     assert model.entry_at(0).metadata_status is MetadataStatus.LOADED
     assert model.entry_at(0).metadata == SAMPLE
     assert display(model, 0, Column.TITLE) == "曲名"
-    assert display(model, 0, Column.ARTIST) == "奏者"
-    assert display(model, 0, Column.ALBUM) == "盤"
+    assert display(model, 0, Column.FILE_SIZE) == "1.5 MiB"
+    assert display(model, 0, Column.BITRATE) == "320 kbps"
     assert display(model, 0, Column.DURATION) == "1:05"
 
 
-def test_failed_metadata_falls_back(model: PlaylistModel, audio_files: list[Path]) -> None:
-    """失敗してもファイル名を表示し、行は残る。"""
+def test_failed_metadata_keeps_independently_loaded_file_size(
+    model: PlaylistModel, audio_files: list[Path]
+) -> None:
+    """タグ解析に失敗しても、独立して取得したサイズを表示して行を残す。"""
     entry_ids = model.add_paths(audio_files)
     model.mark_metadata_loading(entry_ids[0])
+    model.apply_file_size(entry_ids[0], audio_files[0].stat().st_size)
 
     assert model.mark_metadata_failed(entry_ids[0]) is True
 
     assert model.entry_at(0).metadata_status is MetadataStatus.FAILED
     assert model.entry_at(0).metadata is None
     assert display(model, 0, Column.TITLE) == audio_files[0].name
-    assert display(model, 0, Column.ARTIST) == ""
+    assert display(model, 0, Column.FILE_SIZE) == "1 B"
     assert model.rowCount() == len(audio_files)
 
 
@@ -154,12 +166,14 @@ def test_clear_metadata_returns_to_not_requested(
 ) -> None:
     """解除すると未要求へ戻り、再読み取りできる。"""
     entry_ids = model.add_paths(audio_files)
+    model.apply_file_size(entry_ids[0], 1_572_864)
     model.apply_metadata(entry_ids[0], SAMPLE)
 
     assert model.clear_metadata(entry_ids[0]) is True
 
     assert model.entry_at(0).metadata_status is MetadataStatus.NOT_REQUESTED
     assert model.entry_at(0).metadata is None
+    assert model.entry_at(0).file_size_bytes == 1_572_864
 
 
 def test_metadata_invariants(model: PlaylistModel, audio_files: list[Path]) -> None:
@@ -218,6 +232,7 @@ def test_metadata_roles_return_semantic_values(
 ) -> None:
     """role は表示文字列ではなく意味上の値を返す。"""
     entry_ids = model.add_paths(audio_files)
+    model.apply_file_size(entry_ids[0], 1_572_864)
     model.apply_metadata(entry_ids[0], SAMPLE)
     index = model.index(0, Column.TITLE)
 
@@ -225,6 +240,8 @@ def test_metadata_roles_return_semantic_values(
     assert model.data(index, ARTIST_ROLE) == "奏者"
     assert model.data(index, ALBUM_ROLE) == "盤"
     assert model.data(index, DURATION_MS_ROLE) == 65_000
+    assert model.data(index, FILE_SIZE_BYTES_ROLE) == 1_572_864
+    assert model.data(index, BITRATE_BPS_ROLE) == 320_000
     assert model.data(index, METADATA_STATUS_ROLE) is MetadataStatus.LOADED
 
 
@@ -247,6 +264,8 @@ def test_role_names_include_metadata(model: PlaylistModel) -> None:
     assert role_names[ARTIST_ROLE].data() == b"artist"
     assert role_names[ALBUM_ROLE].data() == b"album"
     assert role_names[DURATION_MS_ROLE].data() == b"durationMs"
+    assert role_names[FILE_SIZE_BYTES_ROLE].data() == b"fileSizeBytes"
+    assert role_names[BITRATE_BPS_ROLE].data() == b"bitrateBps"
     assert role_names[METADATA_STATUS_ROLE].data() == b"metadataStatus"
 
 
@@ -345,9 +364,15 @@ def test_loaded_and_failed_notify_display_and_roles(
     first_column, last_column, roles = changes[0]
     assert (first_column, last_column) == (Column.TITLE, Column.DURATION)
     assert int(Qt.ItemDataRole.DisplayRole) in roles
-    assert {TITLE_ROLE, ARTIST_ROLE, ALBUM_ROLE, DURATION_MS_ROLE, METADATA_STATUS_ROLE} <= set(
-        roles
-    )
+    assert {
+        TITLE_ROLE,
+        ARTIST_ROLE,
+        ALBUM_ROLE,
+        DURATION_MS_ROLE,
+        FILE_SIZE_BYTES_ROLE,
+        BITRATE_BPS_ROLE,
+        METADATA_STATUS_ROLE,
+    } <= set(roles)
 
 
 def test_metadata_update_does_not_reset_the_model(
@@ -402,6 +427,8 @@ def test_file_status_change_notifies_metadata_and_display_roles(
         ARTIST_ROLE,
         ALBUM_ROLE,
         DURATION_MS_ROLE,
+        FILE_SIZE_BYTES_ROLE,
+        BITRATE_BPS_ROLE,
         METADATA_STATUS_ROLE,
         int(Qt.ItemDataRole.DisplayRole),
         int(Qt.ItemDataRole.ToolTipRole),
