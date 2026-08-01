@@ -433,7 +433,8 @@ release/
 
 旧per-user版（`%LOCALAPPDATA%\Programs\sdp`）が導入済みの場合は、Program Files版を
 インストールする前に「アプリと機能」から旧版をアンインストールする。HKCUとHKLMでは
-アンインストール登録が別になるため、旧版を残したままでは二重インストールになる。
+アンインストール登録が別になり、HKCU側の関連付けが優先され得るため、installerも
+旧版を検出すると理由を表示して中止する（silent installは終了コード7）。
 
 ### 既定のアプリは変更しない
 
@@ -483,7 +484,18 @@ install済みexeのselftestとcodec test → same-version reinstall →
 ユーザーデータ保持、までを自動で確認する（136項目）。
 **マシン全体（`%ProgramFiles%`、HKLM、全ユーザー用スタートメニュー）を実際に変更する**ため、
 管理者として起動したPowerShellと`-ConfirmMachineChanges`を必須にしている。
-CIからは実行しない。可能ならWindows Sandboxか検証用マシンで実行する。
+既存のmachine-wide版がある場合は既定で拒否し、置き換えて最後に削除することを承知した場合だけ
+`-AllowReplaceExistingInstall`も指定する。CIからは実行せず、原則としてWindows Sandbox
+または破棄可能VMで実行する。
+
+インストール後は、実際に利用する通常権限のユーザーで次も実行する。
+
+```powershell
+pwsh -File scripts/installer-user-smoke.ps1 -ConfirmUserProfileChanges
+```
+
+非昇格状態で`--selftest`、`%LOCALAPPDATA%\sdp\logs`への書き込み、HKLM関連付けの参照、
+Program Filesへの書き込み拒否、終了後にprocessが残らないことを確認する。
 
 Inno Setup compilerが無くても、installer scriptの契約（per-machine、HKLMのみ、
 UserChoice非変更、対象7拡張子、uninstall時のユーザーデータ保持など）は

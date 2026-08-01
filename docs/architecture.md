@@ -1574,10 +1574,16 @@ P7-B2の要件にしない。
 
 - per-machine。`PrivilegesRequired=admin`、`PrivilegesRequiredOverridesAllowed=`（空）で
   UAC昇格を要求し、scopeのコマンドライン上書きを許さない。install先は`{autopf}\sdp`。
+- x64配布物であるため`ArchitecturesAllowed=x64compatible`と
+  `ArchitecturesInstallIn64BitMode=x64compatible`を明示し、native Program Files、
+  64-bit registry view、x64 VC++ Runtimeの検出を同じinstall modeへ揃える。
 - **install先（`%ProgramFiles%\sdp`）とユーザーデータ
   （`%LOCALAPPDATA%\sdp`）は別directory**。installerはユーザーデータへ書かず、
   uninstallでも消さない。install先へはsettings／playlist／ui-state／cacheを置かない。
 - AppIdはversionを含まない固定GUID。upgradeで同じ登録を引き継ぐ。
+- 旧per-user版のuninstall登録はHKCUにあり、同じAppIdでもHKLM版のupgrade対象にはならない。
+  またmerged Classes viewではHKCU側が優先され得るため、`PrepareToInstall`で旧登録を検出したら
+  自動削除せず、先に旧版をuninstallするよう表示して中止する。silent時の終了コードは7。
 
 #### upgrade
 
@@ -1636,6 +1642,9 @@ P7-B2の要件にしない。
 - installer manifestは`sdp/installer_manifest.py`が組み立てる。ZIPのmanifestと
   同じ方針で、timestampを持たず、絶対path・username・build hostを含めない。
   `distribution: technical-verification-only`を明示的に記録する。
+- installer manifestの`schema_version`はJSON構造のversionとする。既存fieldである
+  `scope`、`privileges`、`registry_scope`、`install_directory`の値変更では上げず、
+  fieldの追加・削除・意味変更などconsumerのparser契約が変わる場合に上げる。
 
 **ライセンスの未解決事項が残っている間は、installerも技術検証用に留め、
 公開可能な配布物として扱わない。** コード署名も行っていない。

@@ -21,6 +21,11 @@ from sdp.installer_contract import (
 )
 
 INSTALLER_MANIFEST_SCHEMA_VERSION: Final = 1
+"""manifestの構造version。
+
+scopeやprivilegesなど既存fieldの値変更では上げず、fieldの追加・削除・意味変更など、
+consumer側のparser契約が変わる場合にだけ上げる。
+"""
 INSTALL_SCOPE: Final = "per-machine"
 INSTALL_PRIVILEGES: Final = "admin"
 DEFAULT_APPLICATION_POLICY: Final = "not-modified"

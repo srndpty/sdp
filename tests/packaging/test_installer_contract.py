@@ -106,7 +106,12 @@ def test_installer_is_per_machine_with_elevation(script: InnoScript) -> None:
     assert script.setup("PrivilegesRequiredOverridesAllowed") == ""
     assert install_directory(script) == INSTALL_DIRECTORY
     assert "{autopf}" in script.source
-    assert "{localappdata}\\Programs" not in script.source
+
+
+def test_installer_uses_64_bit_install_mode_for_x64_package(script: InnoScript) -> None:
+    """x64配布物を対応環境だけに許可し、64-bit registry／Program Filesへ導入する。"""
+    assert script.setup("ArchitecturesAllowed") == "x64compatible"
+    assert script.setup("ArchitecturesInstallIn64BitMode") == "x64compatible"
 
 
 def test_app_id_is_stable_and_version_independent(script: InnoScript) -> None:
@@ -273,6 +278,17 @@ def test_cleanup_only_touches_a_registered_previous_install(script: InnoScript) 
     assert "unins" in script.code
 
 
+def test_legacy_per_user_install_is_rejected_before_install(script: InnoScript) -> None:
+    """HKCUの旧版は自動削除せず、PrepareToInstallで理由を示して中止する。"""
+    assert "function LegacyPerUserInstallExists" in script.code
+    assert "HKEY_CURRENT_USER" in script.code
+    assert "'UninstallString'" in script.code
+    assert "'Inno Setup: App Path'" in script.code
+    assert "if LegacyPerUserInstallExists(" in script.code
+    assert "Result := LegacyPerUserInstallError(" in script.code
+    assert "旧per-user版" in script.code
+
+
 def test_cleanup_failure_stops_the_install(script: InnoScript) -> None:
     """退避に失敗したら展開へ進まない（新旧runtimeを混在させない）。"""
     assert "function CleanPreviousInstall(): Boolean" in script.code
@@ -338,6 +354,16 @@ def _mutate(source: str, old: str, new: str) -> tuple[str, ...]:
             "DefaultDirName",
         ),
         (
+            "ArchitecturesAllowed=x64compatible",
+            "ArchitecturesAllowed=x86compatible",
+            "ArchitecturesAllowed=x64compatible",
+        ),
+        (
+            "ArchitecturesInstallIn64BitMode=x64compatible",
+            "ArchitecturesInstallIn64BitMode=",
+            "ArchitecturesInstallIn64BitMode=x64compatible",
+        ),
+        (
             'Root: HKLM; Subkey: "Software\\Classes\\{#ProgId}";',
             'Root: HKCU; Subkey: "Software\\Classes\\{#ProgId}";',
             "HKCU",
@@ -359,6 +385,11 @@ def _mutate(source: str, old: str, new: str) -> tuple[str, ...]:
             "AppId",
         ),
         ("function InitializeSetup", "function OnInitialize", "function InitializeSetup"),
+        (
+            "function LegacyPerUserInstallExists",
+            "function IgnoreLegacyPerUserInstall",
+            "function LegacyPerUserInstallExists",
+        ),
         (
             "Result := EnsureVCRuntime();",
             "Result := True;",

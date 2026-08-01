@@ -7,7 +7,9 @@
 検査する主な契約:
 
 - per-machine（``{autopf}\\sdp``）で、UAC昇格を要求する
+- x64配布物をx64compatible環境の64-bit install modeで導入する
 - registryへの書き込みはHKLMだけ
+- 旧per-user版のHKCU uninstall登録を検出したら、安全のため導入を中止する
 - 「プログラムから開く」候補として登録するが、既定アプリは変更しない
 - uninstallでユーザーデータ（``%LOCALAPPDATA%\\sdp``）を削除しない
 - versionと入力配布物を外部から注入し、.issへ手書きしない
@@ -41,6 +43,8 @@ EXTERNAL_DEFINES: Final = ("AppVersion", "VersionInfoVersion", "SourceDir")
 
 CONTRACT_CODE_SYMBOLS: Final = (
     "function FileUseState",
+    "function LegacyPerUserInstallExists",
+    "function LegacyPerUserInstallError",
     "function IsRegisteredPreviousInstall",
     "function CleanPreviousInstall(): Boolean",
     "function RestoreUpgradeBackup",
@@ -140,6 +144,13 @@ def _check_scope(script: InnoScript) -> list[str]:
     if install_directory(script) != INSTALL_DIRECTORY:
         failures.append(
             f"DefaultDirNameが{INSTALL_DIRECTORY}ではありません: {install_directory(script)!r}"
+        )
+    if script.setup("ArchitecturesAllowed") != "x64compatible":
+        failures.append("ArchitecturesAllowed=x64compatible ではありません")
+    if script.setup("ArchitecturesInstallIn64BitMode") != "x64compatible":
+        failures.append(
+            "ArchitecturesInstallIn64BitMode=x64compatible ではありません"
+            "（x64配布物が64-bit install modeになりません）"
         )
     if app_id(script) != APP_ID:
         failures.append(f"AppIdが固定値ではありません: {app_id(script)!r}")
@@ -408,6 +419,10 @@ def _check_running_instance(script: InnoScript) -> list[str]:
         )
     if "if not CleanPreviousInstall() then" not in script.code:
         failures.append("退避の失敗でinstallを中止していません（新旧runtimeが混在し得る）")
+    if "if LegacyPerUserInstallExists(" not in script.code:
+        failures.append("旧per-user版のHKCU uninstall登録を検出していません")
+    if "Result := LegacyPerUserInstallError(" not in script.code:
+        failures.append("旧per-user版を検出してもinstallを中止していません")
     if "GetLastError" not in script.code or "ERROR_SHARING_VIOLATION" not in script.code:
         failures.append("open失敗の理由を区別していません（ACL・I/O errorを実行中と誤判定し得る）")
     if "unins" not in script.code:

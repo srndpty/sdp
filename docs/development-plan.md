@@ -356,6 +356,8 @@ Windows上の手動受け入れを残している。P7-B1（PyInstaller onedir�
   ショートカット、「プログラムから開く」登録、7拡張子のProgID（`sdp.AudioFile`）、
   installer manifest、Inno Setup compiler不要の契約検査（`sdp/inno_script.py` と
   `sdp/installer_contract.py`）を実装した。
+  x64compatibleの64-bit install modeを契約化し、旧per-user版のHKCU登録が残る場合は
+  merged file associationの競合を避けるためinstallerを明示的に中止する。
   upgradeのcleanupは固定AppIdの登録済みinstall先に限定し、旧runtimeは削除ではなく
   `.upgrade-backup`へ退避して、展開失敗・中止時に復元する。
   per-user版ではinstaller smokeで silent install／install済みselftest・codec test／

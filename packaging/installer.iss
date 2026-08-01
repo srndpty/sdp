@@ -185,6 +185,36 @@ begin
   ) and (Directory <> '');
 end;
 
+{ per-user版とper-machine版は同じAppIdでもuninstall rootが異なるため、Inno Setupの
+  upgrade対象にはならない。HKCU側を残すとmerged Classes viewで旧関連付けが優先され
+  得るので、自動削除はせず、利用者へ旧版のuninstallを依頼して中止する。 }
+function LegacyPerUserInstallExists(var Directory: String; var Uninstaller: String): Boolean;
+begin
+  Result := RegQueryStringValue(
+    HKEY_CURRENT_USER,
+    UninstallKey(),
+    'UninstallString',
+    Uninstaller
+  );
+  if not Result then
+    Exit;
+
+  if not RegQueryStringValue(
+    HKEY_CURRENT_USER,
+    UninstallKey(),
+    'Inno Setup: App Path',
+    Directory
+  ) then
+    Directory := ExpandConstant('{localappdata}\Programs\sdp');
+end;
+
+function LegacyPerUserInstallError(const Directory: String): String;
+begin
+  Result := '旧per-user版のsdpがインストールされています。' + #13#10 + #13#10 +
+    '先に旧版をアンインストールしてから、このセットアップを再実行してください。' + #13#10 + #13#10 +
+    '旧版のインストール先:' + #13#10 + Directory;
+end;
+
 function IsVCRuntimeInstalled(): Boolean;
 var
   Installed: Cardinal;
@@ -514,8 +544,18 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ErrorMessage: String;
+  LegacyDirectory: String;
+  LegacyUninstaller: String;
 begin
   Result := '';
+  if LegacyPerUserInstallExists(LegacyDirectory, LegacyUninstaller) then
+  begin
+    Log(Format('旧per-user版を検出したためinstallを中止します: path=%s uninstaller=%s', [LegacyDirectory,
+      LegacyUninstaller]));
+    Result := LegacyPerUserInstallError(LegacyDirectory);
+    Exit;
+  end;
+
   ErrorMessage := ExecutableAvailabilityError(InstalledExecutable());
   if ErrorMessage <> '' then
     Result := ErrorMessage;

@@ -16,6 +16,7 @@ import pytest
 _REPO_ROOT = Path(__file__).parents[2]
 _BUILD_SCRIPT = _REPO_ROOT / "scripts" / "build-installer.ps1"
 _SMOKE_SCRIPT = _REPO_ROOT / "scripts" / "installer-smoke.ps1"
+_USER_SMOKE_SCRIPT = _REPO_ROOT / "scripts" / "installer-user-smoke.ps1"
 
 
 @pytest.fixture(scope="module")
@@ -26,6 +27,11 @@ def build_script() -> str:
 @pytest.fixture(scope="module")
 def smoke_script() -> str:
     return _SMOKE_SCRIPT.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def user_smoke_script() -> str:
+    return _USER_SMOKE_SCRIPT.read_text(encoding="utf-8")
 
 
 def test_build_script_runs_from_any_directory(build_script: str) -> None:
@@ -120,6 +126,8 @@ def test_smoke_script_requires_explicit_confirmation(smoke_script: str) -> None:
     assert "ConfirmMachineChanges" in smoke_script
     assert "WindowsBuiltInRole]::Administrator" in smoke_script
     assert "CIから無条件に実行しないでください" in smoke_script
+    assert "AllowReplaceExistingInstall" in smoke_script
+    assert "既存のmachine-wide sdp" in smoke_script
 
 
 def test_smoke_script_checks_the_full_install_lifecycle(smoke_script: str) -> None:
@@ -132,7 +140,11 @@ def test_smoke_script_checks_the_full_install_lifecycle(smoke_script: str) -> No
         "install directoryが削除された",
         "ユーザーデータのファイルが保持されている",
         "sdp processが残っていない",
-        "HKCUへ書いていない",
+        "Get-HkcuInstallerSnapshot",
+        "Assert-HkcuInstallerSnapshotUnchanged",
+        "GetValueKind",
+        "旧per-user版がある場合のsilent install拒否",
+        "ExpectedExitCode 7",
         "upgrade時に不要になったファイルが残らない",
         "初回install先の無関係ファイルが保持されている",
         "既存sdp.exeを含むdirectoryへの初回install",
@@ -166,6 +178,21 @@ def test_smoke_script_never_deletes_user_data(smoke_script: str) -> None:
     assert "Remove-Item -LiteralPath $markerFile -Force" in smoke_script
 
 
+def test_user_smoke_runs_as_a_non_elevated_user(user_smoke_script: str) -> None:
+    """標準ユーザーでselftest・ユーザー別ログ・Program FilesのACLを検査する。"""
+    for expectation in (
+        "ConfirmUserProfileChanges",
+        "通常ユーザーの利用条件",
+        "--selftest",
+        "sdp\\logs\\sdp.log",
+        "HKLM:\\Software\\Classes\\sdp.AudioFile",
+        "Program Filesへの書き込み",
+        "Get-Process -Name 'sdp'",
+    ):
+        assert expectation in user_smoke_script
+    assert "WindowsBuiltInRole]::Administrator" in user_smoke_script
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="PowerShellの契約確認はWindowsでのみ行う")
 def test_smoke_script_refuses_to_run_without_confirmation(tmp_path: Path) -> None:
     """フラグなしで実行すると、何もせず失敗する。"""
@@ -181,3 +208,20 @@ def test_smoke_script_refuses_to_run_without_confirmation(tmp_path: Path) -> Non
 
     assert completed.returncode != 0
     assert "ConfirmMachineChanges" in completed.stderr
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="PowerShellの契約確認はWindowsでのみ行う")
+def test_user_smoke_refuses_to_run_without_confirmation(tmp_path: Path) -> None:
+    """ユーザー側smokeも確認フラグなしではプロファイルへ書かない。"""
+    completed = subprocess.run(
+        ["pwsh", "-NoProfile", "-File", str(_USER_SMOKE_SCRIPT)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=tmp_path,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "ConfirmUserProfileChanges" in completed.stderr
