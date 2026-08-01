@@ -64,6 +64,7 @@ def license_files(distribution_name, target_name, required_names):
 
 
 datas = copy_metadata("sdp")
+datas.append((str(ICON_FILE), "assets"))
 project_documents = (
     REPO_ROOT / "LICENSE",
     REPO_ROOT / "THIRD_PARTY_NOTICES.txt",

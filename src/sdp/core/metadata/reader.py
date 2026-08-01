@@ -75,6 +75,8 @@ def read_track_metadata(path: Path) -> TrackMetadata:
         artist=_joined_text(tags, "artist"),
         album=_first_text(tags, "album"),
         duration_ms=_duration_ms(info),
+        file_size_bytes=_file_size_bytes(path),
+        bitrate_bps=_bitrate_bps(info),
     )
 
 
@@ -107,7 +109,34 @@ def _tag_values(tags: object, key: str) -> list[str]:
         raw = [raw]
     if not isinstance(raw, list):
         return []
-    return [value.strip() for value in cast("list[Any]", raw) if isinstance(value, str)]
+    return [
+        _repair_mojibake(value).strip()
+        for value in cast("list[Any]", raw)
+        if isinstance(value, str)
+    ]
+
+
+def _repair_mojibake(value: str) -> str:
+    """Latin-1指定で保存されたCP932のID3文字列だけを補正する。
+
+    古いタグ編集ソフトには、Shift-JISのバイト列をID3上でLatin-1と宣言するものがある。
+    逆変換でき、かつ変換後に日本語が現れる場合だけ採用し、正常なUnicode文字列や
+    欧文タグを推測で書き換えない。
+    """
+    if _contains_japanese(value):
+        return value
+    try:
+        repaired = value.encode("latin-1").decode("cp932")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return value
+    return repaired if _contains_japanese(repaired) else value
+
+
+def _contains_japanese(value: str) -> bool:
+    return any(
+        "\u3040" <= character <= "\u30ff" or "\u3400" <= character <= "\u9fff"
+        for character in value
+    )
 
 
 def _first_text(tags: object, key: str) -> str | None:
@@ -139,6 +168,25 @@ def _duration_ms(info: object) -> int | None:
     if not math.isfinite(seconds) or seconds < 0:
         return None
     return round(seconds * 1000)
+
+
+def _bitrate_bps(info: object) -> int | None:
+    """``info.bitrate``を正のbit/sとして取得する。"""
+    bitrate = getattr(info, "bitrate", None)
+    if not isinstance(bitrate, (int, float)) or isinstance(bitrate, bool):
+        return None
+    value = float(bitrate)
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return round(value)
+
+
+def _file_size_bytes(path: Path) -> int:
+    """ファイルサイズを取得し、I/O失敗をメタデータ読取失敗へ揃える。"""
+    try:
+        return path.stat().st_size
+    except OSError as error:
+        raise MetadataReadError(f"ファイル情報を読み取れません: {path}") from error
 
 
 @dataclass(frozen=True, slots=True)

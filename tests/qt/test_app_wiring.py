@@ -318,6 +318,7 @@ def test_create_application_sets_metadata(qtbot: QtBot) -> None:
     assert app.applicationName() == "sdp"
     assert app.applicationDisplayName() == "sdp"
     assert app.organizationName() == "sdp"
+    assert not app.windowIcon().isNull()
 
 
 def test_entry_point_delegates_to_app_run(monkeypatch: pytest.MonkeyPatch) -> None:

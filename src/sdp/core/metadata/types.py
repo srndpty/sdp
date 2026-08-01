@@ -41,6 +41,8 @@ class TrackMetadata:
     artist: str | None = None
     album: str | None = None
     duration_ms: int | None = None
+    file_size_bytes: int | None = None
+    bitrate_bps: int | None = None
 
 
 def format_duration_ms(milliseconds: int) -> str:
@@ -57,3 +59,20 @@ def format_duration_ms(milliseconds: int) -> str:
     if hours > 0:
         return f"{hours}:{minutes:02d}:{seconds:02d}"
     return f"{minutes}:{seconds:02d}"
+
+
+def format_file_size(size_bytes: int) -> str:
+    """バイト数を読みやすい2進単位へ整形する。"""
+    size = max(size_bytes, 0)
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    value = float(size)
+    for unit in units[:-1]:
+        if value < 1024.0:
+            return f"{int(value)} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024.0
+    return f"{value:.1f} {units[-1]}"
+
+
+def format_bitrate(bitrate_bps: int) -> str:
+    """bit/sを一般的なkbps表記へ整形する。"""
+    return f"{max(bitrate_bps, 0) / 1000:.0f} kbps"

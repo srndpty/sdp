@@ -201,7 +201,7 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
   個々の操作ロジックを持たない。
 - 再生、停止、相対シーク、前後曲、音量、mute、速度、pitch、repeat、shuffleを
   `README.md`の固定表へ割り当てる。連続入力が必要なシーク・音量・速度だけauto repeatを許可する。
-- 文字／数値入力、編集可能なComboBox、ボタン上のSpace、モーダル表示中は
+- 文字／数値入力、編集可能なComboBox、モーダル表示中は
   `ShortcutOverride`で明示的に抑止し、通常のWidget操作を奪わない。抑止対象は
   `ShortcutSpec`に登録されたキー組合せだけとし、既存のCtrl+O／Ctrl+Shift+Oや
   編集Widget自身のCtrl+C／Ctrl+Vは通過させる。
@@ -214,17 +214,16 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 | キー | 操作 | auto repeat |
 |---|---|---|
 | `Space` | 再生／一時停止 | なし |
-| `S` | 停止 | なし |
 | `J` / `L` | 10秒戻る／進む | あり |
 | `Shift+J` / `Shift+L` | 60秒戻る／進む | あり |
-| `Alt+Left` / `Alt+Right` | 前の曲／次の曲 | なし |
+| `Page Up` / `Page Down` | 前の曲／次の曲 | なし |
 | `Ctrl+Up` / `Ctrl+Down` | 音量を0.05上げる／下げる | あり |
 | `M` | mute切替 | なし |
 | `X` / `C` | 速度を0.05下げる／上げる | あり |
 | `Z` | 速度を1.00倍へ戻す | なし |
 | `P` | ピッチ補正切替 | なし |
 | `R` | リピートモード切替 | なし |
-| `Ctrl+H` | シャッフル切替 | なし |
+| `S` | シャッフル切替 | なし |
 
 #### QtMultimediaBackend（P1-B）
 
@@ -811,7 +810,7 @@ L / R リングバッファと `snapshot_stereo` / `channel_count` / `channel_co
 
 ## 8. プレイリストモデル
 
-- `QAbstractTableModel` を使う。列は 状態アイコン / タイトル / アーティスト / アルバム / 長さ。
+- `QAbstractTableModel` を使う。列はタイトル / サイズ / ビットレート / 長さ / パス。
   `Qt.UserRole` で entry_id とパスを保持する。
 - D&D は外部から `text/uri-list` を受理し、受理順をそのまま表示順とする（PL-01）。
   内部の並べ替えは `moveRows` を用いる。
@@ -989,7 +988,8 @@ Mutagen による非同期メタデータ取得と表示（P2-D）。
 ### 8.2 メタデータ（P2-D）
 
 - **`TrackMetadata`**（`core/metadata/types.py`。Qt 非依存の不変 dataclass）:
-  `title` / `artist` / `album` / `duration_ms`（いずれも省略可）。
+  `title` / `artist` / `album` / `duration_ms` / `file_size_bytes` /
+  `bitrate_bps`（いずれも省略可）。
   entry_id・path・読み込み状態・エラー文字列・UI の表現は持たない。
   Mutagen のオブジェクトはワーカースレッドの外へ出さない。
 - **`MetadataStatus`**: `NOT_REQUESTED` →（要求）→ `LOADING` →
@@ -1027,10 +1027,12 @@ Mutagen による非同期メタデータ取得と表示（P2-D）。
   結果を無視する論理キャンセルとする。ただしQThreadPool破棄は実行中タスクを待つため、
   ネットワークドライブや故障媒体でI/O自体が戻らない場合、**プロセス終了の3秒上限は
   保証しない**。厳密な終了期限が必要になった場合は読取を終了可能な子プロセスへ隔離する。
-- **列と role**: タイトル / アーティスト / アルバム / 長さ / パスの 5 列
+- **列と role**: タイトル / サイズ / ビットレート / 長さ / パスの 5 列
   （`Column.NAME` は `TITLE` の別名として残す）。
   role は `TITLE_ROLE` / `ARTIST_ROLE` / `ALBUM_ROLE` / `DURATION_MS_ROLE` /
-  `METADATA_STATUS_ROLE` で、表示文字列ではなく意味上の値を返す。
+  `FILE_SIZE_BYTES_ROLE` / `BITRATE_BPS_ROLE` / `METADATA_STATUS_ROLE` で、
+  表示文字列ではなく意味上の値を返す。アーティストとアルバムは読み取り値として
+  保持するが、日常利用で優先度が低いため列には表示しない。
 - **タイトルのフォールバック**: 表示は `metadata.title` → ファイル名 → パス全体の順。
   未要求・読み取り中・失敗のいずれでも常にファイル名が出るので、
   追加直後から曲を識別できる（「読み込み中...」でタイトルを置き換えない）。

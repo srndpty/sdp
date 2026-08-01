@@ -514,13 +514,13 @@ def test_delegate_ignores_invalid_index(view: PlaylistView) -> None:
 
 
 def test_metadata_columns_are_shown(view: PlaylistView, model: PlaylistModel) -> None:
-    """タイトル・アーティスト・アルバム・長さ・パスの 5 列。"""
+    """タイトル・サイズ・ビットレート・長さ・パスの5列。"""
     headers = [
         model.headerData(column, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole)
         for column in Column
     ]
 
-    assert headers == ["タイトル", "アーティスト", "アルバム", "長さ", "パス"]
+    assert headers == ["タイトル", "サイズ", "ビットレート", "長さ", "パス"]
     assert table_of(view).model() is model
 
 
@@ -528,7 +528,7 @@ def test_metadata_columns_do_not_resize_to_contents(view: PlaylistView) -> None:
     """非同期に更新される列で ResizeToContents を使わない（O(n^2) 回避）。"""
     header = table_of(view).horizontalHeader()
 
-    for column in (Column.TITLE, Column.ARTIST, Column.ALBUM, Column.DURATION):
+    for column in (Column.TITLE, Column.FILE_SIZE, Column.BITRATE, Column.DURATION):
         assert header.sectionResizeMode(column) is not QHeaderView.ResizeMode.ResizeToContents
 
 
@@ -545,12 +545,12 @@ def test_title_column_shows_metadata_after_loading(
 
     model.apply_metadata(
         entry_ids[0],
-        TrackMetadata(title="曲名", artist="奏者", album="盤", duration_ms=65_000),
+        TrackMetadata(title="曲名", duration_ms=65_000, file_size_bytes=1024, bitrate_bps=192_000),
     )
 
     assert model.data(title_index, Qt.ItemDataRole.DisplayRole) == "曲名"
-    assert model.data(model.index(0, Column.ARTIST), Qt.ItemDataRole.DisplayRole) == "奏者"
-    assert model.data(model.index(0, Column.ALBUM), Qt.ItemDataRole.DisplayRole) == "盤"
+    assert model.data(model.index(0, Column.FILE_SIZE), Qt.ItemDataRole.DisplayRole) == "1.0 KiB"
+    assert model.data(model.index(0, Column.BITRATE), Qt.ItemDataRole.DisplayRole) == "192 kbps"
     assert model.data(model.index(0, Column.DURATION), Qt.ItemDataRole.DisplayRole) == "1:05"
 
 

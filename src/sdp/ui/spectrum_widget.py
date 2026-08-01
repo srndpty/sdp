@@ -17,7 +17,7 @@ NO_SOURCE_MESSAGE = "音声を再生するとスペクトラムを表示しま�
 GRID_DB_STEPS = (-20.0, -40.0, -60.0, -80.0)
 """dB基準線。色だけでなく位置と文字で状態を伝える。"""
 
-_MINIMUM_HEIGHT = 130
+_MINIMUM_HEIGHT = 65
 _BAR_GAP_PX = 1.0
 
 

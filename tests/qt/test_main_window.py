@@ -134,7 +134,6 @@ def action_of(window: MainWindow, name: str) -> QAction:
     [
         ("fileNameLabel", "現在のファイル"),
         ("playButton", "再生"),
-        ("pauseButton", "一時停止"),
         ("stopButton", "停止"),
         ("seekSlider", "再生位置"),
         ("volumeSlider", "音量"),

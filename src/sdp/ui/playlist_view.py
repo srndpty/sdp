@@ -177,13 +177,13 @@ class PlaylistView(QWidget):
         # dataChanged のたびに全行を走査して幅を測り直し、1000 件では
         # O(n^2) 相当の再計算になるため。
         header.setSectionResizeMode(Column.TITLE, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(Column.ARTIST, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(Column.ALBUM, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(Column.FILE_SIZE, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(Column.BITRATE, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(Column.DURATION, QHeaderView.ResizeMode.Fixed)
         header.setSectionResizeMode(Column.PATH, QHeaderView.ResizeMode.Stretch)
         header.resizeSection(Column.TITLE, 220)
-        header.resizeSection(Column.ARTIST, 150)
-        header.resizeSection(Column.ALBUM, 150)
+        header.resizeSection(Column.FILE_SIZE, 90)
+        header.resizeSection(Column.BITRATE, 100)
         header.resizeSection(Column.DURATION, 70)
         # 列ヘッダーのクリックで並べ替えない。プレイリストの順序と表示順が
         # ずれると「次の曲」の意味が壊れるため（QSortFilterProxyModel も使わない）。

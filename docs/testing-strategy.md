@@ -35,7 +35,7 @@
 | `analysis/level.py`（P5-B） | StereoLevelFrameの不変性／bool拒否／有限性／floor〜0dB／`RMS ≦ Peak ≦ Peak hold`、無音・空入力・定値1.0（0dB）・定値0.5（約-6.02dB）・正弦波1.0のPeak約0dBとRMS約-3.01dB・正弦波0.5のRMS約-9.03dB、絶対値によるPeak、clipping入力の0dB clamp、floor clamp、epsilonによるlog(0)防御、RMS≦Peak、200万sampleでの精度（float64昇格）、入力配列を変更しないこと、NaN／inf／dtype／次元の拒否。Peak holdは即時上昇・保持時間中の維持・保持後の減衰・elapsedへの比例（tick数に依存しない）・現在Peak未満へ落ちないこと・floor未満へ落ちないこと・左右独立・process未呼出時の不変・reset・負／非有限／boolのelapsed拒否・不正な設定値の拒否 |
 | `analysis/waveform.py` | WaveformDataのread-only／shape／dtype／有限性／範囲検証、UInt8／Int16／Int32／Float正規化、stereo mono化、frame境界、無音／正弦波／clipping、増分chunk境界、端数bucket、1sample追加、旧snapshot不変、60分相当18万bucket |
 | `analysis/waveform_cache.py` | path／size／mtime／analysis version／bucket／format versionのkey無効化matrix、SHA-256名、日本語path、float32往復、必須field／dtype／shape／NaN／inf／min>max／duration／completeの破損matrix、allow_pickle=False、write／fsync／replace失敗、temp回収、hit時刻、決定的500MB LRU、個別削除失敗継続 |
-| `metadata/reader.py` の純粋読取 | タグあり（MP3 / FLAC）・タグなし・壊れたファイル・未対応形式・欠損・ディレクトリ。日本語と空白、複数アーティストの結合、空文字の `None` 化、長さの丸めと NaN / inf / 負値の防御、長さ不明でもタグを捨てないこと、既知の解析・I/O失敗だけを`MetadataReadError`へ正規化し、属性取得などの予期しない例外は変換せず伝播すること、読み取りで元ファイルを書き換えないこと。タグ付きファイルはテスト音源を tmp_path へ複製して Mutagen 自身で書き込む（外部プロセスを起動しない） |
+| `metadata/reader.py` の純粋読取 | タグあり（MP3 / FLAC）・タグなし・壊れたファイル・未対応形式・欠損・ディレクトリ。日本語と空白、Latin-1指定されたCP932タグの補正、複数アーティストの結合、空文字の `None` 化、長さ・サイズ・ビットレートの取得と不正値防御、長さ不明でもタグを捨てないこと、既知の解析・I/O失敗だけを`MetadataReadError`へ正規化し、属性取得などの予期しない例外は変換せず伝播すること、読み取りで元ファイルを書き換えないこと。タグ付きファイルはテスト音源を tmp_path へ複製して Mutagen 自身で書き込む（外部プロセスを起動しない） |
 | `metadata/types.py` | `MetadataStatus` の値、`TrackMetadata` の不変性、長さの表示整形 |
 | `playlist/entry.py` | entry_id の一意性と復元時の保持、パスの絶対化（相対・`~`・日本語・空白）、直接構築を含む欠損の検出と再確認、不変性 |
 | `PlaylistPlaybackController` | FakeBackend + 実 PlaybackController + 実 PlaylistModel で、現在 entry の管理（重複パスを entry_id で区別、直接 load による解除）、次 / 前 / 自動次曲の欠損スキップ（存在確認直後に消えるTOCTOUを含む）、末尾で折り返さないこと、source世代ごとの`END_OF_MEDIA`一度だけ消費・遅延重複・手動切替への防御、Model の並べ替え / 削除 / 全消去中の current 追跡（削除で stop しないこと）、再生エラーで自動スキップしないこと |
@@ -269,11 +269,11 @@ D&D は実際のマウス操作でしか確認できないため自動化しな�
 
 ## 6.5 P2-D 手動スモーク（メタデータ）
 
-- [ ] タグ付き MP3 のタイトル・アーティスト・アルバムが表示される
-- [ ] タグ付き FLAC でも表示される
+- [ ] タグ付き MP3 のタイトルと、サイズ・ビットレートが表示される
+- [ ] タグ付き FLAC でもタイトルと音声情報が表示される
 - [ ] タグなし WAV はファイル名のまま
 - [ ] 再生時間が表示される
-- [ ] 日本語タグ・空白を含むタグが崩れない
+- [ ] 日本語タグ・空白を含むタグが崩れず、Latin-1指定のCP932タグも補正される
 - [ ] 同じファイルを複数行追加しても、各行へ正しく入る
 - [ ] 読み取り中に行を D&D しても壊れない
 - [ ] 読み取り中に行を削除してもクラッシュしない
@@ -305,7 +305,8 @@ D&D は実際のマウス操作でしか確認できないため自動化しな�
 実ウィンドウをアクティブにして行い、P3-Aの聴感確認と合わせてMVP受け入れとする。
 
 - [ ] READMEの全ショートカットが動作し、J/L、音量、速度の長押しだけが連続動作する
-- [ ] 数値入力中の文字キー、ボタン上のSpace、ファイル選択／確認dialog中のキー操作を奪わない
+- [ ] 数値入力中の文字キー、ファイル選択／確認dialog中のキー操作を奪わない
+- [ ] ボタンにフォーカスがあってもSpaceで再生／一時停止が切り替わる
 - [ ] 速度とピッチを変更し、約1.5秒後の`settings.json`がその2項目だけを含む
 - [ ] 変更直後に終了しても値が保存され、再起動後のSpeedPanelへ復元される
 - [ ] 再生位置と「再生中だったか」は再起動後に復元されない

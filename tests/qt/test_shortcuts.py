@@ -149,15 +149,7 @@ def test_space_toggles_play_and_pause(harness: Harness, audio_files: list[Path])
 def test_space_and_stop_without_source_are_no_ops(harness: Harness) -> None:
     """sourceなしでは再生・停止を勝手に開始しない。"""
     press(harness, Qt.Key.Key_Space)
-    press(harness, Qt.Key.Key_S)
     assert harness.backend.call_names() == []
-
-
-def test_stop_with_source_delegates_once(harness: Harness, audio_files: list[Path]) -> None:
-    """Sはsourceがあるときだけstopへ委譲する。"""
-    load_source(harness, audio_files[0])
-    press(harness, Qt.Key.Key_S)
-    assert harness.backend.call_names() == ["stop"]
 
 
 @pytest.mark.parametrize(
@@ -201,8 +193,8 @@ def test_previous_and_next_delegate_to_playlist_controller(
     assert harness.playlist_playback.play_entry(entry_ids[0])
     harness.backend.calls.clear()
 
-    press(harness, Qt.Key.Key_Right, Qt.KeyboardModifier.AltModifier)
-    press(harness, Qt.Key.Key_Left, Qt.KeyboardModifier.AltModifier)
+    press(harness, Qt.Key.Key_PageDown)
+    press(harness, Qt.Key.Key_PageUp)
 
     assert harness.backend.call_args("load") == [
         (audio_files[1].resolve(), 2),
@@ -265,7 +257,7 @@ def test_rate_adjustment_outside_ui_range_is_no_op_but_reset_works(harness: Harn
 
 
 def test_pitch_repeat_and_shuffle_shortcuts(harness: Harness) -> None:
-    """P/R/Ctrl+Hは各Controllerの既存操作へ委譲する。"""
+    """P/R/Sは各Controllerの既存操作へ委譲する。"""
     press(harness, Qt.Key.Key_P)
     assert harness.playback.pitch_compensation is False
 
@@ -273,9 +265,9 @@ def test_pitch_repeat_and_shuffle_shortcuts(harness: Harness) -> None:
         press(harness, Qt.Key.Key_R)
         assert harness.playlist_playback.repeat_mode is expected
 
-    press(harness, Qt.Key.Key_H, Qt.KeyboardModifier.ControlModifier)
+    press(harness, Qt.Key.Key_S)
     assert harness.playlist_playback.shuffle_enabled is True
-    press(harness, Qt.Key.Key_H, Qt.KeyboardModifier.ControlModifier)
+    press(harness, Qt.Key.Key_S)
     assert harness.playlist_playback.shuffle_enabled is False
 
 
@@ -354,8 +346,11 @@ def test_line_edit_keeps_copy_and_paste_shortcuts(harness: Harness, qtbot: QtBot
     assert harness.backend.call_names() == []
 
 
-def test_button_space_clicks_only_the_button(harness: Harness, qtbot: QtBot) -> None:
-    """ボタンfocus中のSpaceは再生切替と二重発火しない。"""
+def test_button_focus_does_not_steal_play_pause_space(
+    harness: Harness, qtbot: QtBot, audio_files: list[Path]
+) -> None:
+    """ボタンfocus中もSpaceはボタンをクリックせず再生切替へ使う。"""
+    load_source(harness, audio_files[0])
     button = QPushButton("操作", harness.window)
     clicks: list[bool] = []
     button.clicked.connect(lambda: clicks.append(True))
@@ -365,8 +360,8 @@ def test_button_space_clicks_only_the_button(harness: Harness, qtbot: QtBot) -> 
 
     QTest.keyClick(button, Qt.Key.Key_Space)
 
-    assert clicks == [True]
-    assert harness.backend.call_names() == []
+    assert clicks == []
+    assert harness.backend.call_names() == ["play"]
 
 
 def test_modal_dialog_suppresses_window_shortcuts(harness: Harness, qtbot: QtBot) -> None:

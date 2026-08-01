@@ -7,7 +7,6 @@ from enum import Enum, auto
 from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QKeyEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractButton,
     QAbstractSpinBox,
     QApplication,
     QComboBox,
@@ -38,7 +37,6 @@ class ShortcutAction(Enum):
     """ショートカットから要求できる操作。"""
 
     PLAY_PAUSE = auto()
-    STOP = auto()
     SEEK_BACKWARD = auto()
     SEEK_FORWARD = auto()
     SEEK_BACKWARD_LONG = auto()
@@ -68,13 +66,12 @@ class ShortcutSpec:
 
 SHORTCUT_SPECS = (
     ShortcutSpec(ShortcutAction.PLAY_PAUSE, "Space", "再生／一時停止", False),
-    ShortcutSpec(ShortcutAction.STOP, "S", "停止", False),
     ShortcutSpec(ShortcutAction.SEEK_BACKWARD, "J", "10秒戻る", True),
     ShortcutSpec(ShortcutAction.SEEK_FORWARD, "L", "10秒進む", True),
     ShortcutSpec(ShortcutAction.SEEK_BACKWARD_LONG, "Shift+J", "60秒戻る", True),
     ShortcutSpec(ShortcutAction.SEEK_FORWARD_LONG, "Shift+L", "60秒進む", True),
-    ShortcutSpec(ShortcutAction.PREVIOUS_TRACK, "Alt+Left", "前の曲", False),
-    ShortcutSpec(ShortcutAction.NEXT_TRACK, "Alt+Right", "次の曲", False),
+    ShortcutSpec(ShortcutAction.PREVIOUS_TRACK, "PgUp", "前の曲", False),
+    ShortcutSpec(ShortcutAction.NEXT_TRACK, "PgDown", "次の曲", False),
     ShortcutSpec(ShortcutAction.VOLUME_UP, "Ctrl+Up", "音量を5ポイント上げる", True),
     ShortcutSpec(ShortcutAction.VOLUME_DOWN, "Ctrl+Down", "音量を5ポイント下げる", True),
     ShortcutSpec(ShortcutAction.TOGGLE_MUTE, "M", "ミュート切替", False),
@@ -83,7 +80,7 @@ SHORTCUT_SPECS = (
     ShortcutSpec(ShortcutAction.RESET_RATE, "Z", "再生速度を1.0倍へ戻す", False),
     ShortcutSpec(ShortcutAction.TOGGLE_PITCH, "P", "ピッチ補正切替", False),
     ShortcutSpec(ShortcutAction.CYCLE_REPEAT, "R", "リピートモード切替", False),
-    ShortcutSpec(ShortcutAction.TOGGLE_SHUFFLE, "Ctrl+H", "シャッフル切替", False),
+    ShortcutSpec(ShortcutAction.TOGGLE_SHUFFLE, "S", "シャッフル切替", False),
 )
 
 
@@ -154,9 +151,7 @@ class ShortcutManager(QObject):
             return False
         if isinstance(focused, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)):
             return True
-        if isinstance(focused, QComboBox) and focused.isEditable():
-            return True
-        return isinstance(focused, QAbstractButton) and event.key() == Qt.Key.Key_Space
+        return isinstance(focused, QComboBox) and focused.isEditable()
 
     def _editing_widget_has_focus(self, action: ShortcutAction) -> bool:
         focused = QApplication.focusWidget()
@@ -164,16 +159,11 @@ class ShortcutManager(QObject):
             return False
         if isinstance(focused, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)):
             return True
-        if isinstance(focused, QComboBox) and focused.isEditable():
-            return True
-        return action is ShortcutAction.PLAY_PAUSE and isinstance(focused, QAbstractButton)
+        return isinstance(focused, QComboBox) and focused.isEditable()
 
     def _dispatch(self, action: ShortcutAction) -> None:
         if action is ShortcutAction.PLAY_PAUSE:
             self._toggle_play_pause()
-        elif action is ShortcutAction.STOP:
-            if self._playback.source is not None:
-                self._playback.stop()
         elif action is ShortcutAction.SEEK_BACKWARD:
             self._seek_relative(-SEEK_SHORT_MS)
         elif action is ShortcutAction.SEEK_FORWARD:

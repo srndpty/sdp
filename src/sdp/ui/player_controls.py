@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QSlider,
+    QStyle,
     QWidget,
 )
 
@@ -22,10 +23,16 @@ from sdp.core.playlist.types import RepeatMode
 __all__ = ["PlayerControls", "format_duration_ms"]
 """``format_duration_ms`` は core 側の実装をそのまま使う（実装を二重に持たない）。"""
 
-_REPEAT_LABELS: dict[RepeatMode, str] = {
-    RepeatMode.OFF: "リピート: オフ",
-    RepeatMode.ALL: "リピート: 全曲",
-    RepeatMode.ONE: "リピート: 1曲",
+_REPEAT_TOOLTIPS: dict[RepeatMode, str] = {
+    RepeatMode.OFF: "リピート: オフ（クリックで全曲リピート）",
+    RepeatMode.ALL: "リピート: 全曲（クリックで1曲リピート）",
+    RepeatMode.ONE: "リピート: 1曲（クリックでオフ）",
+}
+
+_REPEAT_ICONS: dict[RepeatMode, str] = {
+    RepeatMode.OFF: "↻",
+    RepeatMode.ALL: "🔁",
+    RepeatMode.ONE: "🔂",
 }
 
 _STATE_LABELS: dict[PlaybackState, str] = {
@@ -67,34 +74,43 @@ class PlayerControls(QWidget):
         # つまみを動かさない（操作が奪われるため）。
         self._is_seeking = False
 
-        self._repeat_button = QPushButton(_REPEAT_LABELS[RepeatMode.OFF])
+        self._repeat_button = QPushButton("↻")
         self._repeat_button.setObjectName("repeatModeButton")
         self._repeat_button.setAccessibleName("リピート")
-        self._repeat_button.setToolTip("リピートの種類を切り替えます（オフ → 全曲 → 1曲）")
-        self._shuffle_button = QPushButton("シャッフル")
+        self._repeat_button.setToolTip(_REPEAT_TOOLTIPS[RepeatMode.OFF])
+        self._shuffle_button = QPushButton("⇄")
         self._shuffle_button.setObjectName("shuffleButton")
         self._shuffle_button.setAccessibleName("シャッフル")
         self._shuffle_button.setCheckable(True)
-        self._shuffle_button.setToolTip("プレイリストをランダムな順で再生します")
+        self._shuffle_button.setToolTip("シャッフル切替（S）")
 
-        self._previous_button = QPushButton("前の曲")
+        self._previous_button = QPushButton()
         self._previous_button.setObjectName("previousTrackButton")
         self._previous_button.setAccessibleName("前の曲")
+        self._previous_button.setToolTip("前の曲（Page Up）")
+        self._previous_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipBackward)
+        )
         self._previous_button.setEnabled(False)
-        self._next_button = QPushButton("次の曲")
+        self._next_button = QPushButton()
         self._next_button.setObjectName("nextTrackButton")
         self._next_button.setAccessibleName("次の曲")
+        self._next_button.setToolTip("次の曲（Page Down）")
+        self._next_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipForward)
+        )
         self._next_button.setEnabled(False)
 
-        self._play_button = QPushButton("再生")
+        self._play_button = QPushButton()
         self._play_button.setObjectName("playButton")
         self._play_button.setAccessibleName("再生")
-        self._pause_button = QPushButton("一時停止")
-        self._pause_button.setObjectName("pauseButton")
-        self._pause_button.setAccessibleName("一時停止")
-        self._stop_button = QPushButton("停止")
+        self._play_button.setToolTip("再生（Space）")
+        self._play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+        self._stop_button = QPushButton()
         self._stop_button.setObjectName("stopButton")
         self._stop_button.setAccessibleName("停止")
+        self._stop_button.setToolTip("停止")
+        self._stop_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaStop))
 
         self._seek_slider = QSlider(Qt.Orientation.Horizontal)
         self._seek_slider.setObjectName("seekSlider")
@@ -110,10 +126,11 @@ class PlayerControls(QWidget):
         self._volume_slider.setObjectName("volumeSlider")
         self._volume_slider.setAccessibleName("音量")
         self._volume_slider.setRange(0, _VOLUME_SLIDER_MAX)
-        self._mute_button = QPushButton("ミュート")
+        self._mute_button = QPushButton()
         self._mute_button.setObjectName("muteButton")
         self._mute_button.setAccessibleName("ミュート")
         self._mute_button.setCheckable(True)
+        self._mute_button.setToolTip("ミュート切替（M）")
 
         self._state_label = QLabel(_STATE_LABELS[PlaybackState.NO_MEDIA])
         self._state_label.setObjectName("stateLabel")
@@ -134,7 +151,6 @@ class PlayerControls(QWidget):
         button_row = QHBoxLayout()
         button_row.addWidget(self._previous_button)
         button_row.addWidget(self._play_button)
-        button_row.addWidget(self._pause_button)
         button_row.addWidget(self._stop_button)
         button_row.addWidget(self._next_button)
         button_row.addStretch(1)
@@ -163,7 +179,6 @@ class PlayerControls(QWidget):
         self._repeat_button.clicked.connect(self.repeat_mode_requested)
         self._shuffle_button.toggled.connect(self.shuffle_toggled)
         self._play_button.clicked.connect(self._on_play_clicked)
-        self._pause_button.clicked.connect(self._on_pause_clicked)
         self._stop_button.clicked.connect(self._on_stop_clicked)
         self._seek_slider.sliderPressed.connect(self._on_seek_started)
         self._seek_slider.sliderMoved.connect(self._on_seek_moved)
@@ -197,9 +212,12 @@ class PlayerControls(QWidget):
     def set_repeat_mode(self, mode: RepeatMode) -> None:
         """リピートの表示を更新する。モードを決めるのは Controller。
 
-        色ではなく文字列で区別する。未知の値は曖昧な表示へ丸めず ``KeyError``。
+        アイコンだけでなくツールチップとアクセシビリティ文でも区別する。
+        未知の値は曖昧な表示へ丸めず ``KeyError``。
         """
-        self._repeat_button.setText(_REPEAT_LABELS[mode])
+        self._repeat_button.setText(_REPEAT_ICONS[mode])
+        self._repeat_button.setToolTip(_REPEAT_TOOLTIPS[mode])
+        self._repeat_button.setAccessibleDescription(_REPEAT_TOOLTIPS[mode])
 
     def set_shuffle_enabled(self, enabled: bool) -> None:
         """シャッフルボタンの状態を同期する。
@@ -212,10 +230,10 @@ class PlayerControls(QWidget):
     # -- ウィジェット操作 ---------------------------------------------------
 
     def _on_play_clicked(self) -> None:
-        self._controller.play()
-
-    def _on_pause_clicked(self) -> None:
-        self._controller.pause()
+        if self._controller.state is PlaybackState.PLAYING:
+            self._controller.pause()
+        else:
+            self._controller.play()
 
     def _on_stop_clicked(self) -> None:
         self._controller.stop()
@@ -247,8 +265,17 @@ class PlayerControls(QWidget):
 
     def _apply_state(self, state: PlaybackState) -> None:
         """再生状態に応じて表示とボタンの活性を更新する（唯一の更新経路）。"""
-        self._play_button.setEnabled(state in {PlaybackState.STOPPED, PlaybackState.PAUSED})
-        self._pause_button.setEnabled(state is PlaybackState.PLAYING)
+        self._play_button.setEnabled(state is not PlaybackState.NO_MEDIA)
+        if state is PlaybackState.PLAYING:
+            self._play_button.setIcon(
+                self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause)
+            )
+            self._play_button.setAccessibleName("一時停止")
+            self._play_button.setToolTip("一時停止（Space）")
+        else:
+            self._play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+            self._play_button.setAccessibleName("再生")
+            self._play_button.setToolTip("再生（Space）")
         self._stop_button.setEnabled(state in {PlaybackState.PLAYING, PlaybackState.PAUSED})
         self._state_label.setText(_STATE_LABELS[state])
         self._update_seek_enabled()
@@ -283,6 +310,12 @@ class PlayerControls(QWidget):
     def _on_controller_muted_changed(self, muted: bool) -> None:
         with QSignalBlocker(self._mute_button):
             self._mute_button.setChecked(muted)
+        icon = (
+            QStyle.StandardPixmap.SP_MediaVolumeMuted
+            if muted
+            else QStyle.StandardPixmap.SP_MediaVolume
+        )
+        self._mute_button.setIcon(self.style().standardIcon(icon))
 
     def _on_source_changed(self, source: object) -> None:
         del source  # 表示するファイル名は MainWindow の責務

@@ -58,7 +58,7 @@ def test_object_name_and_accessibility(widget: LevelMeterWidget) -> None:
 
 def test_minimum_height_and_size_policy(widget: LevelMeterWidget) -> None:
     """プレイリストを圧迫しない低い固定高で、横だけ伸縮する。"""
-    assert 70 <= widget.minimumHeight() <= 100
+    assert widget.minimumHeight() == 39
     assert widget.sizePolicy().horizontalPolicy() is QSizePolicy.Policy.Expanding
     assert widget.sizePolicy().verticalPolicy() is QSizePolicy.Policy.Fixed
 

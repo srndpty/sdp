@@ -57,7 +57,7 @@ def test_object_name_and_accessibility(widget: SpectrumWidget) -> None:
 
 def test_minimum_height_and_size_policy(widget: SpectrumWidget) -> None:
     """縦は固定高、横は伸縮する。"""
-    assert widget.minimumHeight() >= 120
+    assert widget.minimumHeight() == 65
     assert widget.sizePolicy().horizontalPolicy() is QSizePolicy.Policy.Expanding
     assert widget.sizePolicy().verticalPolicy() is QSizePolicy.Policy.Fixed
 

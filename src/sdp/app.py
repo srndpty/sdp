@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from sdp.core.metadata.reader import MetadataReader
@@ -21,6 +22,7 @@ from sdp.core.playback.qt_backend import QtMultimediaBackend
 from sdp.core.playlist.model import PlaylistModel
 from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.launch import LaunchRequestHandler
+from sdp.resources import resource_path
 from sdp.services import logging_setup
 from sdp.services.launch_request import LaunchRequest, parse_launch_request
 from sdp.services.pcm_tap import PcmTap
@@ -223,6 +225,7 @@ def create_application(argv: list[str]) -> QApplication:
     app.setApplicationName(APPLICATION_NAME)
     app.setApplicationDisplayName(APPLICATION_NAME)
     app.setOrganizationName(ORGANIZATION_NAME)
+    app.setWindowIcon(QIcon(str(resource_path("assets/sdp.ico"))))
     return app
 
 

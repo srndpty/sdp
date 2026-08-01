@@ -18,10 +18,18 @@ import pytest
 from sdp.core.metadata.reader import (
     ARTIST_SEPARATOR,
     MetadataReadError,
+    _bitrate_bps,
     _duration_ms,
+    _repair_mojibake,
     read_track_metadata,
 )
-from sdp.core.metadata.types import MetadataStatus, TrackMetadata, format_duration_ms
+from sdp.core.metadata.types import (
+    MetadataStatus,
+    TrackMetadata,
+    format_bitrate,
+    format_duration_ms,
+    format_file_size,
+)
 
 
 def copy_source(test_audio_dir: Path, tmp_path: Path, name: str) -> Path:
@@ -57,7 +65,16 @@ def test_track_metadata_defaults_are_none() -> None:
     """どれも取得できないことがある。"""
     metadata = TrackMetadata()
 
-    assert (metadata.title, metadata.artist, metadata.album, metadata.duration_ms) == (
+    assert (
+        metadata.title,
+        metadata.artist,
+        metadata.album,
+        metadata.duration_ms,
+        metadata.file_size_bytes,
+        metadata.bitrate_bps,
+    ) == (
+        None,
+        None,
         None,
         None,
         None,
@@ -82,6 +99,20 @@ def test_metadata_status_values() -> None:
 def test_format_duration_ms(milliseconds: int, expected: str) -> None:
     """長さの表示は m:ss / h:mm:ss。"""
     assert format_duration_ms(milliseconds) == expected
+
+
+@pytest.mark.parametrize(
+    ("size_bytes", "expected"),
+    [(0, "0 B"), (1024, "1.0 KiB"), (1_572_864, "1.5 MiB")],
+)
+def test_format_file_size(size_bytes: int, expected: str) -> None:
+    """サイズは読みやすい2進単位で表示する。"""
+    assert format_file_size(size_bytes) == expected
+
+
+def test_format_bitrate_uses_kbps() -> None:
+    """ビットレートは一般的なkbps表記へ変換する。"""
+    assert format_bitrate(192_000) == "192 kbps"
 
 
 # -- タグの読み取り ---------------------------------------------------------
@@ -121,6 +152,13 @@ def test_reads_japanese_and_spaced_tags(test_audio_dir: Path, tmp_path: Path) ->
     assert metadata.title == "日本語 の タイトル"
     assert metadata.artist == "山田 太郎"
     assert metadata.album == "空白 入り"
+
+
+def test_repairs_cp932_bytes_misdeclared_as_latin1() -> None:
+    """Latin-1指定されたCP932の日本語だけを元へ戻す。"""
+    mojibake = "日本語タイトル".encode("cp932").decode("latin-1")
+    assert _repair_mojibake(mojibake) == "日本語タイトル"
+    assert _repair_mojibake("Beyoncé") == "Beyoncé"
 
 
 def test_joins_multiple_artists(test_audio_dir: Path, tmp_path: Path) -> None:
@@ -193,6 +231,9 @@ def test_duration_is_converted_to_milliseconds(test_audio_dir: Path, tmp_path: P
 
     assert metadata.duration_ms is not None
     assert metadata.duration_ms > 0
+    assert metadata.file_size_bytes == path.stat().st_size
+    assert metadata.bitrate_bps is not None
+    assert metadata.bitrate_bps > 0
 
 
 class _StubInfo:
@@ -201,6 +242,11 @@ class _StubInfo:
 
     def __init__(self, length: object) -> None:
         self.length = length
+
+
+class _StubBitrateInfo:
+    def __init__(self, bitrate: object) -> None:
+        self.bitrate = bitrate
 
 
 @pytest.mark.parametrize("length", [math.nan, math.inf, -math.inf, -1.0, "abc", None, True])
@@ -212,6 +258,12 @@ def test_invalid_duration_becomes_none(length: object) -> None:
 def test_missing_length_attribute_becomes_none() -> None:
     """length を持たない info でも例外にしない。"""
     assert _duration_ms(object()) is None
+
+
+@pytest.mark.parametrize("bitrate", [math.nan, math.inf, -1, 0, "abc", None, True])
+def test_invalid_bitrate_becomes_none(bitrate: object) -> None:
+    """正の有限数でないビットレートは不明扱いにする。"""
+    assert _bitrate_bps(_StubBitrateInfo(bitrate)) is None
 
 
 @pytest.mark.parametrize(("seconds", "expected"), [(0, 0), (1.2345, 1234), (2.0, 2000)])

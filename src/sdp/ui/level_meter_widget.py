@@ -19,12 +19,12 @@ NO_SOURCE_MESSAGE = "音声を再生するとレベルを表示します"
 GRID_DB_STEPS = (-60.0, -40.0, -20.0, -6.0)
 """dB基準線と目盛の文字。状態を色だけで伝えないため位置と数値を併記する。"""
 
-_MINIMUM_HEIGHT = 78
-_MARGIN = 6.0
+_MINIMUM_HEIGHT = 39
+_MARGIN = 3.0
 _LABEL_WIDTH = 14.0
-_ROW_GAP = 6.0
-_SCALE_HEIGHT = 12.0
-_MAX_BAR_HEIGHT = 20.0
+_ROW_GAP = 3.0
+_SCALE_HEIGHT = 6.0
+_MAX_BAR_HEIGHT = 10.0
 _PEAK_PEN_WIDTH = 1.0
 _PEAK_HOLD_PEN_WIDTH = 3.0
 
