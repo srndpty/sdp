@@ -312,6 +312,7 @@ Pythonやuvをインストールしていない環境でも、このディレク
 ```powershell
 pwsh -File scripts/build-package.ps1
 pwsh -File scripts/package-smoke.ps1
+pwsh -File scripts/package-gui-smoke.ps1
 ```
 
 ビルドスクリプトは以前の`build`／`dist`を安全確認後に削除し、
@@ -486,7 +487,7 @@ uv run python tools/installer_contract.py
 
 `assets/sdp.ico`（16／24／32／48／64／128／256px）はフォントやクリップアート等の
 第三者素材を使わず、`tools/gen_app_icon.py`の図形描画だけで生成した自作物で、
-sdp本体と同じMIT Licenseで扱える。再生成する場合のみ次を実行する（追加依存は不要）。
+sdp本体と同じGPL-3.0-onlyで扱う。再生成する場合のみ次を実行する（追加依存は不要）。
 
 ```powershell
 uv run python tools/gen_app_icon.py
@@ -566,4 +567,5 @@ FFmpeg CLI はテスト音源生成用の開発ツールであり、sdp 本体�
 
 ## ライセンス
 
-MIT
+GPL-3.0-only。配布物に含まれる第三者componentと、対応source公開前の残課題は
+[docs/distribution-licenses.md](./docs/distribution-licenses.md)を参照する。

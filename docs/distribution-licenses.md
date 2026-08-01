@@ -1,96 +1,87 @@
-# 配布物のライセンス状況（P7-C 時点）
+# 配布物のライセンス状況
 
-Windows onedir 配布物（`dist/sdp`、ZIP release、および同一内容を収めた
-インストーラー）へ**実際に含まれている**コンポーネントと、
-外部配布に必要な資料の状態をまとめる。
+Windows onedir配布物、ZIP release、installerへ実際に含めるcomponentと、
+外部公開までの条件を記録する。この文書は法務判断ではなく、確認済みの事実と
+release gateを管理するための資料である。
 
-**この文書は法務判断ではない。** 確認できた事実と、まだ決めていないことを分けて記録し、
-未解決が残っているあいだは「外部配布可能」とは扱わない。機械的な検査は
-[`packaging/licenses-manifest.json`](../packaging/licenses-manifest.json) と
-`uv run python tools/license_audit.py dist/sdp` が行う。
+## 採用方針
 
-## 調査に使った事実
+- sdp本体は **GPL-3.0-only** とする。
+- PySide6 / Shiboken / Qtはopen sourceのGPL-3.0-onlyを選択する。
+- MutagenのGPL-2.0-or-laterはversion 3を選択し、配布物全体をGPL-3.0-onlyとして扱う。
+- GPL-onlyかどうかにかかわらず、sdpが使用しないruntimeは配布しない。
+- 対応sourceを用意できないbinaryは外部公開しない。
 
-| 対象 | 確認方法 | 結果 |
-|---|---|---|
-| PySide6 / shiboken6 のライセンス表明 | wheel metadata（`importlib.metadata`） | `LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only` |
-| PySide6 wheel が同梱する原文 | `*.dist-info/licenses/` の列挙 | `LicenseRef-Qt-Commercial.txt` **のみ** |
-| FFmpeg の版と build 構成 | 同梱 DLL 内の configuration 文字列を実測 | n7.1.3 / `--enable-gpl`・`--enable-nonfree`・`--enable-version3` **なし** |
-| Mutagen のライセンス | 同梱 `COPYING` と `mutagen/__init__.py` の冒頭 | GPL v2 **or later** |
-| PyInstaller bootloader | 同梱 `COPYING.txt` と wheel metadata | GPL-2.0-or-later **＋ bootloader 例外** |
-| 同梱 DLL の一覧 | `dist/sdp/_internal` の実列挙 | Qt 6、FFmpeg、OpenSSL 3、MSVC ランタイム、Python |
+## 解決した事項
 
-## 分類
+- **sdp本体**: `LICENSE`と`pyproject.toml`をGPL-3.0-onlyへ変更し、配布物のrootと
+  `_internal/`へGPLv3原文を同梱する。旧MIT版の表示は`LICENSES/MIT.txt`へ保存する。
+- **Mutagen 1.48.1**: upstreamのGPL-2.0-or-laterからversion 3を選択したため、sdpとの
+  license互換性に関する判断は解決した。upstreamのCOPYINGとGPLv3原文を同梱する。
+- **Qt Virtual Keyboard**: Qt 6.10のopen source提供ではGPL-3.0-onlyだが、sdpは使用しない。
+  `Qt6VirtualKeyboard.dll`と`qtvirtualkeyboardplugin.dll`をPyInstaller収集後に除外し、
+  package layout検査で再混入を失敗させる。
+- **OpenSSL**: sdpはTLSを使わない。`qopensslbackend.dll`、`libssl-3-x64.dll`、
+  `libcrypto-3-x64.dll`を除外し、再混入をpackage layout検査で失敗させる。
+- **libffi 3.4.6**: uvが使用するpython-build-standaloneの`BUILD=20260127`に対応する
+  build sourceでversionと原文を確認し、原文を同梱する。
+- **Mesaの既知の表示**: Qt公式third-party attributionにあるBrian Paul、Khronos Group、
+  yohhoyのcopyrightとMIT／Boost Software License 1.0本文を同梱する。binaryの厳密な
+  構成特定は未完了のため、Mesa自体はblockerのままとする。
+- **原文**: GPL-3.0、LGPL-3.0、LGPL-2.1、Apache-2.0、libffiの原文を
+  `packaging/license-texts/`でsource管理し、wheelの内容に依存せず同梱する。
+- **CPython / NumPy / PyInstaller bootloader**: 各配布元の原文を同梱する。
+  PyInstaller bootloaderはbootloader exception付きである。
 
-### 解決済み
+## 残っている外部公開blocker
 
-- **sdp 本体**: MIT。`LICENSE` を配布物ルートと `_internal/` の両方へ同梱。
-- **CPython**: PSF-2.0。`_internal/licenses/Python/LICENSE.txt`。
-- **NumPy**: BSD-3-Clause（同梱コンポーネントの原文込み）。`_internal/licenses/numpy/`。
-- **PyInstaller bootloader**: GPL-2.0-or-later ＋ bootloader 例外。例外により、生成した
-  実行ファイルの配布条件は制約されない。`_internal/licenses/pyinstaller/COPYING.txt`。
+### 1. 対応source archive
 
-### 文書追加で解決可能
+GPL/LGPL componentの対応sourceを、binaryと同じGitHub Releaseから取得可能にする必要がある。
+対象versionと必要物は`CORRESPONDING_SOURCE.md`に固定した。外部公開可能とする判断基準は次の通り。
 
-- **PySide6 / Qt（LGPL で配布する場合）**: wheel が同梱するのは商用ライセンス参照文だけで、
-  **LGPL-3.0 の原文が配布物に無い**。LGPL-3.0 と（LGPLv3 が参照する）GPL-3.0 の原文、
-  Qt の著作権表示、ライブラリのソース入手方法の提示が必要。
-- **FFmpeg**: LGPL-2.1-or-later 相当の構成であることは実測できたが、**LGPL 原文と
-  ソース入手方法の提示が無い**。
-- **OpenSSL 3**: Apache-2.0 の原文が無い。sdp は TLS を使わないため、
-  `libssl` / `libcrypto` と関連 plugin を配布物から除外する選択肢もある。
+- sdp、PySide6 / Shiboken 6.10.3、Qt 6.10.3、Mutagen 1.48.1、FFmpeg n7.1.3、
+  CPython 3.13.11 / python-build-standalone BUILD 20260127のsource archiveがreleaseにある
+- FFmpeg archiveにLGPLだけでなくBSD／ISC／MIT／MPL-2.0等の全third-party attributionがある
+- sdpのbuild script、lockfile、PyInstaller spec、FFmpeg configure内容を取得できる
+- source archiveのSHA-256とcomponent versionをrelease manifestで検査できる
+- binaryだけのreleaseをCIが拒否する
 
-これらの原文は本作業のオフライン環境では取得できなかったため、**追加していない**。
-「同梱済み」と誤認しないよう、`licenses-manifest.json` では `shipped_texts` を空にしている。
+単にupstream URLを記載しただけでは完了扱いにしない。
 
-### 配布形態の判断が必要
+### 2. Mesa llvmpipe
 
-- **Qt の配布形態**: LGPL-3.0 で配布するのか、商用ライセンスを取得するのかを先に決める。
-  LGPL を選ぶ場合、onedir 配布は Qt DLL を差し替え可能な形（動的リンク）で同梱しているため
-  再リンク要件には適合しやすいが、原文・著作権表示・ソース提供の手当てが要る。
-- **MSVC ランタイム**: Visual Studio の再頒布条件に従う。GPL 系と組み合わせる場合は
-  system library 例外の該当性も確認が要る。
+PySide6 wheelの`opengl32sw.dll`はQtのsoftware OpenGL fallbackである。Qt公式のattributionでは
+Mesa / LLVM由来のMIT・Boost系条件が示され、既知のcopyright・license本文は同梱したが、
+同梱binaryの正確なversion・patch・全componentをwheelだけから確定できていない。
 
-### 外部専門家確認推奨
+判断基準は、PySide6 6.10.3 binaryに対応するQt SBOMまたはbuild記録からversion・componentを
+特定し、そのすべてのcopyright・license原文を同梱すること。特定できない場合は
+`opengl32sw.dll`を除外し、software OpenGL fallbackなしで対応環境を明記して実機検証する。
 
-- **Mutagen（GPL-2.0-or-later）**: 「or later」であるため GPL-3.0 として扱えば、
-  MIT・LGPL-3.0・PSF・BSD とは互換になる。ただしその場合、**配布物全体を GPL-3.0 の
-  条件で頒布する**ことになり、ソース提供義務の範囲を判断する必要がある。
-  回避したい場合は、メタデータ読み取りを GPL でない実装へ置き換える選択肢がある。
-- **Qt Virtual Keyboard**: sdp は使用していないが `PySide6-Addons` 経由で同梱される。
-  Qt のオープンソース提供では GPL-3.0-only の可能性があり、ライセンス面と配布サイズの
-  両方の理由から、除外できるかを検討する。
+### 3. Microsoft Visual C++ Runtime
 
-## 現時点の結論
+現在のonedirには`VCRUNTIME140*.dll`等が含まれる。GPLのSystem Library例外とMicrosoftの
+再頒布条件を同時に満たす配布形態を確定していない。
 
-**外部公開可能とは判断できない。** 少なくとも次が未了である。
+判断基準は、次のいずれかを専門家確認を含めて確定すること。
 
-1. Qt / PySide6 のライセンス形態の決定と、LGPL-3.0・GPL-3.0 原文の同梱
-2. FFmpeg の LGPL 原文とソース入手方法の提示
-3. OpenSSL の Apache-2.0 原文の同梱、または OpenSSL 自体の除外
-4. Mutagen の GPL 波及範囲の判断
+- runtime DLLをsdp配布物から除外し、Microsoft Visual C++ Redistributableを前提条件として
+  clean Windows環境でinstall・起動・再生を確認する
+- runtimeを同梱できる明確な根拠と適用条件を文書化する
 
-## インストーラー（P7-C）の扱い
+## 現在の公開可否
 
-P7-C で Inno Setup の per-user インストーラーを実装したが、上記が解決するまでは
-**インストーラーも技術検証用**と位置づけ、公開配布物として扱わない。
+**まだ外部公開可能とは判断しない。** GPL-3.0-onlyの選択、主要原文の同梱、未使用の
+Qt Virtual Keyboard / OpenSSL除外、libffiの特定までは完了したが、上記3 blockerが残る。
+ZIPとinstallerは引き続き技術検証用とする。
 
-- インストーラーは ZIP 配布物と同一内容の `dist/sdp` を収めるため、
-  `LICENSE`・`THIRD_PARTY_NOTICES.txt`・`_internal/licenses/` はそのまま含まれる。
-  インストールウィザードでは sdp の `LICENSE` を表示する。
-- ウィザードの説明文と `README.md` に「技術検証用であり公開配布物ではない」旨を明記し、
-  「公開配布可能」と読める表現は置かない。
-- installer manifest は `distribution: technical-verification-only` を記録する。
-- 不足している原文（Qt / FFmpeg / OpenSSL）を「同梱済み」と書かない。
-- **コード署名は行っていない。** ダウンロード実行時は SmartScreen の警告が出る想定である。
-
-## 検査の実行
+## 機械検査
 
 ```powershell
-uv run python tools/license_audit.py dist/sdp
+uv run python tools/license_audit.py dist/sdp --fail-on-unclassified
+uv run python tools/license_audit.py dist/sdp --fail-on-unclassified --fail-on-unresolved
 ```
 
-- 宣言した原文が配布物に無い場合は **exit 1**（機械的な不備）。
-- 未解決事項が残る場合は一覧を表示し、「外部配布可能とは判断できない」旨を明示する。
-- `scripts/build-release.ps1` と `scripts/build-installer.ps1` はこの検査を必ず通す。
-  未解決事項が残っていても技術検証用ビルドは通すが、宣言した原文の欠落では失敗させる。
+通常buildは宣言した原文の欠落と未分類runtimeで失敗する。後者の`--fail-on-unresolved`は
+外部公開gateで使い、残課題が0件になるまで失敗する。

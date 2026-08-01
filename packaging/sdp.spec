@@ -16,6 +16,7 @@ REPO_ROOT = Path(SPECPATH).resolve().parent
 ENTRY_SCRIPT = REPO_ROOT / "src" / "sdp" / "__main__.py"
 ICON_FILE = REPO_ROOT / "assets" / "sdp.ico"
 VERSION_INFO_TEMPLATE = REPO_ROOT / "packaging" / "windows-version-info.txt"
+STATIC_LICENSE_DIRECTORY = REPO_ROOT / "packaging" / "license-texts"
 
 
 def generate_version_info():
@@ -62,7 +63,11 @@ def license_files(distribution_name, target_name, required_names):
 
 
 datas = copy_metadata("sdp")
-project_documents = (REPO_ROOT / "LICENSE", REPO_ROOT / "THIRD_PARTY_NOTICES.txt")
+project_documents = (
+    REPO_ROOT / "LICENSE",
+    REPO_ROOT / "THIRD_PARTY_NOTICES.txt",
+    REPO_ROOT / "CORRESPONDING_SOURCE.md",
+)
 for document in project_documents:
     if not document.is_file():
         raise RuntimeError(f"配布用文書がありません: {document.name}")
@@ -85,6 +90,19 @@ if not python_license.is_file():
     raise RuntimeError("PythonのLICENSE.txtを検出できません")
 datas.append((str(python_license), "licenses/Python"))
 
+for license_name in (
+    "GPL-3.0.txt",
+    "LGPL-3.0.txt",
+    "LGPL-2.1.txt",
+    "Apache-2.0.txt",
+    "libffi-LICENSE.txt",
+    "Mesa-llvmpipe-NOTICE.txt",
+):
+    license_path = STATIC_LICENSE_DIRECTORY / license_name
+    if not license_path.is_file():
+        raise RuntimeError(f"配布用ライセンス原文がありません: {license_name}")
+    datas.append((str(license_path), "licenses/common"))
+
 
 analysis = Analysis(
     [str(ENTRY_SCRIPT)],
@@ -99,13 +117,39 @@ analysis = Analysis(
         "PyInstaller",
         "coverage",
         "pre_commit",
+        "comtypes",
+        "pythoncom",
+        "pywinauto",
+        "pywintypes",
         "pyright",
         "pytest",
         "ruff",
+        "win32",
+        "win32api",
+        "win32evtlog",
+        "win32pdh",
+        # NumPyの任意診断機能（numpy.__config__）から検出されるだけで、
+        # sdpの実行経路では使わない。
+        "yaml",
     ],
     noarchive=False,
     optimize=0,
 )
+
+# sdpが利用しないGPL-only moduleとTLS backendはwheelの包括的hookから入るため、
+# Analysis後に配布対象から除く。Qt Networkのlocal socketとWindows native TLS pluginは残す。
+_excluded_runtime_suffixes = (
+    "/pyside6/qt6virtualkeyboard.dll",
+    "/pyside6/plugins/platforminputcontexts/qtvirtualkeyboardplugin.dll",
+    "/pyside6/plugins/tls/qopensslbackend.dll",
+    "/libssl-3-x64.dll",
+    "/libcrypto-3-x64.dll",
+)
+analysis.binaries = [
+    entry
+    for entry in analysis.binaries
+    if not ("/" + entry[0].replace("\\", "/").lower()).endswith(_excluded_runtime_suffixes)
+]
 pyz = PYZ(analysis.pure)
 
 exe = EXE(

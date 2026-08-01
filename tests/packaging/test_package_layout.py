@@ -14,6 +14,7 @@ def _create_minimum_package(root: Path) -> None:
         "sdp.exe",
         "LICENSE",
         "THIRD_PARTY_NOTICES.txt",
+        "CORRESPONDING_SOURCE.md",
         "_internal/python313.dll",
         "_internal/PySide6/Qt6Core.dll",
         "_internal/PySide6/Qt6Gui.dll",
@@ -30,6 +31,13 @@ def _create_minimum_package(root: Path) -> None:
         "_internal/VCRUNTIME140.dll",
         "_internal/LICENSE",
         "_internal/THIRD_PARTY_NOTICES.txt",
+        "_internal/CORRESPONDING_SOURCE.md",
+        "_internal/licenses/common/GPL-3.0.txt",
+        "_internal/licenses/common/LGPL-3.0.txt",
+        "_internal/licenses/common/LGPL-2.1.txt",
+        "_internal/licenses/common/Apache-2.0.txt",
+        "_internal/licenses/common/libffi-LICENSE.txt",
+        "_internal/licenses/common/Mesa-llvmpipe-NOTICE.txt",
         "_internal/licenses/Python/LICENSE.txt",
         "_internal/licenses/PySide6/LicenseRef-Qt-Commercial.txt",
         "_internal/licenses/numpy/LICENSE.txt",
@@ -63,16 +71,35 @@ def test_missing_runtime_and_development_files_are_reported(tmp_path: Path) -> N
     assert any("ユーザーデータ" in failure for failure in failures)
 
 
+def test_unused_gpl_and_openssl_runtimes_are_rejected(tmp_path: Path) -> None:
+    """未使用のQt Virtual KeyboardとOpenSSL backendを再混入させない。"""
+    _create_minimum_package(tmp_path)
+    for relative in (
+        "_internal/PySide6/Qt6VirtualKeyboard.dll",
+        "_internal/PySide6/plugins/tls/qopensslbackend.dll",
+        "_internal/PySide6/libssl-3-x64.dll",
+    ):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+
+    failures = validate_package_layout(tmp_path)
+
+    assert len([failure for failure in failures if "未使用runtime" in failure]) == 3
+
+
 def test_license_documents_must_be_readable_next_to_the_executable(tmp_path: Path) -> None:
     """ZIP展開直後に読めるよう、ルート直下のライセンス文書を必須にする。"""
     _create_minimum_package(tmp_path)
     (tmp_path / "LICENSE").unlink()
     (tmp_path / "THIRD_PARTY_NOTICES.txt").unlink()
+    (tmp_path / "CORRESPONDING_SOURCE.md").unlink()
 
     failures = validate_package_layout(tmp_path)
 
     assert any("ルートにLICENSE" in failure for failure in failures)
     assert any("ルートにTHIRD_PARTY_NOTICES.txt" in failure for failure in failures)
+    assert any("ルートにCORRESPONDING_SOURCE.md" in failure for failure in failures)
 
 
 def test_missing_multimedia_backend_and_license_are_reported(tmp_path: Path) -> None:

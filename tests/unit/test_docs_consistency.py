@@ -7,6 +7,7 @@
 """
 
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ _README = _REPO_ROOT / "README.md"
 _SOURCE_ROOT = _REPO_ROOT / "src" / "sdp"
 _TESTING_STRATEGY = _REPO_ROOT / "docs" / "testing-strategy.md"
 _CI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "ci.yml"
+_LICENSE_MANIFEST = _REPO_ROOT / "packaging" / "licenses-manifest.json"
 
 # 構成図へ列挙する対象（責務の入口になるpackage）。
 _DOCUMENTED_PACKAGES = ("services", "ui")
@@ -143,3 +145,17 @@ def test_readme_does_not_claim_unimplemented_features_as_missing() -> None:
         assert implemented not in unimplemented, (
             f"実装済みの機能が未実装として記載されています: {implemented}"
         )
+
+
+def test_project_license_is_consistently_gpl3() -> None:
+    """metadata・README・配布manifest・Windows resourceのlicense表記を一致させる。"""
+    pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    manifest = _LICENSE_MANIFEST.read_text(encoding="utf-8")
+    version_info = (_REPO_ROOT / "packaging" / "windows-version-info.txt").read_text(
+        encoding="utf-8"
+    )
+
+    assert pyproject["project"]["license"] == "GPL-3.0-only"
+    assert "GPL-3.0-only" in _README.read_text(encoding="utf-8")
+    assert '"license": "GPL-3.0-only"' in manifest
+    assert "GPL-3.0-only" in version_info

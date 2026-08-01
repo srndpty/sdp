@@ -60,16 +60,20 @@ def test_repository_manifest_declares_runtime_reality() -> None:
     """実際に同梱しているruntimeを漏れなく宣言している。"""
     components = {item.identifier: item for item in load_license_manifest(MANIFEST_PATH)}
 
-    assert "LGPL" in components["pyside6"].license_name
+    assert components["sdp"].license_name == "GPL-3.0-only"
+    assert components["pyside6"].license_name.startswith("GPL-3.0-only")
     assert "LGPL-2.1" in components["ffmpeg"].license_name
-    assert components["mutagen"].license_name.startswith("GPL-2.0-or-later")
+    assert components["mutagen"].license_name.startswith("GPL-3.0-only")
     assert components["pyinstaller-bootloader"].status is ComponentStatus.RESOLVED
+    assert components["libffi"].status is ComponentStatus.RESOLVED
+    assert "qt-virtualkeyboard" not in components
+    assert "openssl" not in components
 
 
 def test_repository_manifest_still_has_unresolved_items() -> None:
     """外部配布ブロッカーを「解決済み」と誤記していない。
 
-    LGPL原文の同梱やQtの配布形態が決まるまでは未解決として扱う。
+    対応sourceの公開場所やMSVC runtimeの扱いが決まるまでは未解決として扱う。
     """
     unresolved = unresolved_components(load_license_manifest(MANIFEST_PATH))
 
@@ -288,20 +292,15 @@ def test_inventory_summary_counts_by_component(tmp_path: Path) -> None:
 
 
 def test_real_package_has_no_unexpected_unclassified_files() -> None:
-    """dist/sdpがある場合、未分類のruntimeファイルが既知の一覧に収まる。
+    """dist/sdpがある場合、すべてのruntimeファイルがmanifestに宣言されている。
 
     ここに載っていないDLL・pydが増えたら（hook変更などで）テストが落ちて気づける。
-    以下は「同梱しているが未宣言」と分かっている将来課題であり、公開前に解消する。
+    未分類を一時的な既知一覧として許容するとmanifest更新漏れが残るため、0件を必須とする。
     """
     package = REPO_ROOT / "dist" / "sdp"
     if not package.exists():
         pytest.skip("配布物未ビルド")
 
-    known_unclassified = {
-        "_internal/libffi-8.dll",
-        "_internal/PySide6/opengl32sw.dll",
-        "_internal/yaml/_yaml.cp313-win_amd64.pyd",
-    }
     inventory = classify_runtime_files(load_license_manifest(MANIFEST_PATH), package)
 
-    assert set(inventory.unclassified) <= known_unclassified, set(inventory.unclassified)
+    assert inventory.unclassified == ()

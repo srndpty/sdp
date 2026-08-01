@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QSplitter,
     QTableView,
+    QWidget,
 )
 from pytestqt.qtbot import QtBot
 
@@ -125,6 +126,30 @@ def action_of(window: MainWindow, name: str) -> QAction:
     action = window.findChild(QAction, name)
     assert action is not None, name
     return action
+
+
+@pytest.mark.parametrize(
+    ("object_name", "accessible_name"),
+    [
+        ("fileNameLabel", "現在のファイル"),
+        ("playButton", "再生"),
+        ("pauseButton", "一時停止"),
+        ("stopButton", "停止"),
+        ("seekSlider", "再生位置"),
+        ("volumeSlider", "音量"),
+        ("muteButton", "ミュート"),
+        ("repeatModeButton", "リピート"),
+        ("shuffleButton", "シャッフル"),
+        ("playlistTable", "プレイリスト"),
+    ],
+)
+def test_core_controls_have_stable_accessible_names(
+    window: MainWindow, object_name: str, accessible_name: str
+) -> None:
+    """配布版UI Automationが座標や翻訳済み表示順へ依存せず操作できる。"""
+    widget = window.findChild(QWidget, object_name)
+    assert widget is not None, object_name
+    assert widget.accessibleName() == accessible_name
 
 
 # -- 依存の向き -------------------------------------------------------------

@@ -28,7 +28,7 @@ VSVersionInfo(
             StringStruct('FileDescription', 'sdp'),
             StringStruct('FileVersion', '{version}'),
             StringStruct('InternalName', 'sdp'),
-            StringStruct('LegalCopyright', 'Copyright (c) sdp contributors. MIT License.'),
+            StringStruct('LegalCopyright', 'Copyright (c) sdp contributors. GPL-3.0-only.'),
             StringStruct('OriginalFilename', 'sdp.exe'),
             StringStruct('ProductName', 'sdp'),
             StringStruct('ProductVersion', '{version}')

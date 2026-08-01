@@ -9,6 +9,7 @@
 - 純粋ロジック（FFT、波形縮約、次曲決定、キャッシュキー、設定）は Qt から分離し、
   GUI も音声デバイスも不要な単体テストで厚く検証する。
 - Qt に依存する部分は pytest-qt によるオフスクリーン統合テストで検証する。
+- build済みWindows配布版の主要経路はpywinauto（UI Automation）で実操作する。
 - 実際の音声デバイスを使う再生テストは `audio` マーカーを付け、ローカルの手動実行に限定する。
 - **意味のないテストで coverage の数値だけを上げない。**
   外部音声デバイス、Qt Multimedia の実音再生、PyInstaller 成果物は
@@ -139,8 +140,11 @@ uv run pytest -m audio
 
 - pytest-qt の `qtbot` で主要操作を検証する
   （ボタン → Controller の呼び出し、ショートカット、シークバー）。
-- フルの E2E GUI 自動化は個人開発では費用対効果が合わないため行わない。
-  代わりに §7 の手動チェックリストで補う。
+- pytest-qtでMainWindowと主要controlの`accessibleName`を契約として固定する。
+- pywinautoで配布版exeを起動し、日本語・空白入りpath、主要control、設定dialog、
+  Cancel、正常終了をUI Automation経由で検証する。
+- 可聴音、描画品質、DPI、Explorer D&D、foreground制約、SmartScreenは機械判定が
+  不十分なため、該当する手動チェックだけを残す。
 
 ## 6. パッケージ版スモークテスト
 
@@ -148,9 +152,19 @@ uv run pytest -m audio
   FFmpeg backendで実decodeし、終了コード0／1を返す。各圧縮形式と実音は手動確認する。
 - 手動チェックリスト（§7）。
 
+対話desktopを利用できるWindows環境では、build後に次も実行する。
+
+```powershell
+pwsh -File scripts/package-gui-smoke.ps1
+```
+
+このtestはprofile、`LOCALAPPDATA`、一時領域、単一instance識別情報をtestごとに
+隔離するため、通常起動中のsdpや並列test processへ要求を転送しない。
+
 ## 6.1 P1 手動スモーク（`uv run python -m sdp`）
 
-GUI と実音を伴うため自動化しない。**最初は音量を下げるかミュートで確認する。**
+GUIの基本操作と実音Backendは別々に自動検証している。画面と音を同時に人が評価する
+以下の項目は手動で行う。**最初は音量を下げるかミュートで確認する。**
 
 - [ ] アプリが起動する
 - [ ] 「開く...」から WAV を選べる
@@ -490,24 +504,31 @@ Python source、tests、開発ツール、ユーザー保存ファイルの混�
 ```powershell
 pwsh -File scripts/build-package.ps1
 pwsh -File scripts/package-smoke.ps1
+pwsh -File scripts/package-gui-smoke.ps1
 ```
 
 スモークは配布物をrepository外の一時directoryへコピーし、開発用Pythonやuvを含まない
 制限PATHと隔離LOCALAPPDATAで`sdp.exe --selftest`を実行する。続けてcopy内のFFmpeg media
 pluginとavcodec DLLを1件ずつ退避し、どちらもselftestが終了コード1にすることを確認する。
-実GUIは自動終了させず、
-以下をWindows 11で手動確認する。
+`package-gui-smoke.ps1`は実GUIを自動起動・操作・終了する。可聴音、OS統合、描画品質は
+判定しないため、以下の未チェック項目をWindows 11で別途確認する。
 
-- [ ] `sdp.exe`を直接起動し、consoleが表示されずWindowが開く
+2026-08-01に生成ZIPをrepository外へ展開し、隔離`LOCALAPPDATA`でGUIを起動した。
+MainWindow表示、日本語・空白入りFLACのplaylist保存、通常closeのexit 0、ログ生成、
+終了後の残processなしまで機械的に確認した。画面内容と可聴再生は未確認。
+
+- [x] `sdp.exe`を直接起動し、consoleが表示されずWindowが開く
 - [ ] WAV／MP3／FLAC／Ogg Vorbis／Opus／M4A／AACを低音量で再生できる
-- [ ] 日本語・空白path、複数path、相対pathを受け取れる
+- [x] 日本語・空白pathと複数の絶対pathを受け取れる
+- [ ] 相対pathを受け取れる
 - [ ] 起動済み配布版へ別PowerShellから転送でき、2つ目のprocessが残らない
 - [ ] 最小化復帰と最大化維持が動作する
 - [ ] 波形・スペクトラム・レベル、速度・ピッチを実音で確認できる
-- [ ] 終了後にprocessが残らず、直ちに再起動できる
+- [x] UI Automationから通常終了するとprocessが残らない
+- [ ] 終了直後に同じprofileで再起動できる
 - [ ] read-onlyな配置directoryから起動してもユーザーデータは`LOCALAPPDATA`へ保存される
 - [ ] Windows Defenderのスキャン結果と初回起動警告を記録する
-- [ ] `dist/sdp`をZIP化・展開してもselftestとGUI起動が成功する
+- [x] `dist/sdp`をZIP化・展開してもselftestとGUI起動が成功する
 
 自動selftestは可聴音、Windows foreground制約、SmartScreen、DPI、
 外部配布ライセンス遵守を証明しない。これらはrelease前の独立した手動ゲートとする。
@@ -545,7 +566,7 @@ uv run python tools/license_audit.py dist/sdp
 | ユーザーdata書き込み先 | `LOCALAPPDATA`配下のみ（`sdp/logs/sdp.log`、GUI起動時は`playlist.json`／`ui-state.json`） |
 | repository外からのGUI起動 | Window表示・正常終了・残プロセスなし |
 | Defender（engine 1.1.26060.3008 / signature 1.455.422.0 / 2026-07-30） | ZIPとdist/sdpのquick scanで検出0件、quarantineなし |
-| package | 330ファイル / 162.6 MiB（ZIP 67.7 MiB） |
+| package | 332ファイル / 156.8 MiB（ZIP 65.5 MiB） |
 | build時間 | onedir build 約56〜68秒、release全体 約69〜97秒 |
 | 再現性 | 2回buildでファイル集合・数・サイズ・runtime・pluginが一致。`sdp.exe`と`base_library.zip`はbuild時刻埋め込みのため不一致で、ZIP hashも不一致 |
 
@@ -553,7 +574,7 @@ uv run python tools/license_audit.py dist/sdp
 
 配布版で次を実画面・実音で確認する。**最初は音量を下げて始めること。**
 
-- [ ] repository外へZIPを展開して起動できる
+- [x] repository外へZIPを展開して起動できる
 - [ ] WAV／MP3／FLAC／M4Aを可聴再生できる
 - [ ] pause／resume／seek／volume／mute
 - [ ] 0.5／1.0／2.0倍、pitch補正ON／OFF
@@ -710,14 +731,17 @@ pwsh -File scripts/installer-smoke.ps1 -ConfirmProfileChanges
 
 ## 6.19 手動リリースゲート（ZIP配布とinstaller）
 
-- [ ] `scripts/build-release.ps1`が成功する
-- [ ] `scripts/build-installer.ps1`が成功する
-- [ ] `scripts/installer-smoke.ps1 -ConfirmProfileChanges`が成功する
-- [ ] SHA-256が`release/*.sha256`と一致する
-- [ ] manifestのversion・runtime・pluginが期待どおり
-- [ ] installer manifestのscope・privileges・関連付け・SHA-256が期待どおり
-- [ ] `docs/distribution-licenses.md`の未解決事項が更新されている
-- [ ] 未解決のライセンス事項がある間は外部公開しない（ZIP・installerとも）
+2026-08-01にWindows 11 build 26200で再実行した。`computer-use`のnative pipeが
+利用できなかったため、画面の視認や聴感を要する項目は完了扱いにしていない。
+
+- [x] `scripts/build-release.ps1`が成功する
+- [x] `scripts/build-installer.ps1`が成功する
+- [x] `scripts/installer-smoke.ps1 -ConfirmProfileChanges`が成功する
+- [x] SHA-256が`release/*.sha256`と一致する
+- [x] manifestのversion・runtime・pluginが期待どおり
+- [x] installer manifestのscope・privileges・関連付け・SHA-256が期待どおり
+- [x] `docs/distribution-licenses.md`の未解決事項が更新されている
+- [x] 未解決のライセンス事項がある間は外部公開しない（ZIP・installerとも）
 
 ## 7. 手動チェックリスト（リリース前）
 
@@ -728,8 +752,8 @@ pwsh -File scripts/installer-smoke.ps1 -ConfirmProfileChanges
       （前面化できない場合はタスクバーが点滅する）
 - [ ] 日本語・空白を含むパスで再生できる
 - [ ] 既定のアプリ設定への導線が動作する
-- [ ] アンインストール後にレジストリの登録が残っていない
-- [ ] インストール直後の初回起動でクラッシュしない
+- [x] アンインストール後にレジストリの登録が残っていない
+- [x] インストール直後の初回起動でクラッシュしない
 
 ## 8. 性能計測方法（NF-03）
 

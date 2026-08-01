@@ -27,6 +27,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="どのコンポーネントにも属さないDLL・pydがあれば失敗にする（公開ゲート向け）。",
     )
+    parser.add_argument(
+        "--fail-on-unresolved",
+        action="store_true",
+        help="未解決componentがあれば失敗にする（外部公開ゲート向け）。",
+    )
     arguments = parser.parse_args(argv)
 
     components = load_license_manifest(arguments.manifest)
@@ -51,6 +56,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if arguments.fail_on_unclassified and inventory.unclassified:
         print("エラー: 未分類のruntimeファイルが残っています（--fail-on-unclassified）。")
+        return 1
+    if arguments.fail_on_unresolved and unresolved:
+        print("エラー: 未解決のライセンス事項が残っています（--fail-on-unresolved）。")
         return 1
     if unresolved:
         print(

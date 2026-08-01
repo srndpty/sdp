@@ -69,28 +69,36 @@ class PlayerControls(QWidget):
 
         self._repeat_button = QPushButton(_REPEAT_LABELS[RepeatMode.OFF])
         self._repeat_button.setObjectName("repeatModeButton")
+        self._repeat_button.setAccessibleName("リピート")
         self._repeat_button.setToolTip("リピートの種類を切り替えます（オフ → 全曲 → 1曲）")
         self._shuffle_button = QPushButton("シャッフル")
         self._shuffle_button.setObjectName("shuffleButton")
+        self._shuffle_button.setAccessibleName("シャッフル")
         self._shuffle_button.setCheckable(True)
         self._shuffle_button.setToolTip("プレイリストをランダムな順で再生します")
 
         self._previous_button = QPushButton("前の曲")
         self._previous_button.setObjectName("previousTrackButton")
+        self._previous_button.setAccessibleName("前の曲")
         self._previous_button.setEnabled(False)
         self._next_button = QPushButton("次の曲")
         self._next_button.setObjectName("nextTrackButton")
+        self._next_button.setAccessibleName("次の曲")
         self._next_button.setEnabled(False)
 
         self._play_button = QPushButton("再生")
         self._play_button.setObjectName("playButton")
+        self._play_button.setAccessibleName("再生")
         self._pause_button = QPushButton("一時停止")
         self._pause_button.setObjectName("pauseButton")
+        self._pause_button.setAccessibleName("一時停止")
         self._stop_button = QPushButton("停止")
         self._stop_button.setObjectName("stopButton")
+        self._stop_button.setAccessibleName("停止")
 
         self._seek_slider = QSlider(Qt.Orientation.Horizontal)
         self._seek_slider.setObjectName("seekSlider")
+        self._seek_slider.setAccessibleName("再生位置")
         self._seek_slider.setRange(0, 0)
 
         self._position_label = QLabel(format_duration_ms(0))
@@ -100,13 +108,16 @@ class PlayerControls(QWidget):
 
         self._volume_slider = QSlider(Qt.Orientation.Horizontal)
         self._volume_slider.setObjectName("volumeSlider")
+        self._volume_slider.setAccessibleName("音量")
         self._volume_slider.setRange(0, _VOLUME_SLIDER_MAX)
         self._mute_button = QPushButton("ミュート")
         self._mute_button.setObjectName("muteButton")
+        self._mute_button.setAccessibleName("ミュート")
         self._mute_button.setCheckable(True)
 
         self._state_label = QLabel(_STATE_LABELS[PlaybackState.NO_MEDIA])
         self._state_label.setObjectName("stateLabel")
+        self._state_label.setAccessibleName("再生状態")
 
         self._build_layout()
         self._connect_widgets()

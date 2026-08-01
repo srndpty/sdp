@@ -100,6 +100,7 @@ class MainWindow(QMainWindow):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self.setAccessibleName("sdpメインウィンドウ")
         self._controller = controller
         self._app_settings = app_settings
         self._settings_dialog: SettingsDialog | None = None
@@ -113,6 +114,7 @@ class MainWindow(QMainWindow):
 
         self._file_name_label = QLabel(NO_FILE_TEXT)
         self._file_name_label.setObjectName("fileNameLabel")
+        self._file_name_label.setAccessibleName("現在のファイル")
         self._controls = PlayerControls(controller)
         self._speed_panel = SpeedPanel(controller)
         self._waveform_panel = WaveformPanel(controller, waveform_analysis)
