@@ -785,9 +785,14 @@ def test_all_entries_are_eventually_read_through_the_bounded_queue(
 
     reader.start()
 
-    qtbot.waitUntil(lambda: read_function.call_count() == len(paths), timeout=WAIT_TIMEOUT_MS)
-    qtbot.waitUntil(lambda: reader.pending_count == 0, timeout=WAIT_TIMEOUT_MS)
-    assert reader.in_flight_count == 0
+    qtbot.waitUntil(
+        lambda: (
+            read_function.call_count() == len(paths)
+            and reader.pending_count == 0
+            and reader.in_flight_count == 0
+        ),
+        timeout=WAIT_TIMEOUT_MS,
+    )
     reader.shutdown(timeout_ms=2_000)
 
 
