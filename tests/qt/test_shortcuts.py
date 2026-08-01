@@ -205,8 +205,8 @@ def test_previous_and_next_delegate_to_playlist_controller(
     press(harness, Qt.Key.Key_Left, Qt.KeyboardModifier.AltModifier)
 
     assert harness.backend.call_args("load") == [
-        (audio_files[1].resolve(),),
-        (audio_files[0].resolve(),),
+        (audio_files[1].resolve(), 2),
+        (audio_files[0].resolve(), 3),
     ]
 
 

@@ -11,6 +11,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from PySide6.QtWidgets import QApplication
 
@@ -23,6 +24,7 @@ from sdp.launch import LaunchRequestHandler
 from sdp.services import logging_setup
 from sdp.services.launch_request import LaunchRequest, parse_launch_request
 from sdp.services.pcm_tap import PcmTap
+from sdp.services.playlist_file_status import PlaylistFileStatusChecker
 from sdp.services.playlist_session import PlaylistSession, default_playlist_path
 from sdp.services.save_status import SaveCategory, SaveStatusReporter, restore_failure_message
 from sdp.services.settings import AppSettingsController, SettingsSession
@@ -64,6 +66,7 @@ class PlayerComposition:
     playlist_session: PlaylistSession
     settings_session: SettingsSession
     metadata_reader: MetadataReader
+    file_status_checker: PlaylistFileStatusChecker
     waveform_analysis: WaveformAnalysisService
     pcm_tap: PcmTap
     app_settings: AppSettingsController
@@ -114,6 +117,9 @@ def build_player(
     playlist_restore_message = session.load_into(playlist_model)
     # 生成だけで読み取りは始めない（start() は run() が呼ぶ）。
     metadata_reader = MetadataReader(playlist_model)
+    # エントリ生成ではファイルへ触れない。欠損判定は背景で少しずつ確定させる。
+    # 構築だけでは開始せず、run() から明示的に start() する。
+    file_status_checker = PlaylistFileStatusChecker(playlist_model)
     waveform_analysis = WaveformAnalysisService(
         controller,
         default_waveform_cache_directory()
@@ -121,9 +127,10 @@ def build_player(
         else waveform_cache_directory,
     )
     # 再生中PCMの供給は Qt Multimedia 固有の補助ポート。ここだけが具体Backendの
-    # QAudioBufferOutput を知る（PlaybackBackend の契約には含めない）。
+    # PCM供給口を知る（PlaybackBackend の契約には含めない）。
+    # Backend 側で現在の load 世代だけへ絞ってあるため、前sourceのPCMは届かない。
     pcm_tap = PcmTap(controller)
-    pcm_tap.connect_audio_buffer_output(backend.audio_buffer_output)
+    pcm_tap.connect_audio_buffer_source(backend.audio_buffer_received)
     # MainWindowは復元済み設定を表示前に反映する（可視化のフリッカーを避ける）。
     window = MainWindow(
         controller,
@@ -167,6 +174,20 @@ def build_player(
         SaveCategory.UI_STATE, ui_state_session.save_failed, ui_state_session.save_recovered
     )
     save_status.message_requested.connect(window.show_status_message)
+
+    # 設定適用の失敗後にrollbackもできなかった場合、公開snapshotは実状態へ
+    # 合わせ直される。利用者から見ると「操作していない設定が変わった」ので伝える。
+    def _report_rollback_failure(names: object) -> None:
+        if not isinstance(names, tuple):
+            return
+        items = cast("tuple[object, ...]", names)
+        if not items:
+            return
+        joined = "・".join(str(name) for name in items)
+        window.show_status_message(f"{joined}を元に戻せませんでした。設定画面で確認してください。")
+
+    app_settings.settings_rollback_failed.connect(_report_rollback_failure)
+
     launch_handler = LaunchRequestHandler(playlist_model, window)
     composition = PlayerComposition(
         backend=backend,
@@ -176,6 +197,7 @@ def build_player(
         playlist_session=session,
         settings_session=settings_session,
         metadata_reader=metadata_reader,
+        file_status_checker=file_status_checker,
         waveform_analysis=waveform_analysis,
         pcm_tap=pcm_tap,
         app_settings=app_settings,
@@ -238,6 +260,9 @@ def run(argv: list[str] | None = None, *, server_name: str | None = None) -> int
     # 復元完了後から変更監視を始める（load中のSignalを自動保存扱いしない）。
     composition.settings_session.start()
     composition.playlist_session.start()
+    # ファイル状態の確認を先に開始する。メタデータ読み取りはAVAILABLE確定後に
+    # 走るため、この順序だと同じファイルへの重複I/Oが起きない。
+    composition.file_status_checker.start()
     # メタデータの読み取りはここで開始する（GUI スレッドはブロックしない）。
     composition.metadata_reader.start()
     composition.waveform_analysis.start()
@@ -271,6 +296,7 @@ def shutdown(composition: PlayerComposition) -> None:
             ("PCMタップの停止", composition.pcm_tap.shutdown),
             ("波形解析の停止", composition.waveform_analysis.shutdown),
             ("メタデータ読み取りの停止", composition.metadata_reader.shutdown),
+            ("ファイル状態確認の停止", composition.file_status_checker.shutdown),
             # Windowが生きているあいだにUI状態を確定させる（破棄後はgeometryを取得できない）。
             ("ウィンドウ状態の保存", composition.ui_state_session.flush),
             ("設定の保存", composition.settings_session.flush),

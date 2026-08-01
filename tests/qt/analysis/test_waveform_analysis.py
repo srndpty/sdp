@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from PySide6.QtCore import QThread, QTimer
+from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtTest import QSignalSpy
 from pytestqt.qtbot import QtBot
 from shiboken6 import isValid
@@ -20,6 +20,7 @@ from sdp.core.analysis.waveform_cache import (
     WaveformCacheKey,
 )
 from sdp.core.playback.controller import PlaybackController
+from sdp.services.thread_shutdown import ShutdownOutcome, wait_for_abandoned_threads
 from sdp.services.waveform_analysis import (
     FILE_CHANGED_MESSAGE,
     DecodedChunk,
@@ -282,9 +283,14 @@ def test_failure_is_separate_from_playback_and_shutdown_is_idempotent(
 
 
 def test_missing_source_request_fails_without_starting_decode(
-    controller: PlaybackController, tmp_path: Path
+    controller: PlaybackController, tmp_path: Path, qtbot: QtBot
 ) -> None:
-    """解析直前に欠損したpathは専用失敗Signalとなり、decodeを投入しない。"""
+    """解析直前に欠損したsourceはworkerが失敗Signalへ終端し、decodeを投入しない。
+
+    存在確認はGUIスレッドで行わない（重複I/Oを避ける）。現在のplayback source が
+    解析時に欠損していれば、worker側の ``WaveformCacheKey.from_path`` が失敗し、
+    decodeを投入せずに ``analysis_failed`` で終端する。
+    """
     calls: list[Path] = []
 
     def counting_decode(path: Path, cancelled: Callable[[], bool]) -> Iterator[DecodedChunk]:
@@ -292,14 +298,16 @@ def test_missing_source_request_fails_without_starting_decode(
         calls.append(path)
         yield DecodedChunk(np.zeros(20, dtype=np.float32), 1_000)
 
+    source = make_audio_file(tmp_path)
+    controller.load(source)
     service = make_service(controller, tmp_path / "cache", counting_decode)
     started = QSignalSpy(service.analysis_started)
     failed = QSignalSpy(service.analysis_failed)
+    # 解析対象は現在のplayback source。start前に消し、worker側の欠損検出を誘発する。
+    source.unlink()
     service.start()
-    missing = tmp_path / "missing.wav"
-    service._on_source_changed(missing)  # pyright: ignore[reportPrivateUsage]
+    qtbot.waitUntil(lambda: failed.count() == 1, timeout=5_000)
     assert started.count() == 1
-    assert failed.count() == 1
     assert started.at(0)[:2] == failed.at(0)[:2]
     assert calls == []
     service.shutdown()
@@ -372,7 +380,11 @@ def test_file_identity_rechecks_run_only_on_worker_thread(
     qtbot: QtBot,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """要求生成後のstat再確認をGUI threadで実行しない。"""
+    """キャッシュキーの生成と再確認を、いずれもGUI threadで実行しない。
+
+    内容fingerprintの算出は最大192KiBの読み取りを伴う。GUIスレッドで作ると
+    NAS・休止ディスク・クラウドプレースホルダーでsource切替のたびにUIが止まる。
+    """
     source = make_audio_file(tmp_path)
     threads: list[QThread] = []
     original_from_path = WaveformCacheKey.from_path
@@ -401,12 +413,12 @@ def test_file_identity_rechecks_run_only_on_worker_thread(
     controller.load(source)
     qtbot.waitUntil(lambda: finished.count() == 1, timeout=5_000)
 
-    assert len(threads) >= 3
-    assert threads[0] is service.thread()
+    assert threads
     assert all(
         thread is service._thread  # pyright: ignore[reportPrivateUsage]
-        for thread in threads[1:]
+        for thread in threads
     )
+    assert service.thread() not in threads
     service.shutdown()
 
 
@@ -453,7 +465,7 @@ def test_shutdown_waits_for_blocked_worker_after_timeout(
     qtbot: QtBot,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """短いtimeoutを超えてもworker終了まで待ち、安全にQObjectを削除できる。"""
+    """短いtimeoutを超えても、hard上限までにworkerが戻れば通常どおり終了する。"""
     source = make_audio_file(tmp_path)
     entered = threading.Event()
     release = threading.Event()
@@ -472,11 +484,12 @@ def test_shutdown_waits_for_blocked_worker_after_timeout(
     releaser.start()
 
     with caplog.at_level("WARNING"):
-        service.shutdown(timeout_ms=1)
+        outcome = service.shutdown(timeout_ms=1)
     releaser.join(timeout=1)
 
+    assert outcome is ShutdownOutcome.STOPPED
     assert not service._thread.isRunning()  # pyright: ignore[reportPrivateUsage]
-    assert "安全なQObject破棄のため終了まで待機します" in caplog.text
+    assert "もう少し待機します" in caplog.text
     service.deleteLater()
     qtbot.waitUntil(lambda: not isValid(service))
     assert not isValid(service)
@@ -555,3 +568,115 @@ def test_gui_heartbeat_runs_while_worker_is_blocked(
     assert len(ticks) > ticks_before_reduction
     timer.stop()
     service.shutdown()
+
+
+def test_shutdown_does_not_rewrite_an_abandoned_result_as_stopped(
+    controller: PlaybackController, tmp_path: Path, qtbot: QtBot
+) -> None:
+    """冪等なshutdownでも、初回のABANDONEDを黙ってSTOPPEDへ書き換えない。"""
+    del qtbot
+    source = make_audio_file(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_decode(path: Path, cancelled: Callable[[], bool]) -> Iterator[DecodedChunk]:
+        del path, cancelled
+        entered.set()
+        release.wait(timeout=5)
+        yield DecodedChunk(np.zeros(20, dtype=np.float32), 1_000)
+
+    service = make_service(controller, tmp_path / "cache", blocked_decode)
+    service.start()
+    controller.load(source)
+    assert entered.wait(timeout=5)
+
+    # workerが戻らない状態で放棄させる。
+    assert service.shutdown(timeout_ms=0, hard_timeout_ms=0) is ShutdownOutcome.ABANDONED
+    assert service.shutdown() is ShutdownOutcome.ABANDONED
+
+    release.set()
+    assert wait_for_abandoned_threads()
+
+    # 実際に終わったあとは STOPPED へ更新してよい。
+    assert service.shutdown() is ShutdownOutcome.STOPPED
+
+
+def test_cache_is_saved_when_the_source_changes_before_the_gui_handles_finished(
+    controller: PlaybackController, tmp_path: Path, qtbot: QtBot
+) -> None:
+    """Aの完了通知をGUIが処理する前にBへ切り替えても、Aのキャッシュは保存される。
+
+    「保存要求を作る前に、それが現在表示中の解析であること」を要求すると、
+    次の順序で正常な解析結果を捨ててしまう。
+
+    1. workerがAの解析を完了して ``finished`` をemit（GUIへqueued）
+    2. GUIがそれを処理する前にBをload
+    3. queued済みのAの完了通知が実行され、現在requestはBのため破棄
+
+    保存とUIへの適用は独立した判断にする。
+    """
+    first = make_audio_file(tmp_path, "A.wav")
+    second = make_audio_file(tmp_path, "B.wav")
+    cache_dir = tmp_path / "cache"
+    first_key = WaveformCacheKey.from_path(first)
+    emitted = threading.Event()
+
+    def decode(path: Path, cancelled: Callable[[], bool]) -> Iterator[DecodedChunk]:
+        del path, cancelled
+        yield DecodedChunk(np.zeros(20, dtype=np.float32), 1_000)
+
+    service = make_service(controller, cache_dir, decode)
+
+    def note_emitted(*_arguments: object) -> None:
+        emitted.set()
+
+    # worker thread上で（＝GUIへのqueued配送より前に）完了を知る。
+    service._worker.finished.connect(  # pyright: ignore[reportPrivateUsage]
+        note_emitted,
+        Qt.ConnectionType.DirectConnection,
+    )
+    service.start()
+    try:
+        controller.load(first)
+        # Qtのevent loopを回さずに待つ。Aの完了通知はqueueされたまま残る。
+        assert emitted.wait(timeout=5)
+
+        controller.load(second)
+
+        qtbot.waitUntil(lambda: (cache_dir / first_key.filename).is_file(), timeout=5_000)
+    finally:
+        service.shutdown()
+
+
+def test_cache_is_saved_even_when_the_next_source_starts_immediately(
+    controller: PlaybackController, tmp_path: Path, qtbot: QtBot
+) -> None:
+    """Aの完了直後にBをloadしても、Aのキャッシュが保存される。
+
+    保存要求がworkerの現在状態（現在request・現在key）を参照していると、
+    GUIを1往復するあいだにBの解析が始まった時点でAの結果を捨ててしまう。
+    """
+    first = make_audio_file(tmp_path, "A.wav")
+    second = make_audio_file(tmp_path, "B.wav")
+    cache_dir = tmp_path / "cache"
+    first_key = WaveformCacheKey.from_path(first)
+
+    def decode(path: Path, cancelled: Callable[[], bool]) -> Iterator[DecodedChunk]:
+        del path, cancelled
+        yield DecodedChunk(np.zeros(20, dtype=np.float32), 1_000)
+
+    service = make_service(controller, cache_dir, decode)
+    finished = QSignalSpy(service.analysis_finished)
+    service.start()
+    try:
+        controller.load(first)
+        qtbot.waitUntil(lambda: finished.count() == 1, timeout=5_000)
+        # analysis_finished を受けた直後（保存要求がworkerへ届く前）に次の曲を読む。
+        controller.load(second)
+
+        qtbot.waitUntil(
+            lambda: (cache_dir / first_key.filename).is_file(),
+            timeout=5_000,
+        )
+    finally:
+        service.shutdown()

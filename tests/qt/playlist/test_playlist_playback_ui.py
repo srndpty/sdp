@@ -275,6 +275,7 @@ def test_missing_row_keeps_its_grey_text(
 ) -> None:
     """欠損行のグレー表示は従来どおり。"""
     model.add_paths([audio_files[0], tmp_path / "ない曲.wav"])
+    model.refresh_file_status()
 
     missing = row_appearance(view, 1)
     available = row_appearance(view, 0)
@@ -288,6 +289,7 @@ def test_missing_and_current_row_combines_both(
 ) -> None:
     """欠損かつ現在 entry でも、グレーと太字が両立して破綻しない。"""
     entry_ids = model.add_paths([tmp_path / "ない曲.wav"])
+    model.refresh_file_status()
     view.set_current_entry_id(entry_ids[0])
 
     appearance = row_appearance(view, 0)

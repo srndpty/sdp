@@ -5,6 +5,7 @@
 読み取り処理そのものは :mod:`sdp.core.metadata.reader` の責務。
 """
 
+import os
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -18,8 +19,15 @@ class FileStatus(Enum):
 
     欠損しても行は消さずに保持する（PL-05）。再生エラーやメタデータの状態は
     ここへ混ぜない。それらは別の関心事であり、必要になった段階で追加する。
+
+    ``UNKNOWN`` は「まだ調べていない」。エントリ生成時にファイルシステムへ
+    触れないためにある（1000曲の復元やD&DでGUIスレッドが止まらないようにする）。
+    実際の確認は :class:`~sdp.services.playlist_file_status.PlaylistFileStatusChecker`
+    が背景で少しずつ行う。**未確認を欠損として扱わない**（灰色表示も曲送りの
+    スキップもしない）。再生直前には個別に再確認するため、取りこぼしはしない。
     """
 
+    UNKNOWN = auto()
     AVAILABLE = auto()
     MISSING = auto()
 
@@ -27,11 +35,17 @@ class FileStatus(Enum):
 def normalize_path(path: Path) -> Path:
     """エントリが保持するパスの正規化。ここが唯一の正規化地点。
 
-    絶対パスへ統一し、相対パスを作業ディレクトリ依存のまま保持しない。
-    ``strict=False`` なのは、存在しないファイルも復元・保持できる必要があるため
-    （欠損エントリはプレイリストから消さない）。
+    **字句的な絶対パス化だけを行い、ファイルシステムへ触れない。**
+    ``Path.resolve()`` はsymlink・junction・UNCの解決のためにI/Oを発生させ、
+    切断されたUNCや休止中ドライブでは1件でも長時間ブロックしうる。エントリ生成は
+    1000曲の復元やD&DでGUIスレッド上に件数ぶん積み上がるため、ここでは
+    ``os.path.abspath``/``normpath`` による純粋な文字列処理に留める
+    （相対パスは cwd 基準で絶対化するが、対象ファイルへは問い合わせない）。
+    symlinkを解いたcanonical pathが要る場合は、背景workerか再生直前に別途行う。
+    存在しないファイルもそのまま保持できる（欠損エントリは消さない）。
     """
-    return Path(path).expanduser().resolve(strict=False)
+    expanded = Path(path).expanduser()
+    return Path(os.path.abspath(os.path.normpath(expanded)))
 
 
 def new_entry_id() -> str:
@@ -58,16 +72,18 @@ class PlaylistEntry:
 
     entry_id: str
     path: Path
-    file_status: FileStatus = field(init=False)
+    file_status: FileStatus = FileStatus.UNKNOWN
     metadata: TrackMetadata | None = field(init=False, default=None)
     metadata_status: MetadataStatus = field(init=False, default=MetadataStatus.NOT_REQUESTED)
 
     def __post_init__(self) -> None:
+        # ここではファイルシステムへ触れない。1000曲の復元やD&Dで、GUIスレッド上に
+        # 件数ぶんの stat が積み上がるのを避けるため（NAS・切断ドライブ・
+        # オンライン専用ファイルでは1件が長時間ブロックしうる）。
         if not self.entry_id:
             raise ValueError("entry_id が空です。")
         if not self.path.is_absolute():
             raise ValueError(f"entry のパスは絶対パスにしてください: {self.path}")
-        object.__setattr__(self, "file_status", probe_file_status(self.path))
 
     @property
     def display_name(self) -> str:
@@ -90,18 +106,36 @@ class PlaylistEntry:
         return self.path.name or str(self.path)
 
     def with_refreshed_status(self) -> "PlaylistEntry":
-        """ファイル状態を再確認した新しいエントリを返す。
+        """**その場でファイルを調べ直した**新しいエントリを返す。
 
-        ファイルが削除・復元された場合に Model 側が行を差し替えるために使う。
+        再生直前など、1件だけ確実に確認したい場所で使う。全行への一括適用には
+        使わない（GUIスレッドで件数ぶんの stat が走るため）。
         状態が変わらない場合は自分自身を返すため、呼び出し側は同一性で判定できる。
-
-        状態が変わった場合はメタデータを捨てて ``NOT_REQUESTED`` へ戻す。
-        欠損中は表示をファイル名へ戻し、復活後は読み直せるようにするため。
         """
-        refreshed = PlaylistEntry(entry_id=self.entry_id, path=self.path)
-        if refreshed.file_status is self.file_status:
+        return self.with_file_status(probe_file_status(self.path))
+
+    def with_file_status(self, status: FileStatus) -> "PlaylistEntry":
+        """調べ済みの状態を当てはめた新しいエントリを返す（I/Oはしない）。
+
+        欠損との出入りではメタデータを捨てて ``NOT_REQUESTED`` へ戻す。
+        欠損中は表示をファイル名へ戻し、復活後は読み直せるようにするため。
+        一方、``UNKNOWN`` から確定しただけのときは読み取り済み・読み取り中の
+        メタデータを保持する（背景の状態確認が読み取りを打ち消さないように）。
+        """
+        if status is self.file_status:
             return self
-        return refreshed
+        keeps_metadata = FileStatus.MISSING not in (status, self.file_status)
+        clone = object.__new__(PlaylistEntry)
+        object.__setattr__(clone, "entry_id", self.entry_id)
+        object.__setattr__(clone, "path", self.path)
+        object.__setattr__(clone, "file_status", status)
+        object.__setattr__(clone, "metadata", self.metadata if keeps_metadata else None)
+        object.__setattr__(
+            clone,
+            "metadata_status",
+            self.metadata_status if keeps_metadata else MetadataStatus.NOT_REQUESTED,
+        )
+        return clone
 
     # -- メタデータ（不変更新） ---------------------------------------------
 
@@ -124,9 +158,7 @@ class PlaylistEntry:
     def _with_metadata(
         self, metadata: TrackMetadata | None, status: MetadataStatus
     ) -> "PlaylistEntry":
-        """entry_id・path・file_status を変えず、ファイルを再調査せずに複製する。"""
-        # 通常構築と状態再確認は __post_init__ を通すが、メタデータ更新はGUIスレッドで
-        # 頻発するため、内部限定の複製ではファイルシステムへ触れない。
+        """entry_id・path・file_status を変えずに複製する（I/Oはしない）。"""
         clone = object.__new__(PlaylistEntry)
         object.__setattr__(clone, "entry_id", self.entry_id)
         object.__setattr__(clone, "path", self.path)
@@ -136,13 +168,17 @@ class PlaylistEntry:
         return clone
 
 
-def create_entry(path: Path, *, entry_id: str | None = None) -> PlaylistEntry:
-    """パスから新しいエントリを作る。正規化とファイル状態の判定を行う。
+def create_entry(
+    path: Path, *, entry_id: str | None = None, file_status: FileStatus = FileStatus.UNKNOWN
+) -> PlaylistEntry:
+    """パスから新しいエントリを作る。パスの正規化だけを行い、I/Oはしない。
 
     ``entry_id`` を渡すのは永続化からの復元時のみを想定する。
+    ファイル状態は既定で ``UNKNOWN`` とし、背景の確認に委ねる。
     """
     normalized = normalize_path(path)
     return PlaylistEntry(
         entry_id=new_entry_id() if entry_id is None else entry_id,
         path=normalized,
+        file_status=file_status,
     )

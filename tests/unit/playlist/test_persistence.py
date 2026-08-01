@@ -76,8 +76,9 @@ def test_file_status_is_not_persisted(tmp_path: Path, audio_files: list[Path]) -
     audio_files[0].unlink()
     restored = load_playlist(file_path)
 
-    assert entry.file_status is FileStatus.AVAILABLE
-    assert restored[0].file_status is FileStatus.MISSING
+    # 復元では状態を判定せず未確認のまま返す（GUIスレッドで件数ぶんのstatを避ける）。
+    assert restored[0].file_status is FileStatus.UNKNOWN
+    assert restored[0].with_refreshed_status().file_status is FileStatus.MISSING
 
 
 def test_missing_entries_are_restored(tmp_path: Path) -> None:
@@ -89,7 +90,7 @@ def test_missing_entries_are_restored(tmp_path: Path) -> None:
     restored = load_playlist(file_path)
 
     assert len(restored) == 1
-    assert restored[0].is_missing
+    assert restored[0].with_refreshed_status().is_missing
 
 
 def test_empty_playlist_round_trip(tmp_path: Path) -> None:

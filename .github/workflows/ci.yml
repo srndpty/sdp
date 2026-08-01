@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  schedule:
+    # 実音再生経路の観測用（毎週月曜 03:00 UTC）。
+    - cron: "0 3 * * 1"
 
 permissions:
   contents: read
@@ -78,3 +81,68 @@ jobs:
 
       - name: テスト（audio 除外）
         run: uv run pytest -m "not audio"
+
+  # Qt plugin と codec の決定的な確認。音声出力デバイスを必要としないため、
+  # continue-on-error にはしない（壊れたら scheduled workflow を失敗させる）。
+  # 通常のPR CIでは走らせず、週1回と手動実行だけで回す。
+  audio-codec-check:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - name: チェックアウト
+        # actions/checkout v5.0.0
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+
+      - name: uv のセットアップ
+        # astral-sh/setup-uv v9.0.0
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: 依存関係を lockfile から同期
+        run: uv sync --locked --all-groups
+
+      - name: selftest（Qt依存とplugin loadの確認）
+        run: uv run python -m sdp --selftest
+
+      - name: codec test（6形式の実decode）
+        # 出力デバイスが無くてもQAudioDecoderのオフラインdecodeは確認できる。
+        # QtMultimediaのFFmpeg backendとcodecの組合せが壊れたらここで落ちる。
+        run: >
+          uv run python -m sdp --codec-test
+          assets/test_audio/sine440.wav
+          assets/test_audio/sine440.mp3
+          assets/test_audio/sine440.flac
+          assets/test_audio/sine440.ogg
+          assets/test_audio/sine440.opus
+          assets/test_audio/sine440.m4a
+
+  # 実音再生の観測用ジョブ。runnerの音声出力デバイスの有無に左右されるため、
+  # ここだけ continue-on-error にして、他ジョブとPRを止めない。
+  audio-device-observation:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    continue-on-error: true
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - name: チェックアウト
+        # actions/checkout v5.0.0
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+
+      - name: uv のセットアップ
+        # astral-sh/setup-uv v9.0.0
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: 依存関係を lockfile から同期
+        run: uv sync --locked --all-groups
+
+      - name: 実音テスト（audio マーカー）
+        # runnerに音声出力デバイスが無い場合は失敗しうる。結果は観測用。
+        run: uv run pytest -m audio

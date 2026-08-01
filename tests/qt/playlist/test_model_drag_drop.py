@@ -215,7 +215,7 @@ def test_external_drop_keeps_japanese_and_space_paths(model: PlaylistModel, tmp_
 
     assert drop(model, url_mime([path]), -1) is True
 
-    assert model.entry_at(0).path == path.resolve()
+    assert model.entry_at(0).path == path
 
 
 def test_external_drop_ignores_directories(
@@ -225,7 +225,7 @@ def test_external_drop_ignores_directories(
     assert drop(model, url_mime([tmp_path, audio_files[0]]), -1) is True
 
     assert model.rowCount() == 1
-    assert model.entry_at(0).path == audio_files[0].resolve()
+    assert model.entry_at(0).path == audio_files[0]
 
 
 def test_external_drop_ignores_non_local_urls(
@@ -266,6 +266,7 @@ def test_missing_file_dropped_becomes_a_missing_entry(model: PlaylistModel, tmp_
     path = tmp_path / "消えた曲.wav"
 
     assert drop(model, url_mime([path]), -1) is True
+    model.refresh_file_status()
 
     assert model.entry_at(0).is_missing
 

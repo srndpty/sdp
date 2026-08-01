@@ -12,13 +12,18 @@ from PySide6.QtCore import QElapsedTimer, QObject, QThread, QUrl, Signal, Slot
 from PySide6.QtMultimedia import QAudioDecoder
 
 from sdp.core.analysis.pcm import audio_buffer_to_mono
-from sdp.core.analysis.waveform import WaveformData, WaveformReducer
+from sdp.core.analysis.waveform import WAVEFORM_BUCKET_MS, WaveformData, WaveformReducer
 from sdp.core.analysis.waveform_cache import (
     MAX_WAVEFORM_CACHE_BYTES,
     WaveformCache,
     WaveformCacheKey,
 )
 from sdp.core.playback.controller import PlaybackController
+from sdp.services.thread_shutdown import (
+    DEFAULT_HARD_TIMEOUT_MS,
+    ShutdownOutcome,
+    stop_thread,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -30,11 +35,28 @@ FILE_CHANGED_MESSAGE = "解析中に音声ファイルが変更されました�
 
 @dataclass(frozen=True, slots=True)
 class WaveformRequest:
-    """1回の解析要求と、その時点のファイル同一性。"""
+    """1回の解析要求。
+
+    キャッシュキーはここへ持たない。内容fingerprintの算出は最大192KiBの読み取りを
+    伴うため、GUIスレッドで作るとNAS・休止ディスク・クラウドプレースホルダーで
+    source切替のたびにUIが止まる。キーはworker threadで作る。
+    """
 
     path: Path
     token: int
-    cache_key: WaveformCacheKey
+
+
+@dataclass(frozen=True, slots=True)
+class WaveformCacheSaveRequest:
+    """1件のキャッシュ保存要求（保存に必要な値をすべて持つ不変値）。
+
+    workerの可変状態（現在request・現在key）を参照して保存すると、GUIを1往復する
+    あいだに次の曲の解析が始まった場合に、正常に解析できた結果を捨ててしまう。
+    """
+
+    path: Path
+    key: WaveformCacheKey
+    data: WaveformData
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,7 +100,11 @@ class _WaveformWorker(QObject):
 
     started = Signal(object)
     partial = Signal(object, object)
-    finished = Signal(object, object, bool)
+    finished = Signal(object, object, object, bool)
+    """(request, 解析時に使ったcache key, WaveformData, cache由来かどうか)。
+
+    keyを一緒に渡すことで、保存要求がworkerの現在状態に依存しなくなる。
+    """
     failed = Signal(object, str)
     decoder_created = Signal(bool)
 
@@ -93,6 +119,7 @@ class _WaveformWorker(QObject):
         self._cancellations = cancellations
         self._decode_function = decode_function
         self._request: WaveformRequest | None = None
+        self._key: WaveformCacheKey | None = None
         self._decoder: QAudioDecoder | None = None
         self._reducer: WaveformReducer | None = None
         self._sample_rate: int | None = None
@@ -107,6 +134,7 @@ class _WaveformWorker(QObject):
         request = value
         self._cleanup_decoder()
         self._request = request
+        self._key = None
         self._reducer = None
         self._sample_rate = None
         self._last_partial_bucket = 0
@@ -116,15 +144,23 @@ class _WaveformWorker(QObject):
             return
         self.started.emit(request)
 
-        cached = self._cache.load(request.cache_key)
+        # fingerprintを含む完全なキーはここ（worker thread）で作る。
+        try:
+            key = WaveformCacheKey.from_path(request.path)
+        except OSError as error:
+            self._fail(request, str(error))
+            return
+        self._key = key
+        cached = self._cache.load(key)
         if self._cancelled(request):
             return
         if cached is not None:
-            if not _key_still_matches(request):
+            # cache hitの直前にもう一度だけ完全一致を確認する。
+            if not _key_still_matches(request.path, key):
                 self._fail(request, FILE_CHANGED_MESSAGE)
                 return
             self._terminal = True
-            self.finished.emit(request, cached, True)
+            self.finished.emit(request, key, cached, True)
             return
         if self._decode_function is not None:
             self._analyze_with_function(request)
@@ -141,19 +177,24 @@ class _WaveformWorker(QObject):
         # cancelより前にqueueされた旧cache保存は既にcancel状態を確認済み。
         self._cancellations.discard(token)
 
-    @Slot(object, object)
-    def save_cache(self, request_value: object, data_value: object) -> None:
-        if not isinstance(request_value, WaveformRequest) or not isinstance(
-            data_value, WaveformData
-        ):
+    @Slot(object)
+    def save_cache(self, value: object) -> None:
+        """完了した解析結果を保存する。
+
+        要求は保存に必要な値をすべて持つため、workerの現在状態を参照しない
+        （GUIを1往復するあいだに次の曲の解析が始まっていても取りこぼさない）。
+        """
+        if not isinstance(value, WaveformCacheSaveRequest):
             return
-        if self._cancelled(request_value) or not _key_still_matches(request_value):
+        # 保存前だけは完全なfingerprintで確認する（解析中の安価な確認では
+        # 内容差し替えを見逃しうるため、古い波形を書き込まない）。
+        if not _key_still_matches(value.path, value.key):
             return
         try:
-            self._cache.save(request_value.cache_key, data_value)
+            self._cache.save(value.key, value.data)
         except (OSError, ValueError):
             # cache失敗は解析結果・再生を失敗扱いにしない。
-            _logger.exception("波形キャッシュを保存できません: %s", request_value.path)
+            _logger.exception("波形キャッシュを保存できません: %s", value.path)
 
     @Slot()
     def shutdown(self) -> None:
@@ -232,7 +273,9 @@ class _WaveformWorker(QObject):
         sample_rate: int,
     ) -> None:
         if self._reducer is None:
-            self._reducer = WaveformReducer(sample_rate, request.cache_key.bucket_ms)
+            key = self._key
+            bucket_ms = WAVEFORM_BUCKET_MS if key is None else key.bucket_ms
+            self._reducer = WaveformReducer(sample_rate, bucket_ms)
             self._sample_rate = sample_rate
         elif sample_rate != self._sample_rate:
             raise ValueError("デコード途中でsample rateが変更されました")
@@ -244,27 +287,45 @@ class _WaveformWorker(QObject):
             or self._partial_timer.elapsed() >= PARTIAL_TIME_INTERVAL_MS
         )
         if should_emit and not self._cancelled(request):
-            if not _key_still_matches(request):
+            if not self._identity_unchanged(request):
                 self._fail(request, FILE_CHANGED_MESSAGE)
                 return
             self.partial.emit(request, self._reducer.snapshot(complete=False))
             self._last_partial_bucket = count
             self._partial_timer.restart()
 
+    def _identity_unchanged(self, request: WaveformRequest) -> bool:
+        """解析中のこまめな確認（size と mtime だけ。内容は読まない）。
+
+        partialのたびに最大192KiBを読み直すと、長時間音源でランダムI/Oが
+        繰り返される。差し替えの取りこぼしは、完了時と保存前の完全な
+        fingerprint確認で塞ぐ。
+        """
+        key = self._key
+        if key is None:
+            return False
+        try:
+            stat = request.path.stat()
+        except OSError:
+            return False
+        return stat.st_size == key.size and stat.st_mtime_ns == key.mtime_ns
+
     def _finish(self, request: WaveformRequest) -> None:
         if self._terminal or self._cancelled(request):
             return
-        if not _key_still_matches(request):
+        key = self._key
+        # 完了時だけは完全なfingerprintで確認する。
+        if key is None or not _key_still_matches(request.path, key):
             self._fail(request, FILE_CHANGED_MESSAGE)
             return
         self._terminal = True
         reducer = self._reducer
         if reducer is None:
             # decoderがbufferを一度も返さない正常完了も有効な空結果とする。
-            reducer = WaveformReducer(1_000, request.cache_key.bucket_ms)
+            reducer = WaveformReducer(1_000, key.bucket_ms)
         data = reducer.snapshot(complete=True)
         if not self._cancelled(request):
-            self.finished.emit(request, data, False)
+            self.finished.emit(request, key, data, False)
         self._cleanup_decoder()
 
     def _fail(self, request: WaveformRequest, message: str) -> None:
@@ -298,7 +359,7 @@ class WaveformAnalysisService(QObject):
 
     _analyze_requested = Signal(object)
     _cancel_requested = Signal(int)
-    _cache_save_requested = Signal(object, object)
+    _cache_save_requested = Signal(object)
     _shutdown_requested = Signal()
 
     def __init__(
@@ -332,6 +393,7 @@ class WaveformAnalysisService(QObject):
         self._worker.failed.connect(self._on_worker_failed)
         self._started = False
         self._shutdown = False
+        self._shutdown_outcome: ShutdownOutcome | None = None
         self._next_token = 0
         self._request: WaveformRequest | None = None
 
@@ -348,10 +410,23 @@ class WaveformAnalysisService(QObject):
         self._thread.start()
         self._on_source_changed(self._playback.source)
 
-    def shutdown(self, timeout_ms: int = SHUTDOWN_TIMEOUT_MS) -> None:
-        """新規要求を禁止し、decoder停止を要求してthread終了を待つ。"""
+    def shutdown(
+        self,
+        timeout_ms: int = SHUTDOWN_TIMEOUT_MS,
+        *,
+        hard_timeout_ms: int = DEFAULT_HARD_TIMEOUT_MS,
+    ) -> ShutdownOutcome:
+        """新規要求を禁止し、decoder停止を要求してthread終了を待つ。
+
+        待機は上限つきで、**超えても無期限待機へ移らない**（「閉じるを押したのに
+        プロセスが残る」状態を作らない）。上限を超えた場合はthreadとworkerを
+        放棄して ``ABANDONED`` を返す。terminateは使わない。
+
+        冪等だが、**初回の結果を書き換えない**。2回目以降は初回の結果を返し、
+        放棄したthreadが実際に終了していた場合だけ ``STOPPED`` へ更新する。
+        """
         if self._shutdown:
-            return
+            return self._recheck_shutdown_outcome()
         self._shutdown = True
         if self._started:
             self._playback.source_changed.disconnect(self._on_source_changed)
@@ -359,15 +434,23 @@ class WaveformAnalysisService(QObject):
         self._shutdown_requested.emit()
         self._thread.requestInterruption()
         self._thread.quit()
-        if not self._thread.wait(timeout_ms):
-            _logger.warning(
-                "波形解析threadが%dms以内に終了しません。"
-                "安全なQObject破棄のため終了まで待機します。",
-                timeout_ms,
-            )
-            # 実行中QThreadを子に持ったまま戻るとQObject破棄時に致命的となる。
-            # terminateは使わず、協調的な処理が戻るまで待つ。
-            self._thread.wait()
+        # workerはthread内でまだ動きうる。放棄する場合はPython参照ごと引き取らせる
+        # （self自身も、workerのSignal接続先として生かしておく必要がある）。
+        outcome = stop_thread(
+            self._thread,
+            label="波形解析thread",
+            soft_timeout_ms=timeout_ms,
+            hard_timeout_ms=hard_timeout_ms,
+            keepalive=(self._worker, self),
+        )
+        self._shutdown_outcome = outcome
+        return outcome
+
+    def _recheck_shutdown_outcome(self) -> ShutdownOutcome:
+        """初回の結果を返す。放棄後に終了していれば STOPPED へ更新する。"""
+        if self._shutdown_outcome is ShutdownOutcome.ABANDONED and self._thread.wait(0):
+            self._shutdown_outcome = ShutdownOutcome.STOPPED
+        return ShutdownOutcome.STOPPED if self._shutdown_outcome is None else self._shutdown_outcome
 
     @Slot(object)
     def _on_source_changed(self, source: object) -> None:
@@ -382,14 +465,13 @@ class WaveformAnalysisService(QObject):
             return
         self._next_token += 1
         token = self._next_token
-        try:
-            key = WaveformCacheKey.from_path(source)
-        except OSError as error:
-            # worker開始前の失敗でもPanelが同じライフサイクルで終端できるようにする。
-            self.analysis_started.emit(source, token)
-            self.analysis_failed.emit(source, token, str(error))
-            return
-        request = WaveformRequest(path=key.path, token=token, cache_key=key)
+        # GUIスレッドではファイルシステムへ触れない。source は PlaybackController が
+        # 既に strict resolve 済みのパス（source_changed が渡す値）なので、ここで
+        # 再度 resolve(strict=True) すると NAS・休止ディスク・クラウドプレースホルダー
+        # でUIを止めるだけの重複I/Oになる。strict resolve・stat・内容fingerprint・
+        # cache lookup はすべて worker thread（analyze / from_path）へ任せる。
+        # 解析直前に消えていた等の失敗も worker が analysis_failed で終端する。
+        request = WaveformRequest(path=source, token=token)
         self._request = request
         self._cancellations.discard(request.token)
         self._analyze_requested.emit(request)
@@ -413,15 +495,29 @@ class WaveformAnalysisService(QObject):
         if request is not None and isinstance(data_value, WaveformData):
             self.partial_ready.emit(request.path, request.token, data_value)
 
-    @Slot(object, object, bool)
+    @Slot(object, object, object, bool)
     def _on_worker_finished(
-        self, request_value: object, data_value: object, from_cache: bool
+        self, request_value: object, key_value: object, data_value: object, from_cache: bool
     ) -> None:
+        if (
+            not from_cache
+            and not self._shutdown
+            and isinstance(request_value, WaveformRequest)
+            and isinstance(key_value, WaveformCacheKey)
+            and isinstance(data_value, WaveformData)
+        ):
+            # workerがfinishedを出した時点で解析は正常に完了している。この通知が
+            # GUIへ届くまでに表示対象が次の曲へ変わっていても、完了した結果は
+            # 捨てずに保存する（保存の可否＝表示中かどうか、ではない）。
+            # 保存に必要な値をすべて詰めて渡すため、workerの現在状態にも依存しない。
+            self._cache_save_requested.emit(
+                WaveformCacheSaveRequest(path=request_value.path, key=key_value, data=data_value)
+            )
+
+        # UIへの適用だけが「現在表示中の解析か」に依存する。
         request = self._applicable_request(request_value)
         if request is None or not isinstance(data_value, WaveformData):
             return
-        if not from_cache:
-            self._cache_save_requested.emit(request, data_value)
         self.analysis_finished.emit(request.path, request.token, data_value, from_cache)
 
     @Slot(object, str)
@@ -444,8 +540,13 @@ class WaveformAnalysisService(QObject):
         return value
 
 
-def _key_still_matches(request: WaveformRequest) -> bool:
+def _key_still_matches(path: Path, key: WaveformCacheKey) -> bool:
+    """内容fingerprintまで含めて同じファイルかを確かめる（読み取りを伴う）。
+
+    cache hitの適用直前、解析完了時、cache保存前だけで使う。解析中の
+    こまめな確認には :meth:`_WaveformWorker._identity_unchanged` を使う。
+    """
     try:
-        return WaveformCacheKey.from_path(request.path) == request.cache_key
+        return WaveformCacheKey.from_path(path) == key
     except OSError:
         return False

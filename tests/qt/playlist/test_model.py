@@ -74,7 +74,7 @@ def test_add_paths_normalizes_to_absolute(
 
     model.add_paths([Path("相対 曲.wav")])
 
-    assert model.entry_at(0).path == (tmp_path / "相対 曲.wav").resolve()
+    assert model.entry_at(0).path == tmp_path / "相対 曲.wav"
 
 
 def test_duplicate_paths_are_allowed(model: PlaylistModel, audio_files: list[Path]) -> None:
@@ -150,7 +150,7 @@ def test_entry_at_and_row_lookup(model: PlaylistModel, audio_files: list[Path]) 
 
     for row, path in enumerate(audio_files):
         entry = model.entry_at(row)
-        assert entry.path == path.resolve()
+        assert entry.path == path
         assert model.row_of_entry_id(entry.entry_id) == row
 
 
@@ -180,6 +180,7 @@ def test_entries_snapshot_is_not_the_internal_list(
 def test_data_roles(model: PlaylistModel, audio_files: list[Path]) -> None:
     """表示・ツールチップ・entry_id・パス・ファイル状態を role で取得できる。"""
     model.add_paths(audio_files[:1])
+    model.refresh_file_status()
     entry = model.entry_at(0)
     name_index = model.index(0, Column.NAME)
     path_index = model.index(0, Column.PATH)
@@ -372,12 +373,55 @@ def test_move_with_valid_parent_is_rejected(model: PlaylistModel, audio_files: l
 # -- 欠損状態 ---------------------------------------------------------------
 
 
-def test_missing_file_is_detected_on_add(model: PlaylistModel, tmp_path: Path) -> None:
-    """追加時に存在チェックを行う。"""
+def test_added_entries_start_unchecked(model: PlaylistModel, tmp_path: Path) -> None:
+    """追加時はファイルを調べない（大量追加でGUIスレッドを止めないため）。"""
     model.add_paths([tmp_path / "ない曲.wav"])
+
+    assert model.entry_at(0).file_status is FileStatus.UNKNOWN
+    assert model.missing_entry_ids() == ()
+    assert model.unchecked_entries(10) == ((model.entry_at(0).entry_id, model.entry_at(0).path),)
+
+
+def test_missing_file_is_detected_when_checked(model: PlaylistModel, tmp_path: Path) -> None:
+    """確認すれば欠損として扱われる。"""
+    model.add_paths([tmp_path / "ない曲.wav"])
+
+    model.refresh_file_status()
 
     assert model.entry_at(0).file_status is FileStatus.MISSING
     assert model.missing_entry_ids() == (model.entry_at(0).entry_id,)
+    assert model.unchecked_entries(10) == ()
+
+
+def test_apply_file_statuses_updates_only_changed_rows(
+    model: PlaylistModel, audio_files: list[Path]
+) -> None:
+    """調べ済みの状態をまとめて反映し、変化した行だけ dataChanged を出す。"""
+    entry_ids = model.add_paths(audio_files[:2])
+    changes: list[int] = []
+
+    def record_row(top_left: QModelIndex, bottom_right: QModelIndex, roles: list[int]) -> None:
+        del bottom_right, roles
+        changes.append(top_left.row())
+
+    model.dataChanged.connect(record_row)
+
+    changed = model.apply_file_statuses(
+        {
+            entry_ids[0]: FileStatus.AVAILABLE,
+            entry_ids[1]: FileStatus.MISSING,
+            "unknown-id": FileStatus.MISSING,
+        }
+    )
+
+    assert changed == 2
+    assert changes == [0, 1]
+    assert model.entry_at(0).file_status is FileStatus.AVAILABLE
+    assert model.entry_at(1).file_status is FileStatus.MISSING
+    # 同じ状態の再適用では通知しない。
+    changes.clear()
+    assert model.apply_file_statuses({entry_ids[0]: FileStatus.AVAILABLE}) == 0
+    assert changes == []
 
 
 def test_refresh_file_status_updates_changed_rows(
@@ -385,6 +429,7 @@ def test_refresh_file_status_updates_changed_rows(
 ) -> None:
     """削除されたファイルを再確認で欠損にし、変化した行だけ dataChanged を出す。"""
     model.add_paths(audio_files[:3])
+    model.refresh_file_status()
     audio_files[1].unlink()
     changes: list[tuple[int, int, tuple[int, ...]]] = []
 
@@ -424,6 +469,7 @@ def test_refresh_without_changes_is_silent(
 ) -> None:
     """変化が無ければ通知しない。"""
     model.add_paths(audio_files)
+    model.refresh_file_status()
 
     with qtbot.assertNotEmitted(model.dataChanged):
         assert model.refresh_file_status() == 0

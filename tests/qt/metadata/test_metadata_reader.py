@@ -6,6 +6,7 @@ qtbot.waitUntil / waitSignal で行い、固定 sleep は使わない。
 
 import logging
 import threading
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from pytestqt.qtbot import QtBot
 from sdp.core.metadata.reader import MetadataReader, MetadataResult
 from sdp.core.metadata.types import MetadataStatus, TrackMetadata
 from sdp.core.playlist.model import PlaylistModel
+from sdp.services.thread_shutdown import ShutdownOutcome
 
 WAIT_TIMEOUT_MS = 5_000
 SAMPLE = TrackMetadata(title="曲名", artist="奏者", album="盤", duration_ms=1000)
@@ -55,9 +57,28 @@ class RecordingReader:
 
 
 @pytest.fixture
-def playlist(qtbot: QtBot) -> Iterator[PlaylistModel]:
+def unchecked_playlist(qtbot: QtBot) -> Iterator[PlaylistModel]:
+    """ファイル状態を確定させないModel（UNKNOWNのままの挙動を見るテスト用）。"""
     del qtbot
     yield PlaylistModel()
+
+
+@pytest.fixture
+def playlist(unchecked_playlist: PlaylistModel) -> Iterator[PlaylistModel]:
+    """ファイル状態が確定するModel。
+
+    実アプリでは :class:`PlaylistFileStatusChecker` が背景でAVAILABLE／MISSINGを
+    確定させ、MetadataReaderはAVAILABLE確定後にだけ読む。ここでは行の追加・置換の
+    たびに同期で確定させ、その流れを再現する。
+    """
+    model = unchecked_playlist
+
+    def resolve(*_arguments: object) -> None:
+        model.refresh_file_status()
+
+    model.rowsInserted.connect(resolve)
+    model.modelReset.connect(resolve)
+    yield model
 
 
 @pytest.fixture
@@ -150,6 +171,7 @@ def test_missing_entries_are_not_scheduled(
 ) -> None:
     """欠損エントリは読み取らない。"""
     playlist.add_paths([tmp_path / "ない曲.wav"])
+    playlist.refresh_file_status()
 
     reader.start()
     qtbot.wait(50)
@@ -335,11 +357,14 @@ def test_removing_many_loading_entries_reclaims_tokens(
     playlist.add_paths(paths)
     reader.start()
     qtbot.waitUntil(lambda: read_function.started.is_set(), timeout=WAIT_TIMEOUT_MS)
-    assert len(reader._tokens) == 100  # pyright: ignore[reportPrivateUsage]
+    # 投入は上限つき。tokenも投入済みの件数までしか作らない。
+    assert len(reader._tokens) <= reader.max_in_flight  # pyright: ignore[reportPrivateUsage]
+    assert reader.pending_count > 0
 
     assert playlist.removeRows(0, 100) is True
 
     assert reader._tokens == {}  # pyright: ignore[reportPrivateUsage]
+    assert reader.pending_count == 0
     read_function.release()
     qtbot.wait(50)
     assert playlist.rowCount() == 0
@@ -459,6 +484,7 @@ def test_restored_file_is_read_again(
     """欠損から復活したら再読み取りする。"""
     path = tmp_path / "戻る曲.wav"
     entry_ids = playlist.add_paths([path])
+    playlist.refresh_file_status()
     reader.start()
     qtbot.wait(20)
     assert read_function.calls == []
@@ -589,6 +615,36 @@ def test_shutdown_timeout_is_only_a_logical_cancellation(
     assert reader._pool.waitForDone(2_000)  # pyright: ignore[reportPrivateUsage]
 
 
+@pytest.mark.parametrize("timeout_ms", [-1, 0, 10])
+def test_shutdown_never_waits_indefinitely(
+    playlist: PlaylistModel,
+    audio_files: list[Path],
+    qtbot: QtBot,
+    timeout_ms: int,
+) -> None:
+    """負値・0・正値のいずれでも、待機上限を超えずに制御を返す。
+
+    Qtの待機APIでは負値が無期限待機を意味しうるため、そのまま渡してはならない。
+    """
+    read_function = RecordingReader()
+    read_function.hold()
+    reader = MetadataReader(playlist, read_function=read_function, max_threads=1)
+    playlist.add_paths(audio_files[:1])
+    reader.start()
+    qtbot.waitUntil(lambda: read_function.started.is_set(), timeout=WAIT_TIMEOUT_MS)
+
+    started = time.monotonic()
+    outcome = reader.shutdown(timeout_ms=timeout_ms)
+    elapsed_ms = (time.monotonic() - started) * 1_000
+
+    assert outcome is ShutdownOutcome.ABANDONED
+    assert elapsed_ms < WAIT_TIMEOUT_MS
+
+    # QThreadPool破棄は実行中タスクを待つため、テストの終了前に協調的に解放する。
+    read_function.release()
+    assert reader._pool.waitForDone(2_000)  # pyright: ignore[reportPrivateUsage]
+
+
 def test_shutdown_is_idempotent(reader: MetadataReader) -> None:
     """shutdown を複数回呼んでも問題ない。"""
     reader.start()
@@ -679,9 +735,162 @@ def test_scheduling_1000_entries_does_not_read_synchronously(
     reader.start()
 
     assert read_function.call_count() < len(paths)
-    assert all(entry.metadata_status is MetadataStatus.LOADING for entry in playlist.entries())
     read_function.release()
     reader.shutdown(timeout_ms=2_000)
 
 
+def test_scheduling_1000_entries_bounds_the_submitted_work(
+    playlist: PlaylistModel, tmp_path: Path
+) -> None:
+    """1000曲でもQThreadPoolへ積む件数は上限で頭打ちになる。
+
+    全件を即座に投入すると、worker・Signal object・requestが件数ぶん作られ、
+    起動直後のメモリとI/O量が予測できなくなる。
+    """
+    paths = [tmp_path / f"曲 {index:04d}.wav" for index in range(1000)]
+    for path in paths:
+        path.write_bytes(b"x")
+    read_function = RecordingReader()
+    read_function.hold()
+    reader = MetadataReader(playlist, read_function=read_function, max_threads=2)
+    playlist.add_paths(paths)
+
+    reader.start()
+
+    assert reader.in_flight_count <= reader.max_in_flight
+    assert reader.pending_count == len(paths) - reader.in_flight_count
+    loading = [
+        entry for entry in playlist.entries() if entry.metadata_status is MetadataStatus.LOADING
+    ]
+    assert len(loading) == reader.in_flight_count
+    # 残りは未要求のまま待機する（LOADINGへ固着させない）。
+    assert all(
+        entry.metadata_status is MetadataStatus.NOT_REQUESTED
+        for entry in playlist.entries()[reader.in_flight_count :]
+    )
+    read_function.release()
+    reader.shutdown(timeout_ms=2_000)
+
+
+def test_all_entries_are_eventually_read_through_the_bounded_queue(
+    playlist: PlaylistModel, tmp_path: Path, qtbot: QtBot
+) -> None:
+    """上限つき投入でも、待ち行列を消化して全件が読まれる。"""
+    paths = [tmp_path / f"曲 {index:03d}.wav" for index in range(50)]
+    for path in paths:
+        path.write_bytes(b"x")
+    read_function = RecordingReader()
+    reader = MetadataReader(playlist, read_function=read_function, max_threads=2)
+    playlist.add_paths(paths)
+
+    reader.start()
+
+    qtbot.waitUntil(
+        lambda: (
+            read_function.call_count() == len(paths)
+            and reader.pending_count == 0
+            and reader.in_flight_count == 0
+        ),
+        timeout=WAIT_TIMEOUT_MS,
+    )
+    reader.shutdown(timeout_ms=2_000)
+
+
 ReadCallable = Callable[[Path], TrackMetadata]
+
+
+def test_model_reset_discards_queued_requests(
+    playlist: PlaylistModel, tmp_path: Path, qtbot: QtBot
+) -> None:
+    """resetで積んだだけの要求を捨て、古いI/Oが新しいI/Oへ上乗せされない。
+
+    投入済みは上限件数で頭打ちなので、reset を繰り返しても同時に走る読み取りは
+    ``max_in_flight`` を超えない。
+    """
+    paths = [tmp_path / f"曲 {index:03d}.wav" for index in range(200)]
+    for path in paths:
+        path.write_bytes(b"x")
+    read_function = RecordingReader()
+    read_function.hold()
+    reader = MetadataReader(playlist, read_function=read_function, max_threads=1)
+    playlist.add_paths(paths)
+    reader.start()
+    qtbot.waitUntil(lambda: read_function.started.is_set(), timeout=WAIT_TIMEOUT_MS)
+    assert reader.pending_count > 0
+
+    playlist.replace_entries([])
+
+    assert reader.pending_count == 0
+    assert reader.in_flight_count <= reader.max_in_flight
+    read_function.release()
+    reader.shutdown(timeout_ms=2_000)
+
+
+def test_the_same_entry_is_not_queued_twice(
+    playlist: PlaylistModel, tmp_path: Path, audio_files: list[Path]
+) -> None:
+    """同じ entry を重複して積まない。"""
+    del tmp_path
+    read_function = RecordingReader()
+    read_function.hold()
+    # 投入枠を使い切らせて、待ち行列へ積まれる状況を作る。
+    reader = MetadataReader(playlist, read_function=read_function, max_threads=1)
+    playlist.add_paths(audio_files)
+    reader.start()
+    pending_before = reader.pending_count
+
+    # 同じ行に対して重ねて要求しても待ち行列は増えない。
+    reader._schedule_all()  # pyright: ignore[reportPrivateUsage]
+
+    assert reader.pending_count == pending_before
+    read_function.release()
+    reader.shutdown(timeout_ms=2_000)
+
+
+def test_unknown_entries_are_not_read_until_the_status_is_resolved(
+    unchecked_playlist: PlaylistModel,
+    read_function: RecordingReader,
+    audio_files: list[Path],
+    qtbot: QtBot,
+) -> None:
+    """ファイル状態が未確認のあいだはMutagen読み取りを始めない。
+
+    UNKNOWNのまま読み始めると、ファイル状態確認と同じファイルへ同時にI/Oを出し、
+    欠損と判明するエントリや切断NASへも無駄な読み取りが走る。
+    """
+    reader = MetadataReader(unchecked_playlist, read_function=read_function, max_threads=2)
+    unchecked_playlist.add_paths(audio_files[:1])
+    reader.start()
+    try:
+        qtbot.wait(50)
+        assert read_function.calls == []
+        assert unchecked_playlist.entry_at(0).metadata_status is MetadataStatus.NOT_REQUESTED
+
+        # AVAILABLE確定でのdataChangedが読み取りの契機になる。
+        unchecked_playlist.refresh_file_status()
+
+        qtbot.waitUntil(lambda: read_function.call_count() == 1, timeout=WAIT_TIMEOUT_MS)
+        wait_for_status(qtbot, unchecked_playlist, 0, MetadataStatus.LOADED)
+    finally:
+        reader.shutdown(timeout_ms=2_000)
+
+
+def test_entries_resolved_as_missing_are_never_read(
+    unchecked_playlist: PlaylistModel,
+    read_function: RecordingReader,
+    tmp_path: Path,
+    qtbot: QtBot,
+) -> None:
+    """UNKNOWN → MISSING と確定したエントリは一度も読まない。"""
+    reader = MetadataReader(unchecked_playlist, read_function=read_function, max_threads=2)
+    unchecked_playlist.add_paths([tmp_path / "ない曲.wav"])
+    reader.start()
+    try:
+        unchecked_playlist.refresh_file_status()
+        qtbot.wait(50)
+
+        assert read_function.calls == []
+        assert unchecked_playlist.entry_at(0).is_missing
+        assert unchecked_playlist.entry_at(0).metadata_status is MetadataStatus.NOT_REQUESTED
+    finally:
+        reader.shutdown(timeout_ms=2_000)

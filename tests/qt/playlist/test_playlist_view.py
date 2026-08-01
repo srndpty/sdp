@@ -229,7 +229,7 @@ def test_multiple_files_are_added_in_one_batch(
 
     view.add_files()
 
-    assert [entry.path for entry in model.entries()] == [path.resolve() for path in audio_files]
+    assert [entry.path for entry in model.entries()] == list(audio_files)
     assert inserted == [len(audio_files)]
     assert messages == [f"{len(audio_files)}曲を追加しました。"]
     assert count_text(view) == "5曲"
@@ -419,6 +419,7 @@ def test_missing_row_is_greyed_out(
 ) -> None:
     """欠損行は Disabled/Text の色で描かれ、利用可能な行とは異なる。"""
     model.add_paths([audio_files[0], tmp_path / "ない曲.wav"])
+    model.refresh_file_status()
     delegate = table_of(view).itemDelegate()
     assert isinstance(delegate, PlaylistEntryDelegate)
 
@@ -439,6 +440,7 @@ def test_missing_row_stays_selectable_and_removable(
 ) -> None:
     """欠損行も選択・削除でき、Model からは消えない。"""
     model.add_paths([tmp_path / "ない曲.wav"])
+    model.refresh_file_status()
     assert model.entry_at(0).is_missing
 
     select_rows(view, [0])
@@ -455,7 +457,7 @@ def test_missing_row_keeps_its_tooltip(model: PlaylistModel, tmp_path: Path) -> 
 
     tooltip = model.data(model.index(0, Column.NAME), 3)  # Qt.ToolTipRole
 
-    assert tooltip == str(path.resolve())
+    assert tooltip == str(path)
 
 
 # -- 大量データ -------------------------------------------------------------

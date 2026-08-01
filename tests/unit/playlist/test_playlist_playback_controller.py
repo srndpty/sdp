@@ -75,6 +75,11 @@ def loaded_paths(backend: FakePlaybackBackend) -> list[Path]:
     return [args[0] for args in backend.call_args("load") if isinstance(args[0], Path)]
 
 
+def playback_generation(backend: FakePlaybackBackend) -> int:
+    """現在の読み込み世代（前sourceの遅延通知を作るために使う）。"""
+    return backend._load_generation  # pyright: ignore[reportPrivateUsage]
+
+
 def finish_current_track(
     backend: FakePlaybackBackend, qtbot: QtBot, *, at_end: bool = True
 ) -> None:
@@ -476,21 +481,111 @@ def test_late_duplicate_end_is_ignored_until_the_new_source_starts(
     """A終了後の遅延重複ENDはBを飛ばさず、B自身の終了ならCへ進む。"""
     entry_ids = playlist.add_paths(audio_files[:3])
     controller.play_entry(entry_ids[0])
+    first_generation = playback_generation(backend)
 
     finish_current_track(backend, qtbot)
     assert controller.current_entry_id == entry_ids[1]
 
-    # Bのpositionが未確定の間に届くA由来の重複通知。
-    backend.emit_position(0)
-    backend.emit_media_status(MediaStatus.END_OF_MEDIA)
+    # A（前世代）から遅れて届く重複通知。statusの種類では区別できないため、
+    # 通知に添えられた世代で切り分ける。
+    backend.emit_media_status(MediaStatus.END_OF_MEDIA, generation=first_generation)
     process_deferred_events(qtbot)
     assert controller.current_entry_id == entry_ids[1]
 
-    # Bが進み始めた後の正規の終了通知は、Bの世代として1回だけ消費する。
-    backend.emit_position(1)
+    # Bの世代の終了通知は、1回だけ消費してCへ進む。
     backend.emit_media_status(MediaStatus.END_OF_MEDIA)
     process_deferred_events(qtbot)
     assert controller.current_entry_id == entry_ids[2]
+
+
+def test_stale_loaded_and_end_from_the_previous_source_do_not_skip_an_entry(
+    controller: PlaylistPlaybackController,
+    playlist: PlaylistModel,
+    backend: FakePlaybackBackend,
+    audio_files: list[Path],
+    qtbot: QtBot,
+) -> None:
+    """前sourceの遅延LOADED＋ENDが続けて届いてもBを飛ばさない。
+
+    「読み込み進行statusは新sourceしか出さない」という前提はcode上保証できない。
+    通知そのものが由来する読み込み世代で切り分ける。
+    """
+    entry_ids = playlist.add_paths(audio_files[:3])
+    controller.play_entry(entry_ids[0])
+    first_generation = playback_generation(backend)
+
+    finish_current_track(backend, qtbot)
+    assert controller.current_entry_id == entry_ids[1]
+
+    backend.emit_media_status(MediaStatus.LOADED, generation=first_generation)
+    backend.emit_media_status(MediaStatus.END_OF_MEDIA, generation=first_generation)
+    process_deferred_events(qtbot)
+
+    assert controller.current_entry_id == entry_ids[1]
+
+
+def test_zero_length_source_still_advances_to_the_next_entry(
+    controller: PlaylistPlaybackController,
+    playlist: PlaylistModel,
+    backend: FakePlaybackBackend,
+    audio_files: list[Path],
+    qtbot: QtBot,
+) -> None:
+    """正のpositionを一度も通知しない音源でも次曲へ進む。
+
+    0ms扱いの音源や数msの効果音では、positionが0のまま終了しうる。
+    「再生が始まった証拠」を条件にせず、現在load世代のENDだけを根拠にする。
+    """
+    entry_ids = playlist.add_paths(audio_files[:2])
+    controller.play_entry(entry_ids[0])
+
+    backend.emit_media_status(MediaStatus.END_OF_MEDIA)
+    process_deferred_events(qtbot)
+
+    assert controller.current_entry_id == entry_ids[1]
+
+
+def test_zero_length_source_repeats_with_repeat_one(
+    controller: PlaylistPlaybackController,
+    playlist: PlaylistModel,
+    backend: FakePlaybackBackend,
+    audio_files: list[Path],
+    qtbot: QtBot,
+) -> None:
+    """Repeat ONEでも、正のpositionを通知しない音源が再読み込みされる。"""
+    entry_ids = playlist.add_paths(audio_files[:2])
+    controller.set_repeat_mode(RepeatMode.ONE)
+    controller.play_entry(entry_ids[0])
+    load_count = len(backend.call_args("load"))
+
+    backend.emit_media_status(MediaStatus.END_OF_MEDIA)
+    process_deferred_events(qtbot)
+
+    assert controller.current_entry_id == entry_ids[0]
+    assert len(backend.call_args("load")) == load_count + 1
+
+
+def test_current_generation_end_advances_even_without_progress_statuses(
+    controller: PlaylistPlaybackController,
+    playlist: PlaylistModel,
+    backend: FakePlaybackBackend,
+    audio_files: list[Path],
+    qtbot: QtBot,
+) -> None:
+    """positionにも事前の読み込みstatusにも依存せず、現在load世代のENDを処理する。
+
+    LOADEDを取りこぼしても（BUFFEREDだけが届いても）、通知に添えられた世代が
+    現在のものであれば次曲へ進む。
+    """
+    entry_ids = playlist.add_paths(audio_files[:2])
+    backend.defer_load_status = True
+    controller.play_entry(entry_ids[0])
+
+    backend.emit_media_status(MediaStatus.BUFFERED)
+    backend.emit_media_status(MediaStatus.END_OF_MEDIA)
+    process_deferred_events(qtbot)
+
+    assert controller.current_entry_id == entry_ids[1]
 
 
 def test_late_duplicate_end_after_auto_advance_does_not_skip_another_entry(
@@ -503,9 +598,10 @@ def test_late_duplicate_end_after_auto_advance_does_not_skip_another_entry(
     """イベントループをまたいだ前sourceの重複ENDでも1曲だけ進む。"""
     entry_ids = playlist.add_paths(audio_files[:3])
     controller.play_entry(entry_ids[0])
+    first_generation = playback_generation(backend)
 
     finish_current_track(backend, qtbot)
-    backend.emit_media_status(MediaStatus.END_OF_MEDIA)
+    backend.emit_media_status(MediaStatus.END_OF_MEDIA, generation=first_generation)
     process_deferred_events(qtbot)
 
     assert controller.current_entry_id == entry_ids[1]
@@ -690,6 +786,7 @@ def test_navigation_availability_ignores_missing_entries(
 ) -> None:
     """欠損しか残っていなければ次の曲は不可。"""
     entry_ids = playlist.add_paths([audio_files[0], tmp_path / "ない.wav"])
+    playlist.refresh_file_status()
     controller.play_entry(entry_ids[0])
 
     assert controller.can_play_next is False
@@ -913,3 +1010,25 @@ def test_entry_can_be_played_while_metadata_is_loading(
     playlist.mark_metadata_loading(entry_ids[0])
 
     assert controller.play_entry(entry_ids[0]) is True
+
+
+def test_stale_position_from_the_previous_source_does_not_arm_the_new_generation(
+    controller: PlaylistPlaybackController,
+    playlist: PlaylistModel,
+    backend: FakePlaybackBackend,
+    audio_files: list[Path],
+    qtbot: QtBot,
+) -> None:
+    """前sourceの遅延positionと遅延ENDが続いてもBを飛ばさない。"""
+    entry_ids = playlist.add_paths(audio_files[:3])
+    controller.play_entry(entry_ids[0])
+    first_generation = playback_generation(backend)
+
+    finish_current_track(backend, qtbot)
+    assert controller.current_entry_id == entry_ids[1]
+
+    backend.emit_position(1_234)
+    backend.emit_media_status(MediaStatus.END_OF_MEDIA, generation=first_generation)
+    process_deferred_events(qtbot)
+
+    assert controller.current_entry_id == entry_ids[1]

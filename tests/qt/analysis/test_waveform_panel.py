@@ -288,7 +288,11 @@ def test_integrated_service_displays_decode_and_cache_hit(tmp_path: Path, qtbot:
 def test_integrated_precheck_failure_reaches_panel_terminal_state(
     tmp_path: Path, qtbot: QtBot
 ) -> None:
-    """source通知後の事前確認失敗もstarted→failedとなり解析中表示を残さない。"""
+    """source通知後の事前確認失敗もstarted→failedとなり解析中表示を残さない。
+
+    事前確認（strict resolve・stat・fingerprint）はGUIスレッドで行わないため、
+    started／failed はworkerから非同期に届く。順序と終端状態だけを確かめる。
+    """
     source = tmp_path / "削除される.wav"
     source.write_bytes(b"audio")
     backend = FakePlaybackBackend()
@@ -308,8 +312,8 @@ def test_integrated_precheck_failure_reaches_panel_terminal_state(
     integrated_service.start()
     try:
         controller.load(source)
+        qtbot.waitUntil(lambda: failed.count() == 1, timeout=5_000)
         assert started.count() == 1
-        assert failed.count() == 1
         assert started.at(0)[:2] == failed.at(0)[:2]
         assert status(integrated_panel) == FAILED_MESSAGE
         assert ANALYZING_MESSAGE not in status(integrated_panel)

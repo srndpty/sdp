@@ -45,7 +45,7 @@
 | `services/logging_setup.py` | ログファイルの UTF-8 出力、多重初期化でハンドラーが増えないこと、出力先変更時のハンドラー置換、ローテーション設定、出力先の決定、未捕捉例外フックの記録と多重インストールの抑止 |
 | `ui/player_controls.py` の時間整形 | `m:ss` / `h:mm:ss` の境界値と負値の扱い |
 | `ui/speed_panel.py` | Slider整数値とrateの境界変換、Slider／SpinBoxの双方向同期、Controller同期Signalへの耐性、float32読み戻し時の要求表示維持、6プリセット、1.0倍reset、pitch補正ON/OFF、sourceなし操作、load／transport／seekを呼ばないこと |
-| `services/settings.py` | UTF-8往復、保存キー限定（速度・ピッチ・可視化3項目）、欠落キーの既定値補完、未知キーの無視、version／型／0.5～2.0／NaN／inf検証、bool欄の厳密判定（0／1／文字列を拒否）、非UTF-8・不正JSON、fsync／replace失敗時の既存ファイル保持と一時ファイル回収。**schema version 1→2の移行**（v1の可視化設定を表示ONで補完し、同名v2キーがfalse／不正型でも未知キーとして無視すること、読み込みだけではファイルを書き換えないこと、変更後はv2で保存されること、v2の3項目の独立往復と厳密検証、未知versionの拒否）、`validate_settings`が適用前検証としてboolと値域を拒否すること |
+| `services/settings.py`（P6-A時点の契約。現在のschemaは下のP6-C行を参照） | UTF-8往復、保存キー限定（速度・ピッチ・可視化3項目）、欠落キーの既定値補完、未知キーの無視、version／型／0.5～2.0／NaN／inf検証、bool欄の厳密判定（0／1／文字列を拒否）、非UTF-8・不正JSON、fsync／replace失敗時の既存ファイル保持と一時ファイル回収。**schema version 1→2の移行**（v1の可視化設定を表示ONで補完し、同名v2キーがfalse／不正型でも未知キーとして無視すること、読み込みだけではファイルを書き換えないこと、変更後はv2で保存されること、v2の3項目の独立往復と厳密検証、未知versionの拒否）、`validate_settings`が適用前検証としてboolと値域を拒否すること |
 | `services/settings.py`（P6-C） | schema v1／v2／v3の読み分けと既定補完、古いversionが後のversionのキーを未知キーとして無視すること、v3の往復、volumeの境界（0.0／1.0）とbool・文字列・NaN／inf・範囲外の拒否（暗黙clampしない）、mutedとshuffle_enabledの厳密bool、repeat_modeの全値往復と未知値拒否、core `RepeatMode` と保存用 `RepeatModeSetting` の1対1対応、`validate_settings` が適用前検証でも同じ規則を課すこと、再生位置・再生状態・entry_idを保存しないことを検証する |
 | `services/ui_state.py`（P6-B） | UiStateの既定値と不変性、schema version 1の往復、window／splitter／last_open_directoryの欠落を「未保存」として扱うこと、未知キーの無視、未知schema versionの拒否、boolをint欄で拒否、width／height=0や負値の拒否、負座標の受理、maximizedの厳密bool、splitterの0以上と合計0拒否、絶対パスのみ受理（相対パス拒否・Unicode／空白パス）、存在しないフォルダーでも読み込みを失敗させないこと、非UTF-8・不正JSON・非objectルート、atomic save（fsync／replace／json.dump失敗時の既存ファイル保持と一時ファイル回収）。**画面補正**は整数矩形を注入して、単一画面内・左/上モニターの負座標・一部だけ画面内・完全画面外のprimary中央復帰・タイトル帯／矩形の重なりによる所属画面選択・大小が異なるsecondary基準のサイズclamp・最小サイズ・極端な座標・screenなしのfallback・最大化フラグの保持を検証する。**Splitter**は比率での再配分、合計の一致、片側が潰れないこと、総量が小さい場合の下限、総量0での保存値維持を検証する |
 | `services/save_status.py`（P6-C） | 復元失敗メッセージの1〜3カテゴリ整形、重複排除と順序の安定、ステータスバーに収まる長さ、生の例外文とパスを含めないこと、SaveCategory以外の拒否、保存失敗・復旧メッセージがカテゴリを区別できること、通知が**状態変化のときだけ**出ること（連続失敗で溢れない・失敗していないカテゴリの成功では黙る・カテゴリごとに独立）を検証する |
@@ -59,7 +59,7 @@
 |---|---|
 | `PlaylistModel` | 全テストで `QAbstractItemModelTester`（Fatal）を取り付ける。一括追加・指定位置への挿入・削除・全消去・`moveRows`（前後・複数行・不正引数）、entry_id の索引追随、role ごとの `data` / `headerData` と安定した `roleNames`、外部URLと内部MIMEのCopyAction限定D&D、可否照会で警告しないこと、欠損の再確認と `dataChanged` の範囲、1000 件の一括追加が単一の `rowsInserted` 通知になること |
 | `PlaybackController` | **FakeBackend**（`IPlaybackBackend` のテストダブル）を使い、状態遷移・曲終了時の次曲送り・エラー時の方針を `qtbot.waitSignal` で検証 |
-| `QtMultimediaBackend` | Qt enum 写像の完全性（値が増えたら失敗する）、エラー変換、故障注入による変換失敗・再入ガード、状態通知の重複抑制、音を鳴らさない load・source差し替え・再ロード。所有する QMediaPlayer / QAudioOutput は `findChildren` で取得し、テストのために公開 API を増やさない |
+| `QtMultimediaBackend` | Qt enum 写像の完全性（値が増えたら失敗する）、エラー変換、故障注入による変換失敗・再入ガード、状態通知の重複抑制、音を鳴らさない load・source差し替え・再ロード、**load 世代の identity（旧 player の遅延 status／error／PCM が旧世代として届くこと、旧 player が state／position／duration を動かさないこと、旧世代 player の破棄、速度・ピッチ補正の引き継ぎ）**。所有する QMediaPlayer / QAudioOutput は `findChildren` で取得し、テストのために公開 API を増やさない |
 | `SingleInstanceService` | テストごとの固有server名を注入し、primary／別processのsecondary判定、1件・複数件の要求往復、順序・重複・Unicode・`activate_window`、composition構築中のdelivery開始前でもtimeoutせずprimary queueへ受理ACKを返し、delivery後に1回だけ通知すること、header／payloadの分割受信、1socketの連続message、不正JSON、未知version、不正`activate_window`、256KiB上限、stale endpoint回復、shutdown後の同名再起動を実`QLocalServer` / `QLocalSocket`で検証する。UI・playlist・playback・保存JSONに依存しないことも固定する |
 | `PlayerControls` | **FakeBackend + 実 PlaybackController** で、状態ごとのボタン活性、シーク（ドラッグ中の非同期更新の抑止、有効なpress/releaseでの1回だけのseek、source・duration変更による古い操作の取消）、音量・ミュートの往復とフィードバックループの不在を検証する。子ウィジェットは `objectName` で取得する |
 | `MainWindow`（UI状態） | captureがnormal geometryとSplitterサイズを返すこと、**最大化中でもnormal geometryを返すこと**、最小化状態を保存しないこと、restoreでgeometryと最大化を適用しnormal復元では既存の最大化／最小化を解除すること、画面外の保存値を画面内へ戻すこと、Splitterの往復と現在Window高さへの適応、可視化が全ON／全OFFのどちらでも保存比率を許容誤差内で復元すること、前回フォルダーを同期I/Oなしでファイルダイアログへ渡すこと、ファイル選択で親フォルダーを更新し**Cancelでは更新しないこと**、D&Dで更新しないこと、相対パスの無視、Unicodeパス、move／resizeの通知、**復元適用が通知しないこと**、JSON・schema version・保存先・保存タイマーを持たないことを検証する |
@@ -88,7 +88,7 @@
 | `WaveformWidget` | QPainter描画、palette変更、resizeと投影cache、線数がpixel幅以下、source／durationなし、左右クリック、中央・端・音源端のclamp、drag move中の非通知、固定中心のpreview、release時1回、clear／source変更／hide／disableでの取消をQTestで検証する |
 | `WaveformPanel` | sourceなし、started／partial／finished／cache hit／failed／cleared、状態文言がWidget内の1か所だけであること、path・token不一致の無視、生error非表示、position追従、Controller duration優先とcomplete fallback、partial duration非採用、解析中・失敗後のseek、source切替中のdrag取消をFakeBackendで検証する。さらに実Serviceをstartし、Controller→request→worker→公開Signal→Panel→Widgetの正常decode、cache hit、事前確認失敗、decode失敗、A→B切替を統合テストする |
 | 波形描画性能 | 180,000 bucketを800／1,920／3,840pxへ投影し、出力・描画線が幅以下であること、QTimerによる100回のposition更新と別QTimerのGUI heartbeatが通常event loop上で共に進むことを厳格な時間上限なしで確認する |
-| `PcmTap` | sourceなし、有効buffer受信、sample rate公開と重複通知の抑制、リングバッファへのappendとmono化、**mono／L／R 3本への原子的append・format＋3配列を同一世代で返す統合snapshot・writer threadのformat切替途中を観測しないこと・`snapshot_mono`／`snapshot_stereo`・左右が混ざらないこと・mono入力の左右複製・channel count公開と重複通知の抑制・channel count変更での3本再構築・sample rate変更での3本再構築・source／stopでの3本clear・pauseでの3本保持・大量append後も3本の容量が固定・コールバック内でPeak／RMSを呼ばないこと**、sample rate変更でのclearと容量再構築、source変更／stopでのclear、pauseでの保持、無効buffer（終端の空buffer）の破棄と件数計上、未対応formatの無視、通常失敗と予期しない例外のログ間引き、コールバックから例外を漏らさないこと、PlaybackControllerを操作しないこと、FFT・QWidget・PlaylistModelを参照しないこと、QAudioBufferを保持しないこと、コールバック実行threadの記録、実QAudioBufferOutputでの接続／二重接続／切断、shutdownの冪等性と終端性（queue済み／直接入力の無視、再接続拒否）、破棄後のシグナルで落ちないこと。PCMは公開スロット `handle_audio_buffer` から注入する |
+| `PcmTap` | sourceなし、有効buffer受信、sample rate公開と重複通知の抑制、リングバッファへのappendとmono化、**mono／L／R 3本への原子的append・format＋3配列を同一世代で返す統合snapshot・writer threadのformat切替途中を観測しないこと・`snapshot_mono`／`snapshot_stereo`・左右が混ざらないこと・mono入力の左右複製・channel count公開と重複通知の抑制・channel count変更での3本再構築・sample rate変更での3本再構築・source／stopでの3本clear・pauseでの3本保持・大量append後も3本の容量が固定・コールバック内でPeak／RMSを呼ばないこと**、sample rate変更でのclearと容量再構築、source変更／stopでのclear、pauseでの保持、無効buffer（終端の空buffer）の破棄と件数計上、未対応formatの無視、通常失敗と予期しない例外のログ間引き、コールバックから例外を漏らさないこと、PlaybackControllerを操作しないこと、FFT・QWidget・PlaylistModelを参照しないこと、QAudioBufferを保持しないこと、コールバック実行threadの記録、実QAudioBufferOutputのシグナルでの接続／二重接続／切断（本番はBackendの世代フィルター済み供給口へ接続する）、shutdownの冪等性と終端性（queue済み／直接入力の無視、再接続拒否）、破棄後のシグナルで落ちないこと。PCMは公開スロット `handle_audio_buffer` から注入する |
 | `SpectrumWidget` | objectName／accessibleName／minimumHeight／sizePolicy、初期プレースホルダー、empty／silence／96bandフレームの描画、resizeと幅0、bar数がband数とpixel幅以下であること、band毎の子Widgetを作らないこと、palette変更での再描画、db_floorの0以上／NaN／inf／bool拒否、clear_frameでの旧フレーム破棄、pause相当の再描画でのフレーム保持、マウス操作とフォーカスを持たないこと、破棄後の安全性。pixel完全一致は検証しない |
 | `LevelMeterWidget` | objectName／accessibleName／minimumHeight（70〜100px）／sizePolicy／NoFocus、初期プレースホルダー、状態文字がWidget内の1か所だけであること、無音フレーム・左右で異なるフレームの描画、RMSバー／Peak線／Peak hold線の本数、floor以下を描かないこと、LevelProcessor出力の描画、極端な幅・高さでのresize、palette変更での再描画、db_floorの変更と0以上／NaN／inf／boolの拒否、clear_frameでの旧レベル破棄、pause相当の再描画でのフレーム保持、チャンネルごとの子Widgetを作らないこと、マウス操作とフォーカスを持たないこと、破棄後の安全性。pixel完全一致は検証しない |
 | `SpectrumPanel`（表示ON/OFF） | 既定は両方表示であること、スペクトラム非表示でFFTとmono snapshotが止まりレベルは続くこと、レベル非表示でPeak／RMSとstereo snapshotが止まりスペクトラムは続くこと、非表示側へはframe数0でPCMを要求すること、両方非表示でタイマーが止まりPanelが畳まれてもPCMタップは受信を続けること、再表示で解析が再開すること、pause中・最小化中の表示ONではタイマーを開始しないこと、非表示だった実時間をPeak hold減衰へ加算しないこと、表示切替だけでは失敗状態を消さないこと、shutdown後の表示変更で再開しないことを検証する |
@@ -225,7 +225,8 @@ D&D は実際のマウス操作でしか確認できないため自動化しな�
 - [ ] 履歴中の曲を削除してもクラッシュしない
 - [ ] Repeat ALLの2サイクル目で別の履歴曲を削除しても、previousが直前の実再生曲へ戻る
 - [ ] 現在曲を削除すると音は続き、履歴と強調が解除される
-- [ ] 再起動でリピートは オフ、シャッフルは OFF へ戻る
+- [ ] （P6-C以降）再起動でリピートとシャッフルは前回の値へ復元される
+      （復元される値の一覧は [README](../README.md) の「保存される項目」）
 
 ## 6.5 P2-D 手動スモーク（メタデータ）
 
@@ -268,7 +269,9 @@ D&D は実際のマウス操作でしか確認できないため自動化しな�
 - [ ] 数値入力中の文字キー、ボタン上のSpace、ファイル選択／確認dialog中のキー操作を奪わない
 - [ ] 速度とピッチを変更し、約1.5秒後の`settings.json`がその2項目だけを含む
 - [ ] 変更直後に終了しても値が保存され、再起動後のSpeedPanelへ復元される
-- [ ] 音量、mute、repeat、shuffle、現在曲、再生位置は再起動後に復元されない
+- [ ] 再生位置と「再生中だったか」は再起動後に復元されない
+      （音量・mute・repeat・shuffle・現在曲はP6-Cで復元対象になった。
+      復元される値の一覧は [README](../README.md) の「保存される項目」）
 - [ ] 破損した`settings.json`で既定値起動・通知・元ファイル保護が行われる
 
 ## 6.8 P4-A 手動スモーク（波形解析基盤）
@@ -785,3 +788,29 @@ CI（GitHub Actions、Windows のみ）の構成は `.github/workflows/ci.yml` �
 - 下限は **80%**。XML（`coverage.xml`）を生成し、CI では artifact として保存する。
 - 下限は「意味のあるテストの結果として満たす」ものとし、
   数値合わせのためのテストは書かない。
+
+### 実音再生経路の確認・観測用ジョブ
+
+通常のPR CIは `pytest -m "not audio"` のため、QtMultimediaとWindowsの
+FFmpeg backendの組合せ、codec、実 `END_OF_MEDIA` の通知順序、PCMタップへの
+実buffer供給が壊れても気付けない。これを補うため、**週1回（月曜03:00 UTC）と
+手動実行のときだけ** 次の2ジョブを動かす（決定的な確認とデバイス依存の観測を分ける）。
+
+- `audio-codec-check`（音声出力デバイス非依存。**失敗をworkflow failureにする**）
+  - `--selftest`（Qt依存とplugin loadの確認）
+  - `--codec-test` で6形式の実decode（出力デバイスが無くても確認できる）
+- `audio-device-observation`（音声出力デバイスの有無に左右されるため
+  `continue-on-error: true`。他ジョブとPRを止めない）
+  - `pytest -m audio`（runnerに音声出力デバイスが無ければ失敗しうる）
+
+codec/pluginの決定的な破綻は `audio-codec-check` で確実に落とし、デバイス依存で
+ゆらぐ実音再生は `audio-device-observation` に隔離する。後者は required check に
+しない。**まずは観測用**で、安定して意味のある失敗だけを出せると分かった時点で
+扱いを見直す。
+
+### 文書と実装の整合
+
+`tests/unit/test_docs_consistency.py` が、architecture.mdの構成図に実在しない
+モジュールが残っていないこと、`services/` と `ui/` の新しいモジュールを
+書き漏らしていないこと、READMEの「保存される項目」が実装のschema versionと
+一致することを検査する。文章の良し悪しは見ず、機械的に判定できる点だけを扱う。

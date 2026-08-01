@@ -5,6 +5,7 @@ QtMultimediaBackend の内部実装（QMediaPlayer の状態遷移など）は�
 """
 
 import struct
+from dataclasses import replace
 from pathlib import Path
 
 from sdp.core.playback.backend import PlaybackBackend
@@ -42,12 +43,18 @@ class FakePlaybackBackend(PlaybackBackend):
         self._muted = muted
         self._playback_rate = playback_rate
         self._pitch_compensation = pitch_compensation
+        # 直近の load() が渡した読み込み世代。status通知へ添える。
+        self._load_generation = 0
 
         self.calls: list[tuple[str, tuple[object, ...]]] = []
         """呼び出された操作の記録。``("seek", (1500,))`` のような形。"""
 
         self.load_error: PlaybackError | None = None
-        """設定すると load 時に error_occurred を発火する。"""
+        """設定すると load 時に error_occurred を発火する。
+
+        通知する際は「その load に属するエラー」として世代と source を補完する。
+        source に属さない内部失敗を模擬する場合は :meth:`emit_error` を使う。
+        """
 
         self.float32_rate_readback = False
         """True にすると playback_rate_changed を float32 へ丸めて通知する。"""
@@ -61,6 +68,17 @@ class FakePlaybackBackend(PlaybackBackend):
         self.setter_errors: dict[str, Exception] = {}
         """操作名に対応する setter から送出するテスト用例外。"""
 
+        self.setter_error_skips: dict[str, int] = {}
+        """例外を出す前に成功させる回数。適用は通し rollback だけ失敗させる等に使う。"""
+
+        self.defer_load_status = False
+        """True にすると load 時に LOADED を通知せず、テストが明示的に発火する。
+
+        実際の QMediaPlayer は setSource 直後に同期で LOADED を返さない。
+        「新 source がまだ何も通知していない時点へ、前 source の END が遅れて届く」
+        という順序を再現するために使う。
+        """
+
     # -- 記録の参照 ---------------------------------------------------------
 
     def call_names(self) -> list[str]:
@@ -71,13 +89,20 @@ class FakePlaybackBackend(PlaybackBackend):
 
     # -- 操作 ---------------------------------------------------------------
 
-    def load(self, path: Path) -> None:
-        self.calls.append(("load", (path,)))
+    def load(self, path: Path, generation: int) -> None:
+        # 既定値を持たせない。generation を渡さない古い呼び出しをテストで通すと、
+        # 抽象 Backend の契約より緩い実装になってしまう。
+        self.calls.append(("load", (path, generation)))
+        self._load_generation = generation
         if self.load_error is not None:
-            self.error_occurred.emit(self.load_error)
+            # この load に属するエラーとして、世代と source を必ず補完する
+            # （generation=None のまま通すと、Controller の世代フィルターを
+            # 素通りする「sourceに属さないエラー」として扱われてしまう）。
+            self.error_occurred.emit(replace(self.load_error, generation=generation, source=path))
             return
         self._state = PlaybackState.STOPPED
-        self.media_status_changed.emit(MediaStatus.LOADED)
+        if not self.defer_load_status:
+            self.media_status_changed.emit(MediaStatus.LOADED, self._load_generation)
         self.state_changed.emit(self._state)
 
     def play(self) -> None:
@@ -143,10 +168,17 @@ class FakePlaybackBackend(PlaybackBackend):
         self._state = state
         self.state_changed.emit(state)
 
-    def emit_media_status(self, status: MediaStatus) -> None:
-        self.media_status_changed.emit(status)
+    def emit_media_status(self, status: MediaStatus, generation: int | None = None) -> None:
+        """status を通知する。``generation`` 省略時は現在の読み込み世代を使う。
+
+        前 source から遅れて届く通知を再現したい場合は、古い世代を明示して渡す。
+        """
+        self.media_status_changed.emit(
+            status, self._load_generation if generation is None else generation
+        )
 
     def emit_error(self, error: PlaybackError) -> None:
+        """任意のエラーをそのまま通知する（世代・source は補完しない）。"""
         self.error_occurred.emit(error)
 
     # -- 状態 ---------------------------------------------------------------
@@ -189,5 +221,10 @@ class FakePlaybackBackend(PlaybackBackend):
 
     def _raise_setter_error(self, operation: str) -> None:
         error = self.setter_errors.get(operation)
-        if error is not None:
-            raise error
+        if error is None:
+            return
+        remaining = self.setter_error_skips.get(operation, 0)
+        if remaining > 0:
+            self.setter_error_skips[operation] = remaining - 1
+            return
+        raise error

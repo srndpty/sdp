@@ -81,12 +81,13 @@ class PlaylistPlaybackController(QObject):
         # source が変わるまでは解除せず、遅れて届く重複通知を抑止する。
         self._source_generation = 0
         self._end_consumed_generation: int | None = None
-        self._current_generation_started = False
+        # 現在sourceに対応するPlaybackControllerの読み込み世代。
+        # status通知の由来を識別し、前sourceの遅延通知を捨てるために使う。
+        self._load_generation: int | None = None
         self._can_play_previous = False
         self._can_play_next = False
 
         playback.source_changed.connect(self._on_source_changed)
-        playback.position_changed.connect(self._on_position_changed)
         playback.media_status_changed.connect(self._on_media_status_changed)
         playlist.rowsInserted.connect(self._on_playlist_rows_changed)
         playlist.rowsRemoved.connect(self._on_playlist_rows_changed)
@@ -453,22 +454,20 @@ class PlaylistPlaybackController(QObject):
         del source
         self._source_generation += 1
         self._end_consumed_generation = None
-        self._current_generation_started = False
+        # source_changedはload()がbackendを呼ぶ直前に届くため、ここで読めば
+        # この source に対応する世代になる。
+        self._load_generation = self._playback.load_generation
         self._set_current_entry_id(self._loading_entry_id)
 
-    def _on_position_changed(self, position_ms: int) -> None:
-        """現在sourceが実際に進み始めたことを記録する。"""
-        if position_ms > 0:
-            self._current_generation_started = True
-
-    def _on_media_status_changed(self, status: MediaStatus) -> None:
+    def _on_media_status_changed(self, status: MediaStatus, load_generation: int) -> None:
+        if load_generation != self._load_generation:
+            # 前sourceから遅れて届いた通知。statusの種類では区別できないため
+            # （LOADEDもENDも同じ形で届く）、通知に添えられた世代で切り分ける。
+            return
         if status is not MediaStatus.END_OF_MEDIA:
             return
         if self._current_entry_id is None:
             # 「開く...」で直接開いた単曲。プレイリストへ勝手に移らない。
-            return
-        if not self._current_generation_started:
-            # source切替直後の未開始状態へ届いた、前source由来の通知を無視する。
             return
         generation = self._source_generation
         if self._end_consumed_generation == generation:

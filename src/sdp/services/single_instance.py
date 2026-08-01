@@ -18,6 +18,7 @@ from PySide6.QtCore import QLockFile, QObject, QStandardPaths, Qt, QThread, Sign
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 from sdp.services.launch_request import LaunchRequest
+from sdp.services.thread_shutdown import ShutdownOutcome, stop_thread
 
 _logger = logging.getLogger(__name__)
 
@@ -41,6 +42,18 @@ class _ForwardOutcome(Enum):
     NO_SERVER = auto()
     FORWARDED = auto()
     FAILED = auto()
+
+
+class _ServerStartOutcome(Enum):
+    """server thread起動の結果。
+
+    失敗を2つに分けるのは、再試行の可否が変わるため。``FAILED_ABANDONED`` は
+    停止できなかったthreadがまだ動いており、同じ名前でlistenし直すと競合する。
+    """
+
+    READY = auto()
+    FAILED_STOPPED = auto()
+    FAILED_ABANDONED = auto()
 
 
 def default_server_name() -> str:
@@ -275,36 +288,63 @@ class SingleInstanceService(QObject):
             return
         self._shutdown = True
         thread = self._server_thread
-        if thread is not None and thread.isRunning():
+        outcome: ShutdownOutcome | None = None
+        if thread is not None:
             thread.quit()
-            if not thread.wait(self._startup_timeout_ms):
-                _logger.warning(
-                    "単一instance IPC threadが%dms以内に終了しません。"
-                    "安全なQObject破棄のため終了まで待機します。",
-                    self._startup_timeout_ms,
-                )
-                thread.wait()
+            # isRunning() で分岐しない。run() から戻った直後は isRunning() が
+            # False でも OSスレッドの後始末が残っており、wait() せず参照を捨てると
+            # QThread破棄でheap corruptionになる（thread_shutdown 側の実測）。
+            # 上限つきで待ち、超えたら放棄して制御を返す。放棄する場合は、
+            # thread内で使うendpointの所有者ごと生かしておく。
+            outcome = stop_thread(
+                thread,
+                label="単一instance IPC thread",
+                soft_timeout_ms=self._startup_timeout_ms,
+                keepalive=(thread, self),
+            )
         self._server_thread = None
         if self._primary:
-            QLocalServer.removeServer(self._server_name)
-            self._lock.unlock()
+            # server threadを時間内に停止できた場合だけ、lockとserver名を解放する。
+            # ABANDONED（旧server threadがまだ動作中）でendpointとlockを解放すると、
+            # 新しいsdpがprimaryとして起動できてしまい、さらに旧serverが一時的に
+            # 接続を受けても _shutdown=True のため要求がUIへ渡らず消失しうる。
+            # 放棄時はlockを保持したままにし、プロセス消滅時にOS/QLockFileへ委ねる。
+            if outcome is None or outcome is ShutdownOutcome.STOPPED:
+                QLocalServer.removeServer(self._server_name)
+                self._lock.unlock()
+            else:
+                _logger.warning(
+                    "単一instance IPC threadを停止できませんでした。"
+                    "二重起動を防ぐためlockとserver endpointは保持します。"
+                )
         self._primary = False
         self._delivery_started = False
 
     def _listen_as_primary(self) -> InstanceOutcome:
-        if not self._start_server_thread():
+        outcome = self._start_server_thread()
+        if outcome is _ServerStartOutcome.FAILED_STOPPED:
             # 排他lockを所有しているため、同名endpointはstaleと安全に判断できる。
+            # 停止済みのthreadだけを再試行の対象にする。
             _logger.warning("staleな単一instance server endpointを除去して再試行します")
             QLocalServer.removeServer(self._server_name)
-            if not self._start_server_thread():
-                error = "" if self._server_thread is None else self._server_thread.error_string
-                _logger.error("単一instance serverを開始できません: %s", error)
-                self._lock.unlock()
-                return InstanceOutcome.FORWARD_FAILED
+            outcome = self._start_server_thread()
+        if outcome is _ServerStartOutcome.FAILED_ABANDONED:
+            # 旧threadがまだ動いている。同名でlistenし直すと競合するため再試行せず、
+            # 二重起動を防ぐためlockも保持したままにする（プロセス消滅で回収される）。
+            _logger.error(
+                "単一instance IPC threadを停止できないため、primary化を中止します。"
+                "lockは保持します。"
+            )
+            return InstanceOutcome.FORWARD_FAILED
+        if outcome is _ServerStartOutcome.FAILED_STOPPED:
+            error = "" if self._server_thread is None else self._server_thread.error_string
+            _logger.error("単一instance serverを開始できません: %s", error)
+            self._lock.unlock()
+            return InstanceOutcome.FORWARD_FAILED
         self._primary = True
         return InstanceOutcome.PRIMARY
 
-    def _start_server_thread(self) -> bool:
+    def _start_server_thread(self) -> _ServerStartOutcome:
         thread = _ServerThread(self._server_name, self)
         thread.request_ready.connect(
             self._publish_request,
@@ -312,15 +352,28 @@ class SingleInstanceService(QObject):
         )
         self._server_thread = thread
         thread.start()
-        if not thread.wait_until_ready(self._startup_timeout_ms):
+        ready = thread.wait_until_ready(self._startup_timeout_ms)
+        if not ready:
             _logger.error("単一instance IPC threadのlisten準備がtimeoutしました")
-            thread.quit()
-            thread.wait()
-            return False
-        if not thread.listen_succeeded:
-            thread.wait()
-            return False
-        return True
+        elif thread.listen_succeeded:
+            return _ServerStartOutcome.READY
+
+        # 起動失敗経路でも無期限待機へ移らない（UI表示前にアプリが固まらないよう、
+        # 上限つきで待ち、超えたら放棄して制御を返す）。
+        thread.quit()
+        stopped = stop_thread(
+            thread,
+            label="単一instance IPC thread",
+            soft_timeout_ms=self._startup_timeout_ms,
+            keepalive=(thread, self),
+        )
+        if stopped is ShutdownOutcome.STOPPED:
+            return _ServerStartOutcome.FAILED_STOPPED
+        # 放棄したthreadの所有権はreaperへ移っている。ここで参照を残すと、直後の
+        # shutdown() が同じthreadをもう一度停止しようとし、hard timeoutまでの待機を
+        # 二重に払ったうえ、同じQThreadをreaperへ二重登録しうる。
+        self._server_thread = None
+        return _ServerStartOutcome.FAILED_ABANDONED
 
     @Slot(object)
     def _publish_request(self, request: object) -> None:

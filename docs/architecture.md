@@ -55,11 +55,17 @@ sdp/
 │   │       └── waveform_cache.py # npz キャッシュ、キー生成、LRU 容量管理
 │   ├── services/
 │   │   ├── launch_request.py # Qt非依存の起動要求とargv変換
-│   │   ├── pcm_tap.py        # QAudioBufferOutput → 正規化 → mono 化 → リングバッファ
+│   │   ├── pcm_tap.py        # 再生中PCM → 正規化 → mono 化 → リングバッファ
 │   │   ├── waveform_analysis.py # QAudioDecoder workerと現在sourceの解析調停
+│   │   ├── playlist_file_status.py # 欠損判定の背景確認（GUIスレッドでstatしない）
+│   │   ├── playlist_session.py # playlist.json の復元とデバウンス保存
 │   │   ├── settings.py       # 設定 dataclass と JSON 入出力、スキーマバージョン
+│   │   ├── ui_state.py       # ui-state.json の検証と画面外補正
+│   │   ├── ui_state_session.py # UI状態の復元とデバウンス保存
+│   │   ├── save_status.py    # 保存・復元失敗のカテゴリ別通知
 │   │   ├── single_instance.py# QLocalServer / QLocalSocket と QLockFile
-│   │   ├── win_integration.py# ms-settings の起動、対応形式のプローブ
+│   │   ├── thread_shutdown.py# 終了時のthread待機（上限つき、無期限待機しない）
+│   │   ├── user_paths.py     # ユーザーデータ置き場の決定
 │   │   └── logging_setup.py  # RotatingFileHandler、Qt ログ統合、未捕捉例外処理
 │   └── ui/
 │       ├── main_window.py    # レイアウト骨格・メニュー・ドック配置のみ（god class 禁止）
@@ -70,13 +76,16 @@ sdp/
 │       ├── waveform_panel.py # 再生・解析Signalと波形Widgetの調停
 │       ├── spectrum_widget.py# スペクトラム（QPainter 自前描画）
 │       ├── spectrum_panel.py # 再生状態・PCMタップ・スペクトラムWidgetの調停
-│       ├── level_meter.py    # Peak / RMS メーター（P5-B で追加）
+│       ├── level_meter_widget.py # Peak / RMS メーター（P5-B で追加）
+│       ├── settings_dialog.py# 設定ダイアログ（Apply / OK / Cancel）
 │       └── shortcuts.py      # QShortcut 定義の一元管理
 ├── tests/                    # テスト構成は testing-strategy.md を参照
 ├── assets/test_audio/        # 自作テスト音源（正弦波など、各形式数秒）
 ├── packaging/
 │   ├── sdp.spec              # PyInstaller
-│   └── installer.iss         # Inno Setup（ProgID / Capabilities の登録と削除）
+│   ├── installer.iss         # Inno Setup（ProgID / Capabilities の登録と削除）
+│   ├── windows-version-info.txt # version resource のテンプレート
+│   └── licenses-manifest.json# 同梱コンポーネントとライセンス資料の宣言
 ├── spike/                    # P0 検証スクリプト（本体から独立、lint / coverage 対象外）
 └── docs/
 ```
@@ -94,7 +103,7 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 | クラス | 責務 | 持たないもの |
 |---|---|---|
 | `PlaybackBackend` | `load` / `play` / `pause` / `stop` / `seek` / `set_volume` / `set_muted` / `set_playback_rate` / `set_pitch_compensation` と、位置・長さ・状態・メディア状況・エラーのシグナル。**mpv 差し替えに必要な最小限のみ** | プレイリストの知識、UI の知識 |
-| `QtMultimediaBackend` | QMediaPlayer / QAudioOutput の所有（QAudioBufferOutput は P5 で追加）と、上記インターフェースへの変換。Qt の enum・QUrl・エラーをアプリ内の型へ写す | 曲順ロジック、値の検証 |
+| `QtMultimediaBackend` | load 世代ごとの QMediaPlayer / QAudioBufferOutput と QAudioOutput の所有、上記インターフェースへの変換、通知への load 世代の付与。Qt の enum・QUrl・エラーをアプリ内の型へ写す | 曲順ロジック、値の検証 |
 | `PlaybackController` | 1 つの source の再生（読み込み・状態・位置・音量・速度）と Backend との境界 | 曲順、プレイリストの知識 |
 | `SpeedPanel` | 0.5～2.0倍の速度操作、プリセット、ピッチ補正切替とControllerとの双方向同期 | Backend、プレイリスト、メタデータ、永続化 |
 | `ShortcutManager` | WindowShortcutの生成、フォーカスに応じた抑止、Controller群への操作委譲 | Backend、Modelの直接操作、設定保存 |
@@ -223,6 +232,23 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
   外部へは公開せず、UI と Controller は Qt の型に触れない。
   P5-A で QAudioBufferOutput も所有し `setAudioBufferOutput` で結び付けるが、
   これは `PlaybackBackend` の契約ではなく Qt 固有の補助ポートとして扱う（§6.2）。
+  QAudioBufferOutput は **load 世代ごとに作り直し、その世代の QMediaPlayer を親にする**。
+- **load 世代と player の identity**: `QMediaPlayer` は **`load()` ごとに作り直す**。
+  Qt のシグナル自体には発生元の source を識別する情報が無いため、1 つの player を
+  使い回すと、前 source から遅れて届いた通知にも受信時点の「現在世代」を後付けして
+  しまう（＝由来を記録したことにならない）。世代は player の identity へ結び付け、
+  player の子である中継 QObject（`_PlayerSession`）が通知へ世代と source を添える。
+  旧 player は停止して `deleteLater()` するが、シグナル接続は切らない。遅れて届く
+  通知は **旧世代のまま** 通知され、受け手が世代で除外できる。
+  状態・位置・duration・速度・ピッチ補正は現在世代の player のものだけを中継する。
+  `QAudioOutput` だけは世代をまたいで同一のものを付け替え（音量・ミュートの実体を保つため）、
+  速度とピッチ補正は新しい player へ引き継ぐ。**PCM も同じ扱いにする**: `QAudioBuffer` にも
+  source を識別する情報が無く、音声出力側の buffering で遅れて届きうるため、
+  1 つの `QAudioBufferOutput` を共有すると前 source の PCM を除外できない。
+  Backend は現在世代の PCM だけを `audio_buffer_received` シグナルへ流し、`PcmTap` は
+  そのシグナルへ接続するので、player を作り直しても接続先は変わらない。
+  旧 player 側で `setAudioOutput(None)` などを呼んで明示的に外さない
+  （新しい player へ設定した時点で Qt 側が外すため、二重に外すと異常終了する。実測）。
 - **状態**: Qt は source 未設定でも `StoppedState` を返すため、`NO_MEDIA` と `STOPPED` を
   Qt の値だけでは区別できない。Backend が現在の source を内部で保持して判定する
   （公開契約へ source プロパティは追加しない。公開 source は Controller の責務）。
@@ -239,7 +265,9 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 - **エラー写像**: `ResourceError` / `FormatError` / `NetworkError` / `AccessDeniedError` を
   対応するコードへ写し、`NoError` からは `PlaybackError` を作らない。
   未知の Qt 値だけを `UNKNOWN_ERROR` とする。`detail` には Qt の enum 名・`errorString`・
-  現在の source を入れ、ユーザー向け `message` へは混ぜない。
+  **そのエラーを出した player の source** を入れ、ユーザー向け `message` へは混ぜない。
+  `PlaybackError` には load 世代と source も添える。変換境界の内部失敗は特定の source に
+  属さないため世代を持たせず（`None`）、受け手の世代フィルターで消さない。
   通常の再生エラーのログ記録は Controller の責務のため、Backend では重複して記録しない。
 - **変換境界の例外**: PySide6 はスロット内の例外を呼び出し元へ伝播させず処理を継続する
   （P0-C で確認）。状態・メディア状況・エラーの各変換では例外を放置せず、
@@ -251,8 +279,11 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 - **source の差し替え**: 異なるsourceを `load()` すると、再生中・一時停止中を問わず
   `STOPPED` へ1回だけ遷移し、positionは0へ戻る。durationとmedia statusは新しいsourceの
   非同期通知で更新する。先のsourceが読み込み中でも、最後に指定したsourceを有効とする。
-  同じsourceを再度 `load()` した場合はQt 6.10.3の実挙動に合わせ、positionだけを0へ戻し、
-  読み込み済みのdurationを保持して `LOADING` / `LOADED` を再通知しない。
+  同じsourceを再度 `load()` した場合も**新しい世代として読み込み直す**（Repeat ONE の
+  繰り返しはこの経路）。position と duration は 0 から始まり、`LOADING` / `LOADED` は
+  新しい世代の通知として届く。世代が変わることで、前の再生から遅れて届く通知と区別できる。
+  差し替えに伴う 0 へのリセットは旧 player の通知として捨てられるため、`load()` が
+  1 回だけ通知する（直前の値が 0 でない場合のみ）。
 - **読み込み通知順**: 有効な source は Controller が保持して `source_changed` を通知してから
   Backend の `load()` へ渡す。Backend が読み込み状態・再生状態・エラーを同期通知しても、
   UI は必ず新しい source を先に認識できる。通常の読み込み失敗は Python 例外ではなく
@@ -309,7 +340,7 @@ UI 操作 → PlayerControls ──(メソッド呼び出し)──→ PlaybackC
 Backend ──position_changed / duration_changed──→ Controller ──→ PlayerControls / WaveformPanel
 Backend ──media_status_changed(END_OF_MEDIA)──→ Controller（次曲を決定）
 Backend ──error_occurred(PlaybackError)──→ Controller（該当エントリにエラーを記録し方針を適用）→ PlaylistModel
-QAudioBufferOutput ──audioBufferReceived──→ PcmTap（軽量変換のみ）→ PcmRingBuffer
+Backend ──audio_buffer_received(現在世代のPCM)──→ PcmTap（軽量変換のみ）→ PcmRingBuffer
 QTimer(30FPS) → SpectrumWidget: PcmRingBuffer.snapshot() → FFT → 描画
 WaveformAnalysisService(worker) ──partial / finished(WaveformData)──→ WaveformPanel ──→ WaveformWidget
 MetadataReader(worker) ──metadataReady(entry_id, tags)──→ PlaylistModel
@@ -379,14 +410,20 @@ P5-A の着手前に pause / stop / 再生中の直接 `setSource` / 終端通�
 
 - **`PlaybackBackend` の一般インターフェースへ PCM シグナルや Qt の PCM 型を追加しない。**
   mpv へ差し替えた場合に持ち込めないため、PCM 取得は **Qt Multimedia 固有の補助ポート**として扱う。
-- `QtMultimediaBackend` が `QAudioBufferOutput(parent=self)` を所有し、`setAudioBufferOutput`
-  で `QMediaPlayer` へ結び付ける。format を指定しないため、デコード直後のネイティブ形式が届く
-  （再サンプリングを挟まない）。通常の `QAudioOutput` はそのまま維持する。
-- 公開するのは `audio_buffer_output` という狭い property だけで、**composition root と
-  `PcmTap` 以外は参照しない**。UI 層からの `QAudioBufferOutput` / `QAudioBuffer` /
+- `QtMultimediaBackend` が load 世代ごとに `QAudioBufferOutput(parent=その世代の player)` を
+  所有し、`setAudioBufferOutput` で結び付ける。format を指定しないため、デコード直後の
+  ネイティブ形式が届く（再サンプリングを挟まない）。通常の `QAudioOutput` はそのまま維持する。
+- 公開するのは `audio_buffer_received` という狭いシグナルだけで、**composition root と
+  `PcmTap` 以外は参照しない**。`QAudioBufferOutput` 自体は公開しない（世代ごとに作り直すため、
+  接続先として安定しない）。UI 層からの `QAudioBufferOutput` / `QAudioBuffer` /
   `QtMultimediaBackend` の import は AST 検査で禁止している。
+- **前 source の PCM は Backend が load 世代で除外する。** `QAudioBuffer` には source を
+  識別する情報が無く、`PcmTap` 側では判定できない（`PcmTap` の clear 後に遅れて届いた
+  前曲 PCM を、新しい source のものとして取り込んでしまう）。
 - `FakePlaybackBackend` へ QAudioBuffer 概念を導入しない（テストで検査する）。
-- 接続は `app.py` の 1 行（`pcm_tap.connect_audio_buffer_output(backend.audio_buffer_output)`）だけ。
+- 接続は `app.py` の 1 行（`pcm_tap.connect_audio_buffer_source(backend.audio_buffer_received)`）だけ。
+  `PcmTap` が受け取るのは「`QAudioBuffer` を運ぶシグナル」であり、具体的な
+  `QAudioBufferOutput` ではない。
 
 ### 6.3 PcmTap（音声コールバック）
 
@@ -679,7 +716,7 @@ FFT・Peak / RMS・Peak hold・タイマー・リングバッファ・LevelProce
 同じく composition 済みサービスとして受け取る）。
 
 `app.py`（composition root）が `QtMultimediaBackend` → `PlaybackController` →
-`PcmTap` → `QAudioBufferOutput` への接続 → `MainWindow` の順に組み立て、
+`PcmTap` → Backend の PCM 供給シグナルへの接続 → `MainWindow` の順に組み立て、
 `PlayerComposition` が `pcm_tap` を保持する。**`build_player()` だけではタイマーを開始しない。**
 終了時は可視化を先に止める（`spectrum_panel.shutdown()` → `pcm_tap.shutdown()` →
 `waveform_analysis.shutdown()` → `metadata_reader.shutdown()` → settings / playlist 保存）。
@@ -919,8 +956,12 @@ Mutagen による非同期メタデータ取得と表示（P2-D）。
   （実際の可否は探索時に確定し、その結果で可否が更新される）。
 - **`END_OF_MEDIA` の防御**: 現在 entry があるときだけ自動次曲する
   （「開く...」の単曲が終わってもプレイリストへ移らない）。
-  source変更ごとに世代を進め、positionが正になるまでその世代を未開始として扱う。
-  `END_OF_MEDIA` は開始済みのsource世代ごとに1回だけ消費し、sourceが変わるまで
+  `media_status_changed` に添えられた **load 世代** が現在のものでない通知は捨てる
+  （前sourceの遅延通知を、statusの種類では区別できないため）。除外は公開境界である
+  `PlaybackController` が行い、ここでは防御的にもう一度確認する。
+  positionやその前の読み込みstatusを「再生が始まった証拠」としては使わない
+  （0ms音源や数msの効果音を取りこぼすため）。
+  `END_OF_MEDIA` はsource世代ごとに1回だけ消費し、sourceが変わるまで
   消費済み状態を解除しない。受信時の世代・entry_id・sourceを控え、イベントループの
   次のターンでもすべて一致するときだけ進める。position/duration比率による推測は行わない。
 - **末尾到達**: 次の候補が無ければ新しい load を行わず、`current_entry_id` は
@@ -1597,6 +1638,50 @@ P7-B2の要件にしない。
 
 **ライセンスの未解決事項が残っている間は、installerも技術検証用に留め、
 公開可能な配布物として扱わない。** コード署名も行っていない。
+
+---
+
+## 12.6 終了処理の待機上限
+
+終了操作が返らないと「閉じるを押したのにプロセスが残る」状態になる。一方で、
+実行中の :class:`QThread` を親ごと破棄すると異常終了する。両立させるため、
+`services/thread_shutdown.py` の `stop_thread()` が次を担う。
+
+- soft上限（既定3秒）で警告し、hard上限（既定10秒）で待機を打ち切る。
+- 打ち切った場合はthreadと関連オブジェクト（worker QObjectなど）を引き取り、
+  制御を呼び出し側へ返す。`QThread.terminate` は使わない
+  （保存中のユーザーデータが壊れうるため）。
+- 回収は **Qtのevent loopに依存しない**。アプリの終了処理は `app.exec()` が
+  戻ったあとに走るため、queued connectionへ回収を任せると配送されない。
+  専用のreaper threadが `QThread.wait()` で終了を確認する。**確認できても
+  reaper thread上では参照を解放しない**。`QThread` などのQObjectをreaper
+  thread上で最終解放すると、GUIでもworkerのaffinity threadでもないthread上で
+  C++デストラクタが走るため、確認済みentryは保持し続ける。**この仕組みは
+  プロセス終了に向けた放棄を前提にしている。** 汎用の解放API（所有者threadからの
+  drain）は用意しない。1つのentryにはthread affinityの異なるQObjectが混ざりうるため
+  （例: GUI threadのサービス自身と、解析thread affinityのworker）、「所有者threadから
+  まとめて解放すれば安全」という契約が成り立たないため。実行中に停止・再生成する
+  コンポーネントは、thread終了前に自分でworkerを片付ける。
+- 同じ `QThread` の二重登録は拒否する。放棄後にもう一度停止しようとする経路があっても、
+  同じオブジェクトグラフを二重に保持しない。呼び出し側でも、放棄した時点で
+  thread参照を手放す（例: `SingleInstanceService` の起動失敗経路）。
+- 各サービスの `shutdown()` は冪等だが、**初回の結果を書き換えない**。
+  放棄したthreadが後から終了した場合だけ `STOPPED` へ更新する。
+
+また、`MetadataReader` は `FileStatus.AVAILABLE` が確定したエントリだけを読む。
+未確認（`UNKNOWN`）のまま読み始めると、ファイル状態確認と同じファイルへ同時に
+I/Oを出し、欠損と判明するエントリや切断NASへも無駄な読み取りが走るため。
+`run()` では `PlaylistFileStatusChecker` を先に `start()` する。
+
+**既知の制限**: `MetadataReader` と `PlaylistFileStatusChecker` は `QThreadPool`
+（前者は専用pool、後者は既定で global instance）を使うため、この方式を適用できない
+（個々のrunnableを切り離せず、`QThreadPool` のデストラクタは全runnableの完了まで
+ブロックする）。両者の `shutdown(...)` は**メソッドの待機上限であって、
+プロセス終了の上限ではない**。切断されたNASなどで `is_file()` / Mutagenの同期I/Oが
+戻らない場合、QApplication・global poolの破棄時にブロックしうる。厳密な上限が
+必要になったら、キャンセル不能な同期I/Oを終了可能な子プロセスや専用 `QThread`
+（`stop_thread` で放棄可能）へ分離する。現状は「戻らないファイルは想定しない」
+という前提で運用し、超過時は結果を捨ててログへ残す。
 
 ---
 

@@ -802,3 +802,80 @@ def test_save_failure_and_recovery_are_reported_once(
 
     assert failures == [1]
     assert recoveries == [1]
+
+
+def test_rollback_failure_publishes_the_actual_controller_state(
+    controller: PlaybackController, backend: FakePlaybackBackend
+) -> None:
+    """rollbackにも失敗したら、公開snapshotを実状態から作り直す。
+
+    「戻せたはず」の以前のsnapshotを維持すると、公開snapshotとControllerの
+    実状態が食い違い、UIがどちらを表示すべきか分からなくなる。
+    """
+    app_settings = make_app_settings(controller)
+    before = app_settings.settings
+    notified: list[object] = []
+    rollback_failures: list[object] = []
+    app_settings.settings_changed.connect(notified.append)
+    app_settings.settings_rollback_failed.connect(rollback_failures.append)
+    # rateの適用は通し、pitchで失敗させ、rateのrollbackだけ失敗させる。
+    backend.setter_errors["set_pitch_compensation"] = RuntimeError("故障注入")
+    backend.setter_errors["set_playback_rate"] = RuntimeError("rollback失敗")
+    backend.setter_error_skips["set_playback_rate"] = 1
+
+    with pytest.raises(RuntimeError, match="故障注入"):
+        app_settings.apply(AppSettings(1.25, False, waveform_visible=False))
+
+    # rateは戻せていないので、実状態は1.25のまま。snapshotもそれに一致する。
+    assert controller.playback_rate == pytest.approx(1.25)
+    assert app_settings.settings.playback_rate == pytest.approx(1.25)
+    assert app_settings.settings != before
+    assert notified == [app_settings.settings]
+    assert rollback_failures == [("再生速度",)]
+
+
+def test_successful_rollback_keeps_the_previous_snapshot_without_notifying(
+    controller: PlaybackController, backend: FakePlaybackBackend
+) -> None:
+    """rollbackが成功した場合は実状態＝以前の値なので、通知も変化もない。"""
+    app_settings = make_app_settings(controller)
+    before = app_settings.settings
+    notified: list[object] = []
+    rollback_failures: list[object] = []
+    app_settings.settings_changed.connect(notified.append)
+    app_settings.settings_rollback_failed.connect(rollback_failures.append)
+    backend.setter_errors["set_pitch_compensation"] = RuntimeError("故障注入")
+
+    with pytest.raises(RuntimeError, match="故障注入"):
+        app_settings.apply(AppSettings(1.25, False, waveform_visible=False))
+
+    assert app_settings.settings == before
+    assert notified == []
+    assert rollback_failures == []
+
+
+def test_load_does_not_rewrite_the_file_when_the_backend_adjusts_values(
+    tmp_path: Path, controller: PlaybackController, backend: FakePlaybackBackend, qtbot: QtBot
+) -> None:
+    """Backendが要求値を丸めても、ユーザー操作なしの終了でファイルを書き換えない。
+
+    保存済み基準をファイルの要求値のままにすると、実効値との差だけで
+    「変更あり」と誤判定し、旧schemaを起動しただけで上書きしてしまう。
+    """
+    del qtbot
+    path = tmp_path / "settings.json"
+    # 旧schema（version 1）を模した最小のファイル。
+    path.write_text(
+        json.dumps({"schema_version": 1, "playback_rate": 1.5, "pitch_compensation": True}),
+        encoding="utf-8",
+    )
+    before = path.read_text(encoding="utf-8")
+    backend.effective_playback_rate = 1.4
+    session = make_session(path, controller)
+
+    assert session.load() is None
+    session.start()
+
+    assert controller.playback_rate == pytest.approx(1.4)
+    assert session.flush() is False
+    assert path.read_text(encoding="utf-8") == before

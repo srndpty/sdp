@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from sdp.core.metadata.types import MetadataStatus, TrackMetadata
 from sdp.core.playlist.entry import (
     FileStatus,
     PlaylistEntry,
@@ -75,7 +76,8 @@ def test_relative_path_is_normalized_to_absolute(
     entry = create_entry(Path("曲.wav"))
 
     assert entry.path.is_absolute()
-    assert entry.path == (tmp_path / "曲.wav").resolve()
+    # 字句的な絶対パス化のみ（symlink解決はしない）。cwd基準で絶対化される。
+    assert entry.path == tmp_path / "曲.wav"
 
 
 def test_relative_path_is_rejected_by_the_dataclass(audio_file: Path) -> None:
@@ -90,14 +92,17 @@ def test_missing_path_can_be_kept(tmp_path: Path) -> None:
     entry = create_entry(tmp_path / "ない曲.wav")
 
     assert entry.path.is_absolute()
-    assert entry.file_status is FileStatus.MISSING
+    assert entry.with_refreshed_status().file_status is FileStatus.MISSING
 
 
-def test_direct_construction_probes_missing_status(tmp_path: Path) -> None:
-    """直接構築しても欠損ファイルをAVAILABLEとして保持しない。"""
-    entry = PlaylistEntry(entry_id="missing", path=tmp_path / "ない曲.wav")
+def test_construction_does_not_touch_the_file_system(tmp_path: Path) -> None:
+    """生成時はファイルを調べない（大量追加でGUIスレッドを止めないため）。"""
+    entry = PlaylistEntry(entry_id="unknown", path=tmp_path / "ない曲.wav")
 
-    assert entry.file_status is FileStatus.MISSING
+    assert entry.file_status is FileStatus.UNKNOWN
+    assert create_entry(tmp_path / "ない曲.wav").file_status is FileStatus.UNKNOWN
+    # 未確認は欠損として扱わない（灰色表示も曲送りのスキップもしない）。
+    assert entry.is_missing is False
 
 
 def test_japanese_and_space_are_preserved(audio_file: Path) -> None:
@@ -115,8 +120,8 @@ def test_unknown_extension_is_accepted(tmp_path: Path) -> None:
 
     entry = create_entry(path)
 
-    assert entry.path == path.resolve()
-    assert entry.file_status is FileStatus.AVAILABLE
+    assert entry.path == path
+    assert entry.with_refreshed_status().file_status is FileStatus.AVAILABLE
 
 
 def test_normalize_path_expands_user(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -124,7 +129,27 @@ def test_normalize_path_expands_user(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))
 
-    assert normalize_path(Path("~/曲.wav")) == (tmp_path / "曲.wav").resolve()
+    assert normalize_path(Path("~/曲.wav")) == tmp_path / "曲.wav"
+
+
+def test_normalize_path_does_not_touch_the_file_system(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """正規化はファイルシステムへ問い合わせない（`Path.resolve` を使わない）。
+
+    切断UNCや休止ドライブで1件でも長時間ブロックしないよう、字句処理に留める。
+    """
+
+    def _forbidden(*_args: object, **_kwargs: object) -> Path:
+        raise AssertionError("normalize_pathがPath.resolveを呼んでいます")
+
+    monkeypatch.setattr(Path, "resolve", _forbidden)
+    monkeypatch.chdir(tmp_path)
+
+    # resolveを例外化しても生成・正規化が成功する。
+    entry = create_entry(Path("相対.wav"))
+    assert entry.path == tmp_path / "相対.wav"
+    assert normalize_path(tmp_path / "別.wav") == tmp_path / "別.wav"
 
 
 # -- 欠損状態 ---------------------------------------------------------------
@@ -159,7 +184,7 @@ def test_refresh_detects_deleted_file(audio_file: Path) -> None:
 def test_refresh_detects_restored_file(tmp_path: Path) -> None:
     """ファイルが復元されたら利用可能へ戻る。"""
     path = tmp_path / "戻る曲.wav"
-    entry = create_entry(path)
+    entry = create_entry(path).with_refreshed_status()
     assert entry.is_missing
     path.write_bytes(b"x")
 
@@ -170,7 +195,7 @@ def test_refresh_detects_restored_file(tmp_path: Path) -> None:
 
 def test_refresh_returns_self_when_unchanged(audio_file: Path) -> None:
     """状態が変わらなければ同一オブジェクトを返す（変更検出に使える）。"""
-    entry = create_entry(audio_file)
+    entry = create_entry(audio_file).with_refreshed_status()
 
     assert entry.with_refreshed_status() is entry
 
@@ -192,3 +217,42 @@ def test_entry_has_no_playback_or_ui_state(audio_file: Path) -> None:
 
     for forbidden in ("is_current", "is_selected", "current", "selected", "playback_error"):
         assert not hasattr(entry, forbidden), forbidden
+
+
+def test_with_file_status_applies_a_probed_result_without_io(tmp_path: Path) -> None:
+    """調べ済みの状態を当てはめる経路はファイルへ触れない。"""
+    entry = create_entry(tmp_path / "ない曲.wav")
+
+    applied = entry.with_file_status(FileStatus.AVAILABLE)
+
+    assert applied.file_status is FileStatus.AVAILABLE
+    assert applied.entry_id == entry.entry_id
+    assert applied.path == entry.path
+    assert entry.with_file_status(FileStatus.UNKNOWN) is entry
+
+
+def test_confirming_an_unknown_status_keeps_metadata(audio_file: Path) -> None:
+    """UNKNOWN から確定しただけなら、読み取り済みメタデータを捨てない。"""
+    entry = create_entry(audio_file).with_metadata(
+        TrackMetadata(title="曲名", artist=None, album=None, duration_ms=1000)
+    )
+
+    confirmed = entry.with_file_status(FileStatus.AVAILABLE)
+
+    assert confirmed.metadata is not None
+    assert confirmed.metadata.title == "曲名"
+    assert confirmed.metadata_status is MetadataStatus.LOADED
+
+
+def test_becoming_missing_drops_metadata(audio_file: Path) -> None:
+    """欠損へ変わったらメタデータを捨て、表示をファイル名へ戻す。"""
+    entry = (
+        create_entry(audio_file)
+        .with_file_status(FileStatus.AVAILABLE)
+        .with_metadata(TrackMetadata(title="曲名", artist=None, album=None, duration_ms=1000))
+    )
+
+    gone = entry.with_file_status(FileStatus.MISSING)
+
+    assert gone.metadata is None
+    assert gone.metadata_status is MetadataStatus.NOT_REQUESTED

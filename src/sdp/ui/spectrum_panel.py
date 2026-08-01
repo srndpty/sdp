@@ -30,6 +30,15 @@ WAITING_MESSAGE = "PCMを待機中…"
 FAILED_MESSAGE = "スペクトラムを表示できません"
 LEVEL_FAILED_MESSAGE = "レベルを表示できません"
 
+SNAPSHOT_RETRY_DELAYS_MS = (100, 500, 2_000)
+"""共有PCM snapshotの取得に失敗したときの再試行間隔（指数的に広げる）。
+
+snapshotの失敗は、解析アルゴリズム自体の誤りではなく、一時的な競合・
+メモリ確保失敗・format切替の隙間といった回復可能な事象でも起こる。
+1回の失敗でその曲の可視化を最後まで止めない。この回数だけ再試行しても
+駄目なら、初めて失敗表示にする。
+"""
+
 
 class SpectrumPanel(QWidget):
     """PLAYING かつ表示中のときだけ、タイマー1tickにつき解析を各最大1回行う。
@@ -56,6 +65,7 @@ class SpectrumPanel(QWidget):
         self._spectrum_failed = False
         self._level_failed = False
         self._snapshot_failed = False
+        self._snapshot_failures = 0
         self._shutdown = False
         self._snapshot_count = 0
         self._stereo_snapshot_count = 0
@@ -77,6 +87,9 @@ class SpectrumPanel(QWidget):
         self._timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._timer.setInterval(SPECTRUM_TIMER_INTERVAL_MS)
         self._timer.timeout.connect(self._on_timeout)
+        self._retry_timer = QTimer(self)
+        self._retry_timer.setSingleShot(True)
+        self._retry_timer.timeout.connect(self._on_retry)
 
         playback.source_changed.connect(self._on_source_changed)
         playback.state_changed.connect(self._on_state_changed)
@@ -201,7 +214,7 @@ class SpectrumPanel(QWidget):
         # PcmTap側もclearするが、表示状態はPanelが独立して解除する。
         self._spectrum_failed = False
         self._level_failed = False
-        self._snapshot_failed = False
+        self._clear_snapshot_failure()
         self._processor.reset()
         self._level_processor.reset()
         # source_changed時点のstateがPLAYINGでも、前sourceのframeを即時に捨てる。
@@ -224,6 +237,9 @@ class SpectrumPanel(QWidget):
         # 旧formatの平滑化状態とPeak holdを新formatへ持ち越さない。
         self._processor.reset()
         self._level_processor.reset()
+        # format切替の隙間で失敗していた場合は、新formatで改めて試す。
+        self._clear_snapshot_failure()
+        self._update_timer()
 
     # -- 内部 ---------------------------------------------------------------
 
@@ -234,6 +250,8 @@ class SpectrumPanel(QWidget):
         NO_MEDIA は履歴を捨ててプレースホルダーへ戻す。
         """
         if state is PlaybackState.PLAYING:
+            # pause→playは状況が変わる契機なので、snapshot失敗のラッチを解く。
+            self._clear_snapshot_failure()
             if not self._spectrum_failed:
                 self._widget.set_status_text("")
             if not self._level_failed:
@@ -247,7 +265,7 @@ class SpectrumPanel(QWidget):
             self._level_processor.reset()
             self._spectrum_failed = False
             self._level_failed = False
-            self._snapshot_failed = False
+            self._clear_snapshot_failure()
             stopped = self._playback.source is not None
             self._widget.clear_frame(STOPPED_MESSAGE if stopped else NO_SOURCE_MESSAGE)
             self._level_widget.clear_frame(STOPPED_MESSAGE if stopped else LEVEL_NO_SOURCE_MESSAGE)
@@ -256,6 +274,11 @@ class SpectrumPanel(QWidget):
     def _set_visualization_enabled(
         self, *, spectrum: bool | None = None, level: bool | None = None
     ) -> None:
+        if (spectrum is True and not self._spectrum_enabled) or (
+            level is True and not self._level_enabled
+        ):
+            # 非表示→表示は再試行の契機（一時障害のまま固定しない）。
+            self._clear_snapshot_failure()
         if spectrum is not None and spectrum != self._spectrum_enabled:
             self._spectrum_enabled = spectrum
             self._widget.setVisible(spectrum)
@@ -280,6 +303,22 @@ class SpectrumPanel(QWidget):
             return WAITING_MESSAGE
         return STOPPED_MESSAGE
 
+    def _clear_snapshot_failure(self) -> None:
+        """snapshot失敗のラッチと再試行状態を解除する。
+
+        source変更・format変更・停止・再表示・再生再開のように、
+        状況が変わったときは改めて試す。
+        """
+        self._retry_timer.stop()
+        self._snapshot_failed = False
+        self._snapshot_failures = 0
+
+    @Slot()
+    def _on_retry(self) -> None:
+        if self._shutdown:
+            return
+        self._update_timer()
+
     def _update_timer(self) -> None:
         if self._should_run():
             if not self._timer.isActive():
@@ -289,6 +328,8 @@ class SpectrumPanel(QWidget):
 
     def _stop_timer(self) -> None:
         self._timer.stop()
+        if self._shutdown:
+            self._retry_timer.stop()
         # 停止中の実時間をPeak holdの減衰へ数えない（pause・非表示・最小化）。
         self._level_clock.invalidate()
 
@@ -321,6 +362,31 @@ class SpectrumPanel(QWidget):
         self._watched_window = window
         window.installEventFilter(self)
 
+    def _handle_snapshot_failure(self) -> None:
+        """共有snapshotの失敗を、回復可能な障害として扱う。
+
+        規定回数までは間隔を広げながら再試行し、超えて初めて失敗表示にする。
+        同じ例外を毎フレーム記録しないよう、1回目だけ詳細を残す。
+        """
+        self._snapshot_failures += 1
+        attempt = self._snapshot_failures
+        if attempt == 1:
+            _logger.exception("PCMスナップショットの取得に失敗しました。再試行します")
+        else:
+            _logger.debug("PCMスナップショットの取得に再度失敗しました（%d回目）", attempt)
+
+        self._stop_timer()
+        if attempt <= len(SNAPSHOT_RETRY_DELAYS_MS):
+            self._retry_timer.start(SNAPSHOT_RETRY_DELAYS_MS[attempt - 1])
+            return
+
+        _logger.error("PCMスナップショットの取得に%d回失敗したため可視化を停止します", attempt)
+        self._snapshot_failed = True
+        self._processor.reset()
+        self._level_processor.reset()
+        self._widget.clear_frame(FAILED_MESSAGE)
+        self._level_widget.clear_frame(LEVEL_FAILED_MESSAGE)
+
     @Slot()
     def _on_timeout(self) -> None:
         # timer停止後に残っていた古いtimeoutでも安全に何もしない。
@@ -341,15 +407,9 @@ class SpectrumPanel(QWidget):
                 if level_active:
                     self._stereo_snapshot_count += 1
             except Exception:
-                # 共通のsnapshot失敗は両方の可視化を止める（再生は妨げない）。
-                _logger.exception("PCMスナップショットの取得に失敗しました")
-                self._snapshot_failed = True
-                self._processor.reset()
-                self._level_processor.reset()
-                self._widget.clear_frame(FAILED_MESSAGE)
-                self._level_widget.clear_frame(LEVEL_FAILED_MESSAGE)
-                self._stop_timer()
+                self._handle_snapshot_failure()
                 return
+            self._snapshot_failures = 0
             elapsed_seconds = self._consumed_elapsed_seconds()
             if snapshot.sample_rate < 1:
                 # 最初のPCMが届くまではプレースホルダーのまま待つ。

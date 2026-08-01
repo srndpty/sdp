@@ -295,6 +295,13 @@ class AppSettingsController(QObject):
     settings_changed = Signal(object)
     """適用済み設定が変化した（引数は :class:`AppSettings`）。"""
 
+    settings_rollback_failed = Signal(object)
+    """適用失敗後のrollbackも失敗した（引数は戻せなかった項目名のtuple）。
+
+    公開snapshotは実状態から作り直すため矛盾は残らないが、利用者から見ると
+    「操作していない設定が変わった」状態になり得るので、UIから通知できるようにする。
+    """
+
     def __init__(
         self,
         playback: PlaybackController,
@@ -337,8 +344,10 @@ class AppSettingsController(QObject):
         """適用成功後に実効値を1回だけ公開する（同値なら通知しない）。
 
         途中で失敗した場合は部分適用を残さないよう、変更済みのControllerを
-        直前の値へ戻してから例外を送出する（rollbackの失敗はログへ残す）。
-        未適用のsnapshotは公開しないため、保存も予約されない。
+        直前の値へ戻してから例外を送出する。**rollbackの成否に関わらず、
+        公開snapshotは各Controllerの実状態から作り直す**（「戻せたはず」の値を
+        公開して、snapshotと実状態が食い違ったままになるのを避ける）。
+        rollbackにも失敗した項目があれば :attr:`settings_rollback_failed` で通知する。
         """
         if self._shutdown:
             raise RuntimeError("shutdown後のAppSettingsControllerへ設定は適用できません")
@@ -350,7 +359,11 @@ class AppSettingsController(QObject):
         try:
             self._apply_to_controllers(settings, previous)
         except Exception:
-            self._restore_controllers(previous)
+            rollback_failures = self._restore_controllers(previous)
+            self._applying = False
+            self._set_settings(self._effective_settings(fallback=previous))
+            if rollback_failures:
+                self.settings_rollback_failed.emit(tuple(rollback_failures))
             raise
         finally:
             self._applying = False
@@ -432,8 +445,12 @@ class AppSettingsController(QObject):
         if settings.shuffle_enabled != previous.shuffle_enabled:
             playlist_playback.set_shuffle_enabled(settings.shuffle_enabled)
 
-    def _restore_controllers(self, previous: AppSettings) -> None:
-        """適用途中の失敗後、各Controllerを直前の値へ可能な限り戻す。"""
+    def _restore_controllers(self, previous: AppSettings) -> list[str]:
+        """適用途中の失敗後、各Controllerを直前の値へ可能な限り戻す。
+
+        戻せなかった項目名を返す。完全なトランザクションは保証できないため、
+        呼び出し側は結果に関わらず実状態を読み直してsnapshotへ反映する。
+        """
         playlist_playback = self._playlist_playback
         restores: list[tuple[str, Callable[[], None]]] = [
             ("ミュート", lambda: self._playback.set_muted(previous.muted)),
@@ -461,11 +478,14 @@ class AppSettingsController(QObject):
                     ),
                 ),
             )
+        failed: list[str] = []
         for name, restore in restores:
             try:
                 restore()
             except Exception:
                 _logger.exception("設定適用失敗後に%sを元へ戻せませんでした", name)
+                failed.append(name)
+        return failed
 
     def _effective_settings(self, fallback: AppSettings | None = None) -> AppSettings:
         """各Controllerの実効値と、可視化設定を合わせたsnapshotを作る。"""
@@ -557,7 +577,10 @@ class SettingsSession(QObject):
             return RESTORE_FAILED_MESSAGE
 
         self._app_settings.apply(settings)
-        self._last_saved = settings
+        # 保存済み基準は「ファイルの要求値」ではなく「適用後の実効snapshot」にする。
+        # Backendが要求値を丸める場合（例: 1.5 → float32の1.4999999…）に、
+        # ユーザーが何も操作していなくても終了時に変更ありと誤判定するため。
+        self._last_saved = self._snapshot()
         return None
 
     def start(self) -> None:

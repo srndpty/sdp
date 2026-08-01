@@ -56,7 +56,7 @@ def test_load_passes_existing_path_to_backend(
 
     controller.load(audio_file)
 
-    assert backend.call_args("load") == [(audio_file,)]
+    assert backend.call_args("load") == [(audio_file, 1)]
     assert controller.source == audio_file
     assert spy.count() == 1
     assert spy.at(0)[0] == audio_file
@@ -99,7 +99,7 @@ def test_load_accepts_unknown_extension(
 
     controller.load(path)
 
-    assert backend.call_args("load") == [(path,)]
+    assert backend.call_args("load") == [(path, 1)]
 
 
 def test_load_resolves_relative_path(
@@ -118,7 +118,7 @@ def test_load_resolves_relative_path(
     assert controller.source == source
     assert controller.source is not None
     assert controller.source.is_absolute()
-    assert backend.call_args("load") == [(source,)]
+    assert backend.call_args("load") == [(source, 1)]
 
 
 def test_load_missing_file_reports_error_without_calling_backend(
@@ -163,7 +163,7 @@ def test_failed_load_keeps_previous_source(
     controller.load(tmp_path / "ない曲.wav")
 
     assert controller.source == audio_file
-    assert backend.call_args("load") == [(audio_file,)]
+    assert backend.call_args("load") == [(audio_file, 1)]
 
 
 # -- 転送 -------------------------------------------------------------------
@@ -220,6 +220,87 @@ def test_backend_error_is_relayed(
     assert spy.at(0)[0] == error
 
 
+def test_load_numbers_generations_in_order(
+    controller: PlaybackController, backend: FakePlaybackBackend, tmp_path: Path
+) -> None:
+    """load ごとに読み込み世代を 1 から連番で採番し、Backend へ渡す。"""
+    sources: list[Path] = []
+    for name in ("a.wav", "b.wav", "c.wav"):
+        path = tmp_path / name
+        path.write_bytes(b"RIFF----WAVEfmt ")
+        sources.append(path)
+
+    for source in sources:
+        controller.load(source)
+
+    assert backend.call_args("load") == [
+        (sources[0].resolve(), 1),
+        (sources[1].resolve(), 2),
+        (sources[2].resolve(), 3),
+    ]
+    assert controller.load_generation == 3
+
+
+def test_stale_media_status_is_dropped_at_the_public_boundary(
+    controller: PlaybackController, backend: FakePlaybackBackend, audio_file: Path
+) -> None:
+    """前sourceの遅延statusは公開境界で捨てる（受け手ごとの除外に頼らない）。"""
+    controller.load(audio_file)
+    first_generation = controller.load_generation
+    controller.load(audio_file)
+    spy = QSignalSpy(controller.media_status_changed)
+
+    backend.emit_media_status(MediaStatus.INVALID_MEDIA, generation=first_generation)
+    backend.emit_media_status(MediaStatus.END_OF_MEDIA, generation=first_generation)
+
+    assert spy.count() == 0
+
+    backend.emit_media_status(MediaStatus.LOADED)
+
+    assert spy.count() == 1
+    assert spy.at(0)[0] is MediaStatus.LOADED
+    assert spy.at(0)[1] == controller.load_generation
+
+
+def test_stale_backend_error_is_dropped_but_source_less_error_is_relayed(
+    controller: PlaybackController, backend: FakePlaybackBackend, audio_file: Path
+) -> None:
+    """前sourceのエラーは捨て、sourceに属さないエラーは世代で消さない。"""
+    controller.load(audio_file)
+    stale_generation = controller.load_generation
+    controller.load(audio_file)
+    spy = QSignalSpy(controller.error_occurred)
+
+    backend.emit_error(
+        PlaybackError(
+            code=PlaybackErrorCode.RESOURCE_ERROR,
+            message="音声ファイルを読み込めません。",
+            detail="前sourceの遅延エラー",
+            generation=stale_generation,
+            source=audio_file,
+        )
+    )
+
+    assert spy.count() == 0
+
+    source_less = PlaybackError(
+        code=PlaybackErrorCode.UNKNOWN_ERROR,
+        message="音声の再生中に不明なエラーが発生しました。",
+        detail="変換境界の内部失敗",
+    )
+    current = PlaybackError(
+        code=PlaybackErrorCode.FORMAT_ERROR,
+        message="この音声形式は再生できません。",
+        detail="現在sourceのエラー",
+        generation=controller.load_generation,
+        source=audio_file,
+    )
+    backend.emit_error(source_less)
+    backend.emit_error(current)
+
+    assert [spy.at(index)[0] for index in range(spy.count())] == [source_less, current]
+
+
 def test_load_failure_from_backend_is_relayed(
     controller: PlaybackController, backend: FakePlaybackBackend, audio_file: Path
 ) -> None:
@@ -233,8 +314,14 @@ def test_load_failure_from_backend_is_relayed(
 
     controller.load(audio_file)
 
-    assert backend.call_args("load") == [(audio_file,)]
+    assert backend.call_args("load") == [(audio_file, 1)]
     assert spy.count() == 1
+    # load に由来するエラーは、その load の世代と source を伴う
+    # （世代を持たないと、前 source の遅延エラーと区別できない）。
+    error = spy.at(0)[0]
+    assert isinstance(error, PlaybackError)
+    assert error.generation == 1
+    assert error.source == audio_file
 
 
 def test_no_media_and_stopped_state_contract(

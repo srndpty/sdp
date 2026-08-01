@@ -92,7 +92,7 @@ def test_title_falls_back_to_the_file_name(model: PlaylistModel, audio_files: li
     assert display(model, 0, Column.ARTIST) == ""
     assert display(model, 0, Column.ALBUM) == ""
     assert display(model, 0, Column.DURATION) == ""
-    assert display(model, 0, Column.PATH) == str(audio_files[0].resolve())
+    assert display(model, 0, Column.PATH) == str(audio_files[0])
 
 
 # -- 状態遷移 ---------------------------------------------------------------
@@ -412,6 +412,7 @@ def test_restored_file_becomes_requestable_again(model: PlaylistModel, tmp_path:
     """欠損から復活したら未要求へ戻る（再読み取りできる）。"""
     path = tmp_path / "戻る曲.wav"
     entry_ids = model.add_paths([path])
+    model.refresh_file_status()
     model.mark_metadata_failed(entry_ids[0])
     path.write_bytes(b"x")
 
