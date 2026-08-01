@@ -534,12 +534,22 @@ def test_restores_saved_playlist(
 
 
 def test_initial_launch_paths_are_appended_after_restored_playlist(
-    playlist_file: Path, audio_files: list[Path], qtbot: QtBot
+    playlist_file: Path,
+    audio_files: list[Path],
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """初回起動引数は復元済みplaylistを置換せず、順序どおり末尾へ追加する。"""
+    """初回起動引数を復元済みplaylistの末尾へ追加し、指定先頭曲を再生する。"""
     restored = [create_entry(audio_files[0])]
     save_playlist(playlist_file, restored)
     request = LaunchRequest((audio_files[1].resolve(), audio_files[1].resolve()))
+    played: list[str] = []
+
+    def record_play(_controller: PlaylistPlaybackController, entry_id: str) -> bool:
+        played.append(entry_id)
+        return True
+
+    monkeypatch.setattr(PlaylistPlaybackController, "play_entry", record_play)
 
     composition = app_module.build_player(playlist_file, launch_request=request)
     qtbot.addWidget(composition.window)
@@ -551,7 +561,7 @@ def test_initial_launch_paths_are_appended_after_restored_playlist(
         audio_files[1].resolve(),
         audio_files[1].resolve(),
     ]
-    assert composition.controller.source is None
+    assert played == [entries[1].entry_id]
     assert composition.window.statusBar().currentMessage() == "2曲をプレイリストへ追加しました。"
     composition.window.spectrum_panel.shutdown()
 
@@ -561,7 +571,7 @@ def test_received_launch_uses_existing_window_and_model_and_requests_foreground(
     audio_files: list[Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """IPC要求を同じcompositionへ追加し、最大化を保ったまま最小化を解除する。"""
+    """IPC要求の先頭曲を再生し、最大化を保ったまま最小化を解除する。"""
     calls: list[object] = []
     minimized_maximized = Qt.WindowState.WindowMinimized | Qt.WindowState.WindowMaximized
 
@@ -602,6 +612,13 @@ def test_received_launch_uses_existing_window_and_model_and_requests_foreground(
     monkeypatch.setattr(QApplication, "alert", record_alert)
     model = composition.playlist_model
     window = composition.window
+    played: list[str] = []
+
+    def record_play(entry_id: str) -> bool:
+        played.append(entry_id)
+        return True
+
+    monkeypatch.setattr(composition.playlist_playback, "play_entry", record_play)
 
     composition.launch_handler.handle_received(
         LaunchRequest((audio_files[0].resolve(), audio_files[1].resolve()))
@@ -613,6 +630,7 @@ def test_received_launch_uses_existing_window_and_model_and_requests_foreground(
         audio_files[0].resolve(),
         audio_files[1].resolve(),
     ]
+    assert played == [model.entry_at(0).entry_id]
     restored_state = calls[0]
     assert isinstance(restored_state, Qt.WindowState)
     assert restored_state & Qt.WindowState.WindowMaximized
@@ -665,13 +683,20 @@ def test_activate_window_false_adds_without_foreground_request(
     audio_files: list[Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """activate_window=Falseはpath追加だけを行い、Window操作をしない。"""
+    """activate_window=Falseでも指定曲を再生するが、Window操作はしない。"""
 
     def fail_activation(handler: LaunchRequestHandler) -> None:
         del handler
         raise AssertionError("activate_window=FalseでWindowを前面化してはいけません")
 
     monkeypatch.setattr(LaunchRequestHandler, "_activate_window", fail_activation)
+    played: list[str] = []
+
+    def record_play(entry_id: str) -> bool:
+        played.append(entry_id)
+        return True
+
+    monkeypatch.setattr(composition.playlist_playback, "play_entry", record_play)
 
     composition.launch_handler.handle_received(
         LaunchRequest((audio_files[0].resolve(),), activate_window=False)
@@ -680,6 +705,7 @@ def test_activate_window_false_adds_without_foreground_request(
     assert [entry.path for entry in composition.playlist_model.entries()] == [
         audio_files[0].resolve()
     ]
+    assert played == [composition.playlist_model.entry_at(0).entry_id]
 
 
 # -- 終了時保存 -------------------------------------------------------------

@@ -66,7 +66,7 @@
 | `MainWindow`（UI状態） | captureがnormal geometryとSplitterサイズを返すこと、**最大化中でもnormal geometryを返すこと**、最小化状態を保存しないこと、restoreでgeometryと最大化を適用しnormal復元では既存の最大化／最小化を解除すること、画面外の保存値を画面内へ戻すこと、Splitterの往復と現在Window高さへの適応、可視化が全ON／全OFFのどちらでも保存比率を許容誤差内で復元すること、前回フォルダーを同期I/Oなしでファイルダイアログへ渡すこと、ファイル選択で親フォルダーを更新し**Cancelでは更新しないこと**、D&Dで更新しないこと、相対パスの無視、Unicodeパス、move／resizeの通知、**復元適用が通知しないこと**、JSON・schema version・保存先・保存タイマーを持たないことを検証する |
 | `MainWindow` | `QFileDialog.getOpenFileName` を差し替え、キャンセル / 選択、現在ファイルを含むタイトルの更新、`MediaStatus` とエラー表示（具体的エラーの優先、`detail` を出さないこと）、source解除、終了アクションを検証する。上側Panelが内容以上に伸びず、PlaylistViewが240px以上を確保することも検証する。**設定アクションでダイアログが開くこと、二重に開かないこと、閉じた後に再度開けること、開き直しで最新設定が入ること、ダイアログの要求が調停サービス経由でControllerと各Panelへ届くこと、JSON・schema version・保存タイマーを持たないこと、復元済み表示設定をWindow表示前に反映すること、3つの可視化を個別にON/OFFできること、波形非表示中は位置追従を止め再表示で現在位置へ復帰すること**を検証する |
 | `app.py` の配線（P6-C） | settings v1／v2／v3とui-state v1／v2の起動matrix、現在曲がWindow表示前に復元され**自動再生せず位置0のまま**であること、削除済みentry_idでも現在曲なしで起動し次の保存で取り除かれること、曲を選ぶとui-stateへ保存されること、**3ファイルの破損8通り**（健全なファイルだけ保存でき、破損ファイルのbytesが変わらず、再生・可視化が継続し、メッセージに生の例外もパスも出ないこと）、3カテゴリすべての保存失敗通知と抑制・復旧通知、保存失敗が再生と他ファイルを妨げないこと、終了処理が1カテゴリの**例外**で後続を飛ばさないこと、終了後にworkerとtimerが残らないこと、設定ダイアログを開いたままでも安全に終了できることを検証する |
-| `app.py` の配線（P7-A） | `QApplication`作成後・composition構築前の単一instance判定、secondaryがevent loopと`PlayerComposition`を作らず終了すること、転送失敗で二重起動しないこと、初回引数が復元済みplaylist末尾へ追加され自動再生しないこと、実行中の受信が同じWindow／PlaylistModelへ適用されること、引数なし・無視引数だけでも前面化すること、`activate_window=False`では追加だけを行うこと、最小化解除・最大化維持・前面化要求、IPC threadがshutdownの最初に解放されることを検証する。settings／playlist／ui-state schemaと`PlaybackBackend`の既存契約テスも変更しない |
+| `app.py` の配線（P7-A） | `QApplication`作成後・composition構築前の単一instance判定、secondaryがevent loopと`PlayerComposition`を作らず終了すること、転送失敗で二重起動しないこと、初回引数が復元済みplaylist末尾へ追加され**今回指定した先頭曲を自動再生**すること、実行中の受信も同じWindow／PlaylistModelへ追加して先頭曲を自動再生すること、引数なし・無視引数だけでも前面化すること、`activate_window=False`では再生するが前面化しないこと、最小化解除・最大化維持・前面化要求、IPC threadがshutdownの最初に解放されることを検証する。引数なしの通常起動と保存済みcurrent entryの復元だけでは自動再生せず、settings／playlist／ui-state schemaと`PlaybackBackend`の既存契約も変更しない |
 | `app.py` の配線（UI状態） | PlayerCompositionがUiStateSessionを保持しbuild時に監視しないこと、既定パスが`%LOCALAPPDATA%\sdp\ui-state.json`で設定ファイルと別であること、Window表示前にgeometryと前回フォルダーが復元されること、可視化の表示設定を適用したあとにSplitterが復元されること、復元だけではファイルを書き換えないこと、終了時flushで保存されること、破損時に既定位置で起動し元ファイルを上書きしないこと、ui-state／settings／playlistの障害と保存可否が互いに独立であること、3つのschemaが混ざらないこと、`run()`がstopより前にflushすること、UI層がui-stateのJSON I/Oを持たないことを検証する |
 | `app.py` の配線（設定） | AppSettingsControllerを保持しSettingsSessionと同じsnapshotを使うこと、保存済み表示設定をWindow表示前に反映すること、version 1設定から正常起動し起動だけでは書き換えないこと、初期読込で保存が走らないこと、設定ダイアログの変更がControllerと各Panelへ届くこと、終了時flushでversion 2として保存されること、設定保存失敗がプレイリスト保存と再生を妨げないこと、UI層が設定JSONを読み書きしないことを検証する |
 | `app.py` の配線 | Backend → Controller → PlaylistModel → 永続化サービス → MainWindow を組み立て、復元済みModelの前後曲可否をWindow構築時に反映できること。イベントループは起動しない。PcmTapを保持しBackendのQAudioBufferOutputへ接続されていること、SpectrumPanelが同じPcmTapを使うこと、**LevelMeterWidgetが1つでSpectrumPanel内にあり同じPcmTapを共有すること、mono／L／Rの3本が同じ固定容量であること、本番配線のPCM通知で3本が埋まること、MainWindowがLevelProcessorやリングバッファを持たないこと、UI層がQAudioBuffer系を参照しないこと**、SpectrumWidgetとWaveformWidgetが1つずつ共存すること、buildだけではタイマーを開始しないこと、source変更でPCMがclearされること、shutdownでタイマーとPCM受信が残らないこと、PlaybackBackend IF・FakeBackend・settings／playlist／波形cache schemaが不変であること |
@@ -479,7 +479,7 @@ RSSは60.9→65.5MBでt=30s以降横ばい、リングバッファ3本合計1,03
 - [x] リピートとシャッフルを変更して再起動すると復元される
 - [x] 設定ダイアログとPlayerControlsの表示が一致する（片方で変えても矛盾しない）
 - [ ] 曲を選んで終了すると、次回同じ曲が選ばれている
-- [x] **起動しただけでは音が鳴らない**（自動再生しない）
+- [x] **引数なしで起動しただけでは音が鳴らない**（保存済みの現在曲を自動再生しない）
 - [ ] 復元直後の再生位置が先頭（0:00）である
 - [ ] 復元直後に「前の曲」「次の曲」が期待どおり使える
 - [ ] 前回の曲を削除してから再起動しても落ちず、曲なしで起動する
@@ -782,7 +782,7 @@ per-machine版では上記installer smokeを再実行する。
 - [ ] 旧per-user版がある対話installで、旧install先と先行uninstallの案内が表示されること
 - [ ] 7形式それぞれで「プログラムから開く」にsdpが出ること
 - [ ] Windowsの設定から既定アプリとして選べること（installerが勝手に変えていないこと）
-- [ ] 関連付け経由のダブルクリックで既存instanceへ追加され、processが増え続けないこと
+- [ ] 関連付け経由のダブルクリックで既存instanceへ追加され、その曲が自動再生され、processが増え続けないこと
 - [ ] 日本語・空白を含むpath、長いpathの関連付け起動
 - [ ] 旧version→新versionのupgrade（同一versionのreinstallは自動確認済み）
 - [ ] upgrade後にsettings／playlist／ui-state／cacheが維持されること

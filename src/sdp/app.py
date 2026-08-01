@@ -190,7 +190,7 @@ def build_player(
 
     app_settings.settings_rollback_failed.connect(_report_rollback_failure)
 
-    launch_handler = LaunchRequestHandler(playlist_model, window)
+    launch_handler = LaunchRequestHandler(playlist_model, playlist_playback, window)
     composition = PlayerComposition(
         backend=backend,
         controller=controller,

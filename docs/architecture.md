@@ -1439,10 +1439,12 @@ Pathに変換できない引数だけを無視する。
 2. `QApplication`を作成し、`PlayerComposition`より先に単一instanceを判定する。
 3. secondaryは受理確認後にevent loopもcompositionも作らず終了する。
 4. primaryは設定と保存済みplaylistを復元し、初回起動引数をその末尾へ追加する。
-   追加だけで自動再生はしない。
+   pathがあれば今回追加した先頭entryを自動再生する。引数なしの通常起動と、保存済みの
+   current entry復元だけでは自動再生しない。
 5. primaryのIPC threadはlisten直後から要求をqueueへ受理し、composition構築中でもACKを返す。
 6. Window表示後に受信Signalを`LaunchRequestHandler`へ接続し、`start_delivery()`でqueueを1回だけ適用する。
-7. 転送要求は同じWindowとPlaylistModelの末尾へ追加する。`activate_window=True`ならpathの有無にかかわらず、
+7. 転送要求は同じWindowとPlaylistModelの末尾へ追加し、今回追加した先頭entryを自動再生する。
+   `activate_window=True`ならpathの有無にかかわらず、
    最小化flagだけを外し、`show()` / `raise_()` / `activateWindow()`を試みる。
    最大化flagは維持し、OS制約でactiveにできなければ`QApplication.alert()`を要求する。
 8. shutdownの最初にSignalを切断し、socket、server thread、endpoint、lockを解放する。
