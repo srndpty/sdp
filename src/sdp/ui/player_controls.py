@@ -6,7 +6,7 @@ PlaybackController の公開 API とシグナルだけを使う。
 
 from functools import lru_cache
 
-from PySide6.QtCore import QByteArray, QSignalBlocker, Qt, Signal
+from PySide6.QtCore import QByteArray, QSignalBlocker, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
@@ -49,12 +49,10 @@ _REPEAT_SVG = """
          M18 6c2 0 3 1 3 3v2M6 18c-2 0-3-1-3-3v-2"/>
 """
 
-_REPEAT_ONE_SVG = (
-    _REPEAT_SVG
-    + """
-<path d="M10.5 11.5 12 10v5m-1.5 0h3"/>
+_REPEAT_ONE_SVG = """
+<path d="M8 9.5 12 5v14m-4 0h8"/>
+<path d="M15 3h4v4M19 3c-1.4-1-3-1.5-4.5-1.5"/>
 """
-)
 
 _SHUFFLE_SVG = """
 <path d="M4 7h2.5c4.5 0 6.5 10 11 10H20m-3-3 3 3-3 3
@@ -137,12 +135,14 @@ class PlayerControls(QWidget):
         self._repeat_button.setToolTip(_REPEAT_TOOLTIPS[RepeatMode.OFF])
         self._repeat_button.setCheckable(True)
         self._repeat_button.setIcon(_repeat_icon(RepeatMode.OFF))
+        self._repeat_button.setIconSize(QSize(18, 18))
         self._shuffle_button = QPushButton()
         self._shuffle_button.setObjectName("shuffleButton")
         self._shuffle_button.setAccessibleName("シャッフル")
         self._shuffle_button.setCheckable(True)
         self._shuffle_button.setToolTip("シャッフル切替（S）")
         self._shuffle_button.setIcon(_svg_icon(_SHUFFLE_SVG))
+        self._shuffle_button.setIconSize(QSize(18, 18))
 
         self._previous_button = QPushButton()
         self._previous_button.setObjectName("previousTrackButton")

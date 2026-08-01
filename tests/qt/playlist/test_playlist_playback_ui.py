@@ -504,11 +504,13 @@ def test_repeat_and_shuffle_buttons_exist_with_initial_state(
     shuffle = control_button(controls, "shuffleButton")
     assert repeat.text() == ""
     assert not repeat.icon().isNull()
+    assert (repeat.iconSize().width(), repeat.iconSize().height()) == (18, 18)
     assert repeat.isCheckable()
     assert not repeat.isChecked()
     assert "オフ" in repeat.toolTip()
     assert shuffle.text() == ""
     assert not shuffle.icon().isNull()
+    assert (shuffle.iconSize().width(), shuffle.iconSize().height()) == (18, 18)
     assert not shuffle.isChecked()
     assert shuffle.isCheckable()
 
@@ -557,7 +559,7 @@ def test_repeat_mode_has_an_icon_and_text_alternative(
 
 
 def test_repeat_modes_use_icon_and_checked_state(controls: PlayerControls) -> None:
-    """OFF／ALLは背景状態で、ONEは中央の1を加えたSVGで区別する。"""
+    """OFF／ALLは背景状態で、ONEは大きな1を循環矢印で囲んで区別する。"""
     button = control_button(controls, "repeatModeButton")
     controls.set_repeat_mode(RepeatMode.OFF)
     base_icon_key = button.icon().cacheKey()
