@@ -4,8 +4,11 @@ PlaybackController の公開 API とシグナルだけを使う。
 再生実装（QMediaPlayer など）には触れない。
 """
 
-from PySide6.QtCore import QPointF, QRectF, QSignalBlocker, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+from functools import lru_cache
+
+from PySide6.QtCore import QByteArray, QSignalBlocker, Qt, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -41,6 +44,23 @@ _STATE_LABELS: dict[PlaybackState, str] = {
 _VOLUME_SLIDER_MAX = 100
 _ICON_SIZES = (16, 20, 24, 32)
 
+_REPEAT_SVG = """
+<path d="M5 6h13m-3-3 3 3-3 3M19 18H6m3-3-3 3 3 3
+         M18 6c2 0 3 1 3 3v2M6 18c-2 0-3-1-3-3v-2"/>
+"""
+
+_REPEAT_ONE_SVG = (
+    _REPEAT_SVG
+    + """
+<path d="M10.5 11.5 12 10v5m-1.5 0h3"/>
+"""
+)
+
+_SHUFFLE_SVG = """
+<path d="M4 7h2.5c4.5 0 6.5 10 11 10H20m-3-3 3 3-3 3
+         M4 17h2.5c1.7 0 2.9-1.4 4-3.2M14 7h6m-3-3 3 3-3 3"/>
+"""
+
 
 def _white_standard_icon(widget: QWidget, standard_pixmap: QStyle.StandardPixmap) -> QIcon:
     """Qt標準アイコンをダークテーマでも読める白色へ統一する。"""
@@ -56,91 +76,29 @@ def _white_standard_icon(widget: QWidget, standard_pixmap: QStyle.StandardPixmap
     return icon
 
 
-def _mode_icon(*, repeat_mode: RepeatMode | None = None, shuffle: bool = False) -> QIcon:
-    """フォントやemoji fallbackへ依存しない白色の操作アイコンを生成する。"""
+@lru_cache(maxsize=3)
+def _svg_icon(body: str) -> QIcon:
+    """自作SVGを複数DPIのpixmapへ描画し、配布assetなしでQIcon化する。"""
+    source = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
+        fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"
+        stroke-linejoin="round">{body}</svg>"""
+    renderer = QSvgRenderer(QByteArray(source.encode("utf-8")))
+    if not renderer.isValid():
+        raise RuntimeError("操作アイコンのSVGが不正です")
     icon = QIcon()
     for size in _ICON_SIZES:
         pixmap = QPixmap(size, size)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor(Qt.GlobalColor.white), max(1.2, size / 12.0)))
-        painter.setBrush(QColor(Qt.GlobalColor.white))
-        if shuffle:
-            _draw_shuffle_icon(painter, float(size))
-        else:
-            assert repeat_mode is not None
-            _draw_repeat_icon(painter, float(size), repeat_mode)
+        renderer.render(painter)
         painter.end()
         icon.addPixmap(pixmap)
     return icon
 
 
-def _draw_repeat_icon(painter: QPainter, size: float, mode: RepeatMode) -> None:
-    margin = size * 0.2
-    left = margin
-    right = size - margin
-    top = size * 0.32
-    bottom = size * 0.68
-    path = QPainterPath(QPointF(left, bottom))
-    path.cubicTo(left * 0.55, bottom, left * 0.55, top, left, top)
-    path.lineTo(right * 0.83, top)
-    painter.drawPath(path)
-    path = QPainterPath(QPointF(right, top))
-    path.cubicTo(size - left * 0.55, top, size - left * 0.55, bottom, right, bottom)
-    path.lineTo(left * 1.17, bottom)
-    painter.drawPath(path)
-    arrow = size * 0.12
-    painter.drawPolygon(
-        QPolygonF(
-            [
-                QPointF(right, top),
-                QPointF(right - arrow, top - arrow),
-                QPointF(right - arrow, top + arrow),
-            ]
-        )
-    )
-    painter.drawPolygon(
-        QPolygonF(
-            [
-                QPointF(left, bottom),
-                QPointF(left + arrow, bottom - arrow),
-                QPointF(left + arrow, bottom + arrow),
-            ]
-        )
-    )
-    if mode is RepeatMode.ONE:
-        font = painter.font()
-        font.setBold(True)
-        font.setPixelSize(max(7, round(size * 0.45)))
-        painter.setFont(font)
-        painter.drawText(QRectF(0.0, 0.0, size, size), Qt.AlignmentFlag.AlignCenter, "1")
-    elif mode is RepeatMode.OFF:
-        painter.drawLine(QPointF(size * 0.24, size * 0.24), QPointF(size * 0.76, size * 0.76))
-
-
-def _draw_shuffle_icon(painter: QPainter, size: float) -> None:
-    left = size * 0.2
-    right = size * 0.8
-    upper = size * 0.34
-    lower = size * 0.66
-    middle = size * 0.5
-    for start_y, end_y in ((upper, lower), (lower, upper)):
-        path = QPainterPath(QPointF(left, start_y))
-        path.cubicTo(size * 0.42, start_y, size * 0.56, end_y, right, end_y)
-        painter.drawPath(path)
-    arrow = size * 0.11
-    for y in (upper, lower):
-        painter.drawPolygon(
-            QPolygonF(
-                [
-                    QPointF(right, y),
-                    QPointF(right - arrow, y - arrow),
-                    QPointF(right - arrow, y + arrow),
-                ]
-            )
-        )
-    painter.drawLine(QPointF(left, middle), QPointF(left + size * 0.08, middle))
+def _repeat_icon(mode: RepeatMode) -> QIcon:
+    return _svg_icon(_REPEAT_ONE_SVG if mode is RepeatMode.ONE else _REPEAT_SVG)
 
 
 class PlayerControls(QWidget):
@@ -177,13 +135,14 @@ class PlayerControls(QWidget):
         self._repeat_button.setObjectName("repeatModeButton")
         self._repeat_button.setAccessibleName("リピート")
         self._repeat_button.setToolTip(_REPEAT_TOOLTIPS[RepeatMode.OFF])
-        self._repeat_button.setIcon(_mode_icon(repeat_mode=RepeatMode.OFF))
+        self._repeat_button.setCheckable(True)
+        self._repeat_button.setIcon(_repeat_icon(RepeatMode.OFF))
         self._shuffle_button = QPushButton()
         self._shuffle_button.setObjectName("shuffleButton")
         self._shuffle_button.setAccessibleName("シャッフル")
         self._shuffle_button.setCheckable(True)
         self._shuffle_button.setToolTip("シャッフル切替（S）")
-        self._shuffle_button.setIcon(_mode_icon(shuffle=True))
+        self._shuffle_button.setIcon(_svg_icon(_SHUFFLE_SVG))
 
         self._previous_button = QPushButton()
         self._previous_button.setObjectName("previousTrackButton")
@@ -316,9 +275,13 @@ class PlayerControls(QWidget):
         アイコンだけでなくツールチップとアクセシビリティ文でも区別する。
         未知の値は曖昧な表示へ丸めず ``KeyError``。
         """
-        self._repeat_button.setIcon(_mode_icon(repeat_mode=mode))
-        self._repeat_button.setToolTip(_REPEAT_TOOLTIPS[mode])
-        self._repeat_button.setAccessibleDescription(_REPEAT_TOOLTIPS[mode])
+        tooltip = _REPEAT_TOOLTIPS[mode]
+        icon = _repeat_icon(mode)
+        with QSignalBlocker(self._repeat_button):
+            self._repeat_button.setChecked(mode is not RepeatMode.OFF)
+        self._repeat_button.setIcon(icon)
+        self._repeat_button.setToolTip(tooltip)
+        self._repeat_button.setAccessibleDescription(tooltip)
 
     def set_shuffle_enabled(self, enabled: bool) -> None:
         """シャッフルボタンの状態を同期する。

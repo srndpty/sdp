@@ -504,6 +504,8 @@ def test_repeat_and_shuffle_buttons_exist_with_initial_state(
     shuffle = control_button(controls, "shuffleButton")
     assert repeat.text() == ""
     assert not repeat.icon().isNull()
+    assert repeat.isCheckable()
+    assert not repeat.isChecked()
     assert "オフ" in repeat.toolTip()
     assert shuffle.text() == ""
     assert not shuffle.icon().isNull()
@@ -554,14 +556,20 @@ def test_repeat_mode_has_an_icon_and_text_alternative(
     assert description in button.accessibleDescription()
 
 
-def test_repeat_modes_use_distinct_icons(controls: PlayerControls) -> None:
-    """オフ・全曲・1曲は異なる描画済みQIconを使う。"""
-    keys: list[int] = []
-    for mode in RepeatMode:
-        controls.set_repeat_mode(mode)
-        keys.append(control_button(controls, "repeatModeButton").icon().cacheKey())
+def test_repeat_modes_use_icon_and_checked_state(controls: PlayerControls) -> None:
+    """OFF／ALLは背景状態で、ONEは中央の1を加えたSVGで区別する。"""
+    button = control_button(controls, "repeatModeButton")
+    controls.set_repeat_mode(RepeatMode.OFF)
+    base_icon_key = button.icon().cacheKey()
+    assert not button.isChecked()
 
-    assert len(set(keys)) == len(RepeatMode)
+    controls.set_repeat_mode(RepeatMode.ALL)
+    assert button.icon().cacheKey() == base_icon_key
+    assert button.isChecked()
+
+    controls.set_repeat_mode(RepeatMode.ONE)
+    assert button.icon().cacheKey() != base_icon_key
+    assert button.isChecked()
 
 
 def test_unknown_repeat_mode_is_not_rounded(controls: PlayerControls) -> None:
@@ -607,11 +615,13 @@ def test_repeat_and_shuffle_requests_reach_the_controller(
     repeat_button = control_button(controls, "repeatModeButton")
     shuffle_button = control_button(controls, "shuffleButton")
 
-    icon_keys: list[int] = []
-    for _ in range(3):
-        repeat_button.click()
-        icon_keys.append(repeat_button.icon().cacheKey())
-    assert len(set(icon_keys)) == 3
+    repeat_button.click()
+    assert repeat_button.isChecked()
+    base_icon_key = repeat_button.icon().cacheKey()
+    repeat_button.click()
+    assert repeat_button.icon().cacheKey() != base_icon_key
+    repeat_button.click()
+    assert not repeat_button.isChecked()
 
     shuffle_button.click()
     assert shuffle_button.isChecked()
