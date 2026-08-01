@@ -530,8 +530,9 @@ def test_title_column_shows_metadata_after_loading(
 
     model.apply_metadata(
         entry_ids[0],
-        TrackMetadata(title="曲名", duration_ms=65_000, file_size_bytes=1024, bitrate_bps=192_000),
+        TrackMetadata(title="曲名", duration_ms=65_000, bitrate_bps=192_000),
     )
+    model.apply_file_size(entry_ids[0], 1024)
 
     assert model.data(title_index, Qt.ItemDataRole.DisplayRole) == "曲名"
     assert model.data(model.index(0, Column.FILE_SIZE), Qt.ItemDataRole.DisplayRole) == "1.0 KiB"

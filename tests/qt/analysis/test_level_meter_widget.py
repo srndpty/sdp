@@ -5,7 +5,7 @@ pixel完全一致は求めず、描画可能性・要素数・状態を中心に
 
 import pytest
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QPalette
+from PySide6.QtGui import QFont, QFontMetricsF, QPalette
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QLabel, QSizePolicy, QWidget
 from pytestqt.qtbot import QtBot
@@ -57,10 +57,22 @@ def test_object_name_and_accessibility(widget: LevelMeterWidget) -> None:
 
 
 def test_minimum_height_and_size_policy(widget: LevelMeterWidget) -> None:
-    """プレイリストを圧迫しない低い固定高で、横だけ伸縮する。"""
-    assert widget.minimumHeight() == 39
+    """現在フォントの目盛文字と2本のバーが収まる固定高にする。"""
+    assert widget.minimumHeight() > QFontMetricsF(widget.font()).height()
     assert widget.sizePolicy().horizontalPolicy() is QSizePolicy.Policy.Expanding
     assert widget.sizePolicy().verticalPolicy() is QSizePolicy.Policy.Fixed
+
+
+def test_minimum_height_tracks_a_larger_font(widget: LevelMeterWidget) -> None:
+    """高DPI相当の大きなフォントでも目盛領域を固定値で切らない。"""
+    before = widget.minimumHeight()
+    font = QFont(widget.font())
+    font.setPointSizeF(max(18.0, font.pointSizeF() * 2.0))
+
+    widget.setFont(font)
+
+    assert widget.minimumHeight() > before
+    assert widget.minimumHeight() > QFontMetricsF(font).height()
 
 
 def test_widget_has_no_focus_and_no_mouse_handling(widget: LevelMeterWidget) -> None:

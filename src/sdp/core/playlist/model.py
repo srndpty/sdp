@@ -199,7 +199,7 @@ class PlaylistModel(QAbstractTableModel):
         if role == DURATION_MS_ROLE:
             return None if entry.metadata is None else entry.metadata.duration_ms
         if role == FILE_SIZE_BYTES_ROLE:
-            return None if entry.metadata is None else entry.metadata.file_size_bytes
+            return entry.file_size_bytes
         if role == BITRATE_BPS_ROLE:
             return None if entry.metadata is None else entry.metadata.bitrate_bps
         if role == METADATA_STATUS_ROLE:
@@ -218,15 +218,11 @@ class PlaylistModel(QAbstractTableModel):
             return entry.display_title
         if column == Column.PATH:
             return str(entry.path)
+        if column == Column.FILE_SIZE:
+            return "" if entry.file_size_bytes is None else format_file_size(entry.file_size_bytes)
         metadata = entry.metadata
         if metadata is None:
             return "" if column in _METADATA_COLUMNS else None
-        if column == Column.FILE_SIZE:
-            return (
-                ""
-                if metadata.file_size_bytes is None
-                else format_file_size(metadata.file_size_bytes)
-            )
         if column == Column.BITRATE:
             return "" if metadata.bitrate_bps is None else format_bitrate(metadata.bitrate_bps)
         if column == Column.DURATION:
@@ -532,6 +528,14 @@ class PlaylistModel(QAbstractTableModel):
         """読み取れたメタデータを反映する。"""
         return self._replace_entry(entry_id, lambda entry: entry.with_metadata(metadata))
 
+    def apply_file_size(self, entry_id: str, file_size_bytes: int | None) -> bool:
+        """背景で取得したファイルサイズだけを反映する。"""
+        return self._replace_entry(
+            entry_id,
+            lambda entry: entry.with_file_size(file_size_bytes),
+            roles=[FILE_SIZE_BYTES_ROLE, int(Qt.ItemDataRole.DisplayRole)],
+        )
+
     def mark_metadata_failed(self, entry_id: str) -> bool:
         """読み取り失敗にする。表示はファイル名フォールバックへ戻る。"""
         return self._replace_entry(entry_id, lambda entry: entry.with_metadata_failed())
@@ -556,7 +560,7 @@ class PlaylistModel(QAbstractTableModel):
             return False
         entry = self._entries[row]
         updated = transform(entry)
-        if updated.metadata == entry.metadata and updated.metadata_status is entry.metadata_status:
+        if updated == entry:
             return False
         self._entries[row] = updated
         changed_roles = (

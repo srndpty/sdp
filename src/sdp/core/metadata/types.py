@@ -41,8 +41,18 @@ class TrackMetadata:
     artist: str | None = None
     album: str | None = None
     duration_ms: int | None = None
-    file_size_bytes: int | None = None
     bitrate_bps: int | None = None
+
+    def __post_init__(self) -> None:
+        """不正な数値を「0」として表示せず、生成元の不具合として拒否する。"""
+        if self.duration_ms is not None and (
+            isinstance(self.duration_ms, bool) or self.duration_ms < 0
+        ):
+            raise ValueError("duration_msは0以上の整数またはNoneにしてください")
+        if self.bitrate_bps is not None and (
+            isinstance(self.bitrate_bps, bool) or self.bitrate_bps <= 0
+        ):
+            raise ValueError("bitrate_bpsは正の整数またはNoneにしてください")
 
 
 def format_duration_ms(milliseconds: int) -> str:
@@ -63,7 +73,9 @@ def format_duration_ms(milliseconds: int) -> str:
 
 def format_file_size(size_bytes: int) -> str:
     """バイト数を読みやすい2進単位へ整形する。"""
-    size = max(size_bytes, 0)
+    if isinstance(size_bytes, bool) or size_bytes < 0:
+        raise ValueError("size_bytesは0以上の整数にしてください")
+    size = size_bytes
     units = ("B", "KiB", "MiB", "GiB", "TiB")
     value = float(size)
     for unit in units[:-1]:
@@ -75,4 +87,6 @@ def format_file_size(size_bytes: int) -> str:
 
 def format_bitrate(bitrate_bps: int) -> str:
     """bit/sを一般的なkbps表記へ整形する。"""
-    return f"{max(bitrate_bps, 0) / 1000:.0f} kbps"
+    if isinstance(bitrate_bps, bool) or bitrate_bps <= 0:
+        raise ValueError("bitrate_bpsは正の整数にしてください")
+    return f"{bitrate_bps / 1000:.0f} kbps"

@@ -14,6 +14,7 @@ from pathlib import Path
 
 import mutagen
 import pytest
+from mutagen.id3 import ID3, TIT2, Encoding
 
 from sdp.core.metadata.reader import (
     ARTIST_SEPARATOR,
@@ -70,7 +71,6 @@ def test_track_metadata_defaults_are_none() -> None:
         metadata.artist,
         metadata.album,
         metadata.duration_ms,
-        metadata.file_size_bytes,
         metadata.bitrate_bps,
     ) == (
         None,
@@ -78,8 +78,23 @@ def test_track_metadata_defaults_are_none() -> None:
         None,
         None,
         None,
-        None,
     )
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"duration_ms": -1},
+        {"duration_ms": True},
+        {"bitrate_bps": 0},
+        {"bitrate_bps": -1},
+        {"bitrate_bps": True},
+    ],
+)
+def test_track_metadata_rejects_invalid_numbers(arguments: dict[str, object]) -> None:
+    """不正な数値を正常な0として保持しない。"""
+    with pytest.raises(ValueError):
+        TrackMetadata(**arguments)  # type: ignore[arg-type]
 
 
 def test_metadata_status_values() -> None:
@@ -113,6 +128,20 @@ def test_format_file_size(size_bytes: int, expected: str) -> None:
 def test_format_bitrate_uses_kbps() -> None:
     """ビットレートは一般的なkbps表記へ変換する。"""
     assert format_bitrate(192_000) == "192 kbps"
+
+
+@pytest.mark.parametrize("value", [-1, True])
+def test_format_file_size_rejects_invalid_values(value: int) -> None:
+    """負値とboolを0 Bへ丸めない。"""
+    with pytest.raises(ValueError):
+        format_file_size(value)
+
+
+@pytest.mark.parametrize("value", [-1, 0, True])
+def test_format_bitrate_rejects_invalid_values(value: int) -> None:
+    """正でない値を0 kbpsへ丸めない。"""
+    with pytest.raises(ValueError):
+        format_bitrate(value)
 
 
 # -- タグの読み取り ---------------------------------------------------------
@@ -155,10 +184,41 @@ def test_reads_japanese_and_spaced_tags(test_audio_dir: Path, tmp_path: Path) ->
 
 
 def test_repairs_cp932_bytes_misdeclared_as_latin1() -> None:
-    """Latin-1指定されたCP932の日本語だけを元へ戻す。"""
+    """Latin-1宣言を確認したCP932の日本語だけを元へ戻す。"""
     mojibake = "日本語タイトル".encode("cp932").decode("latin-1")
-    assert _repair_mojibake(mojibake) == "日本語タイトル"
-    assert _repair_mojibake("Beyoncé") == "Beyoncé"
+    assert _repair_mojibake(mojibake, declared_latin1=True) == "日本語タイトル"
+    assert _repair_mojibake(mojibake, declared_latin1=False) == mojibake
+
+
+def test_read_repairs_only_latin1_declared_id3_frame(test_audio_dir: Path, tmp_path: Path) -> None:
+    """MP3の生ID3 frameからLatin-1宣言を確認してCP932を補正する。"""
+    path = copy_source(test_audio_dir, tmp_path, "sine440.mp3")
+    mojibake = "日本語タイトル".encode("cp932").decode("latin-1")
+    tags = ID3(path)
+    tags.delall("TIT2")
+    tags.add(TIT2(encoding=Encoding.LATIN1, text=[mojibake]))
+    tags.save(path)
+
+    assert read_track_metadata(path).title == "日本語タイトル"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Beyoncé",
+        "François",
+        "Björk",
+        "Sigur Rós",
+        "Mötley Crüe",
+        "© 1999",
+        "ÀÁÂÃÄÅ",
+        "smart ‘quote’",
+        "control\x85character",
+    ],
+)
+def test_cp932_repair_keeps_normal_western_text(value: str) -> None:
+    """Latin-1宣言でも日本語として確証のない欧文・記号列を変更しない。"""
+    assert _repair_mojibake(value, declared_latin1=True) == value
 
 
 def test_joins_multiple_artists(test_audio_dir: Path, tmp_path: Path) -> None:
@@ -231,7 +291,6 @@ def test_duration_is_converted_to_milliseconds(test_audio_dir: Path, tmp_path: P
 
     assert metadata.duration_ms is not None
     assert metadata.duration_ms > 0
-    assert metadata.file_size_bytes == path.stat().st_size
     assert metadata.bitrate_bps is not None
     assert metadata.bitrate_bps > 0
 

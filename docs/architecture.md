@@ -993,21 +993,24 @@ Mutagen による非同期メタデータ取得と表示（P2-D）。
 ### 8.2 メタデータ（P2-D）
 
 - **`TrackMetadata`**（`core/metadata/types.py`。Qt 非依存の不変 dataclass）:
-  `title` / `artist` / `album` / `duration_ms` / `file_size_bytes` /
-  `bitrate_bps`（いずれも省略可）。
+  `title` / `artist` / `album` / `duration_ms` / `bitrate_bps`（いずれも省略可）。
+  durationは0以上、bitrateは正の値だけを受理し、不正値を0表示へ丸めない。
   entry_id・path・読み込み状態・エラー文字列・UI の表現は持たない。
   Mutagen のオブジェクトはワーカースレッドの外へ出さない。
 - **`MetadataStatus`**: `NOT_REQUESTED` →（要求）→ `LOADING` →
   `LOADED` または `FAILED`。ファイルの欠損は `FileStatus` が表すので
   ここへ `MISSING` は入れない。**タグが 1 件も無くても `LOADED`**（失敗ではない）。
   欠損になったら値を捨てて `NOT_REQUESTED` へ戻し、復活したら読み直せるようにする。
-- **`PlaylistEntry`**: `metadata`（不変値）と `metadata_status` を持つだけで、
-  読み取りはしない。`LOADED` のときだけ値を持ち、それ以外は `None`。
+- **`PlaylistEntry`**: `metadata`（不変値）、`metadata_status`、メタデータ解析と独立した
+  `file_size_bytes`を持つが、読み取りはしない。`metadata`は`LOADED`のときだけ値を持ち、
+  それ以外は`None`。ファイルサイズはワーカーの`stat()`が成功すれば解析失敗時も保持する。
   メタデータ更新で entry_id・path・file_status は変えず、内部限定のcloneは
   `__post_init__`を通さないためGUIスレッドでファイル状態を再調査しない。
 - **タグの正規化**: easy tags の複数値に備え、title / album は最初の非空値、
   artist は非空値を順序どおり `/` で結合（1 件なら区切りなし）。前後の空白は除去し、
-  空だけなら `None`。文字列でない値は無理に文字列化せず無視する。
+  空だけなら `None`。文字列でない値は無理に文字列化せず無視する。CP932補正は
+  **MP3の生ID3 text frameがLatin-1を宣言している場合だけ**検討し、round-trip成立と
+  日本語比率を確認する。FLAC等のUnicodeタグや来歴を失ったeasy tagsは補正しない。
 - **長さ**: `info.length`（秒）を `round(seconds * 1000)` でミリ秒へ。
   取得できない・NaN・inf・負値は `None`（0:00 と偽らない）。
   長さが取れないだけでタグは捨てない。**再生中の `PlaybackController.duration_ms`

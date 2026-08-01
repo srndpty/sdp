@@ -73,6 +73,7 @@ class PlaylistEntry:
     entry_id: str
     path: Path
     file_status: FileStatus = FileStatus.UNKNOWN
+    file_size_bytes: int | None = field(init=False, default=None)
     metadata: TrackMetadata | None = field(init=False, default=None)
     metadata_status: MetadataStatus = field(init=False, default=MetadataStatus.NOT_REQUESTED)
 
@@ -129,6 +130,11 @@ class PlaylistEntry:
         object.__setattr__(clone, "entry_id", self.entry_id)
         object.__setattr__(clone, "path", self.path)
         object.__setattr__(clone, "file_status", status)
+        object.__setattr__(
+            clone,
+            "file_size_bytes",
+            self.file_size_bytes if keeps_metadata else None,
+        )
         object.__setattr__(clone, "metadata", self.metadata if keeps_metadata else None)
         object.__setattr__(
             clone,
@@ -151,6 +157,18 @@ class PlaylistEntry:
         """読み取りに失敗した。値は持たず、表示はファイル名へフォールバックする。"""
         return self._with_metadata(None, MetadataStatus.FAILED)
 
+    def with_file_size(self, file_size_bytes: int | None) -> "PlaylistEntry":
+        """背景ワーカーで取得したサイズを、メタデータ解析結果と独立して保持する。"""
+        if file_size_bytes is not None and (
+            isinstance(file_size_bytes, bool) or file_size_bytes < 0
+        ):
+            raise ValueError("file_size_bytesは0以上の整数またはNoneにしてください")
+        if file_size_bytes == self.file_size_bytes:
+            return self
+        clone = self._clone()
+        object.__setattr__(clone, "file_size_bytes", file_size_bytes)
+        return clone
+
     def without_metadata(self) -> "PlaylistEntry":
         """メタデータを捨てて未要求へ戻す（再読み取り可能にする）。"""
         return self._with_metadata(None, MetadataStatus.NOT_REQUESTED)
@@ -159,12 +177,20 @@ class PlaylistEntry:
         self, metadata: TrackMetadata | None, status: MetadataStatus
     ) -> "PlaylistEntry":
         """entry_id・path・file_status を変えずに複製する（I/Oはしない）。"""
+        clone = self._clone()
+        object.__setattr__(clone, "metadata", metadata)
+        object.__setattr__(clone, "metadata_status", status)
+        return clone
+
+    def _clone(self) -> "PlaylistEntry":
+        """全フィールドを保った複製を作る（I/Oはしない）。"""
         clone = object.__new__(PlaylistEntry)
         object.__setattr__(clone, "entry_id", self.entry_id)
         object.__setattr__(clone, "path", self.path)
         object.__setattr__(clone, "file_status", self.file_status)
-        object.__setattr__(clone, "metadata", metadata)
-        object.__setattr__(clone, "metadata_status", status)
+        object.__setattr__(clone, "file_size_bytes", self.file_size_bytes)
+        object.__setattr__(clone, "metadata", self.metadata)
+        object.__setattr__(clone, "metadata_status", self.metadata_status)
         return clone
 
 

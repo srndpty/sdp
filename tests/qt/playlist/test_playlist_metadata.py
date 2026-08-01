@@ -29,7 +29,6 @@ SAMPLE = TrackMetadata(
     artist="奏者",
     album="盤",
     duration_ms=65_000,
-    file_size_bytes=1_572_864,
     bitrate_bps=320_000,
 )
 
@@ -121,6 +120,7 @@ def test_loaded_metadata_is_displayed(model: PlaylistModel, audio_files: list[Pa
     """取得できたら各列へ反映する。"""
     entry_ids = model.add_paths(audio_files)
     model.mark_metadata_loading(entry_ids[0])
+    model.apply_file_size(entry_ids[0], 1_572_864)
 
     assert model.apply_metadata(entry_ids[0], SAMPLE) is True
 
@@ -132,17 +132,20 @@ def test_loaded_metadata_is_displayed(model: PlaylistModel, audio_files: list[Pa
     assert display(model, 0, Column.DURATION) == "1:05"
 
 
-def test_failed_metadata_falls_back(model: PlaylistModel, audio_files: list[Path]) -> None:
-    """失敗してもファイル名を表示し、行は残る。"""
+def test_failed_metadata_keeps_independently_loaded_file_size(
+    model: PlaylistModel, audio_files: list[Path]
+) -> None:
+    """タグ解析に失敗しても、独立して取得したサイズを表示して行を残す。"""
     entry_ids = model.add_paths(audio_files)
     model.mark_metadata_loading(entry_ids[0])
+    model.apply_file_size(entry_ids[0], audio_files[0].stat().st_size)
 
     assert model.mark_metadata_failed(entry_ids[0]) is True
 
     assert model.entry_at(0).metadata_status is MetadataStatus.FAILED
     assert model.entry_at(0).metadata is None
     assert display(model, 0, Column.TITLE) == audio_files[0].name
-    assert display(model, 0, Column.FILE_SIZE) == ""
+    assert display(model, 0, Column.FILE_SIZE) == "1 B"
     assert model.rowCount() == len(audio_files)
 
 
@@ -163,12 +166,14 @@ def test_clear_metadata_returns_to_not_requested(
 ) -> None:
     """解除すると未要求へ戻り、再読み取りできる。"""
     entry_ids = model.add_paths(audio_files)
+    model.apply_file_size(entry_ids[0], 1_572_864)
     model.apply_metadata(entry_ids[0], SAMPLE)
 
     assert model.clear_metadata(entry_ids[0]) is True
 
     assert model.entry_at(0).metadata_status is MetadataStatus.NOT_REQUESTED
     assert model.entry_at(0).metadata is None
+    assert model.entry_at(0).file_size_bytes == 1_572_864
 
 
 def test_metadata_invariants(model: PlaylistModel, audio_files: list[Path]) -> None:
@@ -227,6 +232,7 @@ def test_metadata_roles_return_semantic_values(
 ) -> None:
     """role は表示文字列ではなく意味上の値を返す。"""
     entry_ids = model.add_paths(audio_files)
+    model.apply_file_size(entry_ids[0], 1_572_864)
     model.apply_metadata(entry_ids[0], SAMPLE)
     index = model.index(0, Column.TITLE)
 

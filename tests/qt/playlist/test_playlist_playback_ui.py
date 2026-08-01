@@ -499,12 +499,16 @@ def test_main_window_has_no_track_search_logic(
 def test_repeat_and_shuffle_buttons_exist_with_initial_state(
     controls: PlayerControls,
 ) -> None:
-    """リピートはオフのアイコン、シャッフルは未チェックで始まる。"""
+    """リピートとシャッフルはフォント非依存アイコンで始まる。"""
     repeat = control_button(controls, "repeatModeButton")
-    assert repeat.text() == "↻"
+    shuffle = control_button(controls, "shuffleButton")
+    assert repeat.text() == ""
+    assert not repeat.icon().isNull()
     assert "オフ" in repeat.toolTip()
-    assert not control_button(controls, "shuffleButton").isChecked()
-    assert control_button(controls, "shuffleButton").isCheckable()
+    assert shuffle.text() == ""
+    assert not shuffle.icon().isNull()
+    assert not shuffle.isChecked()
+    assert shuffle.isCheckable()
 
 
 def test_repeat_button_emits_a_request_once(controls: PlayerControls) -> None:
@@ -515,7 +519,7 @@ def test_repeat_button_emits_a_request_once(controls: PlayerControls) -> None:
     control_button(controls, "repeatModeButton").click()
 
     assert requests == [1]
-    assert control_button(controls, "repeatModeButton").text() == "↻"
+    assert not control_button(controls, "repeatModeButton").icon().isNull()
 
 
 def test_shuffle_button_emits_a_bool_once(controls: PlayerControls) -> None:
@@ -530,23 +534,34 @@ def test_shuffle_button_emits_a_bool_once(controls: PlayerControls) -> None:
 
 
 @pytest.mark.parametrize(
-    ("mode", "icon", "description"),
+    ("mode", "description"),
     [
-        (RepeatMode.OFF, "↻", "オフ"),
-        (RepeatMode.ALL, "🔁", "全曲"),
-        (RepeatMode.ONE, "🔂", "1曲"),
+        (RepeatMode.OFF, "オフ"),
+        (RepeatMode.ALL, "全曲"),
+        (RepeatMode.ONE, "1曲"),
     ],
 )
 def test_repeat_mode_has_an_icon_and_text_alternative(
-    controls: PlayerControls, mode: RepeatMode, icon: str, description: str
+    controls: PlayerControls, mode: RepeatMode, description: str
 ) -> None:
     """モードはアイコンに加えてツールチップとアクセシビリティ文でも区別できる。"""
     controls.set_repeat_mode(mode)
 
     button = control_button(controls, "repeatModeButton")
-    assert button.text() == icon
+    assert button.text() == ""
+    assert not button.icon().isNull()
     assert description in button.toolTip()
     assert description in button.accessibleDescription()
+
+
+def test_repeat_modes_use_distinct_icons(controls: PlayerControls) -> None:
+    """オフ・全曲・1曲は異なる描画済みQIconを使う。"""
+    keys: list[int] = []
+    for mode in RepeatMode:
+        controls.set_repeat_mode(mode)
+        keys.append(control_button(controls, "repeatModeButton").icon().cacheKey())
+
+    assert len(set(keys)) == len(RepeatMode)
 
 
 def test_unknown_repeat_mode_is_not_rounded(controls: PlayerControls) -> None:
@@ -577,7 +592,7 @@ def test_playback_state_changes_do_not_break_repeat_and_shuffle(
 
     control_button(controls, "playButton").click()
 
-    assert control_button(controls, "repeatModeButton").text() == "🔂"
+    assert not control_button(controls, "repeatModeButton").icon().isNull()
     assert control_button(controls, "shuffleButton").isChecked()
 
 
@@ -592,12 +607,11 @@ def test_repeat_and_shuffle_requests_reach_the_controller(
     repeat_button = control_button(controls, "repeatModeButton")
     shuffle_button = control_button(controls, "shuffleButton")
 
-    repeat_button.click()
-    assert repeat_button.text() == "🔁"
-    repeat_button.click()
-    assert repeat_button.text() == "🔂"
-    repeat_button.click()
-    assert repeat_button.text() == "↻"
+    icon_keys: list[int] = []
+    for _ in range(3):
+        repeat_button.click()
+        icon_keys.append(repeat_button.icon().cacheKey())
+    assert len(set(icon_keys)) == 3
 
     shuffle_button.click()
     assert shuffle_button.isChecked()
@@ -628,7 +642,7 @@ def test_initial_repeat_and_shuffle_state_is_applied_on_wiring(
 
     controls = window.findChild(PlayerControls)
     assert controls is not None
-    assert control_button(controls, "repeatModeButton").text() == "🔁"
+    assert "全曲" in control_button(controls, "repeatModeButton").toolTip()
     assert control_button(controls, "shuffleButton").isChecked()
     waveform_analysis.shutdown()
 

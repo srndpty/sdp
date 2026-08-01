@@ -4,8 +4,8 @@ PlaybackController の公開 API とシグナルだけを使う。
 再生実装（QMediaPlayer など）には触れない。
 """
 
-from PySide6.QtCore import QSignalBlocker, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter
+from PySide6.QtCore import QPointF, QRectF, QSignalBlocker, Qt, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -31,12 +31,6 @@ _REPEAT_TOOLTIPS: dict[RepeatMode, str] = {
     RepeatMode.ONE: "リピート: 1曲（クリックでオフ）",
 }
 
-_REPEAT_ICONS: dict[RepeatMode, str] = {
-    RepeatMode.OFF: "↻",
-    RepeatMode.ALL: "🔁",
-    RepeatMode.ONE: "🔂",
-}
-
 _STATE_LABELS: dict[PlaybackState, str] = {
     PlaybackState.NO_MEDIA: "ファイルが選択されていません",
     PlaybackState.STOPPED: "停止",
@@ -60,6 +54,93 @@ def _white_standard_icon(widget: QWidget, standard_pixmap: QStyle.StandardPixmap
         painter.end()
         icon.addPixmap(pixmap)
     return icon
+
+
+def _mode_icon(*, repeat_mode: RepeatMode | None = None, shuffle: bool = False) -> QIcon:
+    """フォントやemoji fallbackへ依存しない白色の操作アイコンを生成する。"""
+    icon = QIcon()
+    for size in _ICON_SIZES:
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(Qt.GlobalColor.white), max(1.2, size / 12.0)))
+        painter.setBrush(QColor(Qt.GlobalColor.white))
+        if shuffle:
+            _draw_shuffle_icon(painter, float(size))
+        else:
+            assert repeat_mode is not None
+            _draw_repeat_icon(painter, float(size), repeat_mode)
+        painter.end()
+        icon.addPixmap(pixmap)
+    return icon
+
+
+def _draw_repeat_icon(painter: QPainter, size: float, mode: RepeatMode) -> None:
+    margin = size * 0.2
+    left = margin
+    right = size - margin
+    top = size * 0.32
+    bottom = size * 0.68
+    path = QPainterPath(QPointF(left, bottom))
+    path.cubicTo(left * 0.55, bottom, left * 0.55, top, left, top)
+    path.lineTo(right * 0.83, top)
+    painter.drawPath(path)
+    path = QPainterPath(QPointF(right, top))
+    path.cubicTo(size - left * 0.55, top, size - left * 0.55, bottom, right, bottom)
+    path.lineTo(left * 1.17, bottom)
+    painter.drawPath(path)
+    arrow = size * 0.12
+    painter.drawPolygon(
+        QPolygonF(
+            [
+                QPointF(right, top),
+                QPointF(right - arrow, top - arrow),
+                QPointF(right - arrow, top + arrow),
+            ]
+        )
+    )
+    painter.drawPolygon(
+        QPolygonF(
+            [
+                QPointF(left, bottom),
+                QPointF(left + arrow, bottom - arrow),
+                QPointF(left + arrow, bottom + arrow),
+            ]
+        )
+    )
+    if mode is RepeatMode.ONE:
+        font = painter.font()
+        font.setBold(True)
+        font.setPixelSize(max(7, round(size * 0.45)))
+        painter.setFont(font)
+        painter.drawText(QRectF(0.0, 0.0, size, size), Qt.AlignmentFlag.AlignCenter, "1")
+    elif mode is RepeatMode.OFF:
+        painter.drawLine(QPointF(size * 0.24, size * 0.24), QPointF(size * 0.76, size * 0.76))
+
+
+def _draw_shuffle_icon(painter: QPainter, size: float) -> None:
+    left = size * 0.2
+    right = size * 0.8
+    upper = size * 0.34
+    lower = size * 0.66
+    middle = size * 0.5
+    for start_y, end_y in ((upper, lower), (lower, upper)):
+        path = QPainterPath(QPointF(left, start_y))
+        path.cubicTo(size * 0.42, start_y, size * 0.56, end_y, right, end_y)
+        painter.drawPath(path)
+    arrow = size * 0.11
+    for y in (upper, lower):
+        painter.drawPolygon(
+            QPolygonF(
+                [
+                    QPointF(right, y),
+                    QPointF(right - arrow, y - arrow),
+                    QPointF(right - arrow, y + arrow),
+                ]
+            )
+        )
+    painter.drawLine(QPointF(left, middle), QPointF(left + size * 0.08, middle))
 
 
 class PlayerControls(QWidget):
@@ -92,15 +173,17 @@ class PlayerControls(QWidget):
         # つまみを動かさない（操作が奪われるため）。
         self._is_seeking = False
 
-        self._repeat_button = QPushButton("↻")
+        self._repeat_button = QPushButton()
         self._repeat_button.setObjectName("repeatModeButton")
         self._repeat_button.setAccessibleName("リピート")
         self._repeat_button.setToolTip(_REPEAT_TOOLTIPS[RepeatMode.OFF])
-        self._shuffle_button = QPushButton("⇄")
+        self._repeat_button.setIcon(_mode_icon(repeat_mode=RepeatMode.OFF))
+        self._shuffle_button = QPushButton()
         self._shuffle_button.setObjectName("shuffleButton")
         self._shuffle_button.setAccessibleName("シャッフル")
         self._shuffle_button.setCheckable(True)
         self._shuffle_button.setToolTip("シャッフル切替（S）")
+        self._shuffle_button.setIcon(_mode_icon(shuffle=True))
 
         self._previous_button = QPushButton()
         self._previous_button.setObjectName("previousTrackButton")
@@ -233,7 +316,7 @@ class PlayerControls(QWidget):
         アイコンだけでなくツールチップとアクセシビリティ文でも区別する。
         未知の値は曖昧な表示へ丸めず ``KeyError``。
         """
-        self._repeat_button.setText(_REPEAT_ICONS[mode])
+        self._repeat_button.setIcon(_mode_icon(repeat_mode=mode))
         self._repeat_button.setToolTip(_REPEAT_TOOLTIPS[mode])
         self._repeat_button.setAccessibleDescription(_REPEAT_TOOLTIPS[mode])
 
