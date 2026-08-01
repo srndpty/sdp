@@ -1,6 +1,7 @@
 # pyright: reportMissingTypeStubs=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false
 """build済みWindows配布版をUI Automationで操作するsmoke test。"""
 
+import json
 import os
 import subprocess
 import sys
@@ -38,6 +39,7 @@ class PackagedSession:
     environment: dict[str, str]
     work_directory: Path
     app_data_directory: Path
+    sources: tuple[Path, ...]
 
 
 def _wait_until(predicate: Callable[[], bool], message: str) -> None:
@@ -202,6 +204,7 @@ def packaged_window(tmp_path: Path, test_audio_dir: Path) -> Iterator[PackagedSe
             environment=environment,
             work_directory=tmp_path,
             app_data_directory=local_app_data_directory / "sdp",
+            sources=tuple(sources),
         )
     finally:
         _cleanup_process(process, window)
@@ -299,21 +302,55 @@ def test_packaged_gui_accepts_paths_and_exposes_core_controls(
 
 
 def test_packaged_gui_applies_and_restores_settings(packaged_window: PackagedSession) -> None:
-    """Applyはdialogを閉じずに保存され、同じprofileでの再起動後も復元される。"""
+    """再生・表示設定一式がApplyされ、同じprofileでの再起動後も復元される。"""
     session = packaged_window
     settings_file = session.app_data_directory / "settings.json"
+
+    repeat = _find_descendant(session.window, title="リピート", control_type="Button")
+    repeat.click_input()
+    shuffle = _find_descendant(session.window, title="シャッフル", control_type="CheckBox")
+    shuffle.click_input()
+    assert shuffle.get_toggle_state() == 1
+    mute = _find_descendant(session.window, title="ミュート", control_type="CheckBox")
+    mute.click_input()
+    assert mute.get_toggle_state() == 1
+
     dialog = _open_settings(session)
     rate = _find_descendant(dialog, title="1.00×", control_type="Spinner")
     rate.click_input()
     rate.type_keys("^a1.25")
+    volume = _find_descendant(dialog, title="100％", control_type="Spinner")
+    volume.click_input()
+    volume.type_keys("^a35")
+
+    pitch = _find_descendant(dialog, title="ピッチ補正", control_type="CheckBox")
+    expected_pitch = pitch.get_toggle_state() == 0
+    pitch.click_input()
+    for title in ("波形を表示", "スペクトラムを表示", "レベルメーターを表示"):
+        check_box = _find_descendant(dialog, title=title, control_type="CheckBox")
+        assert check_box.get_toggle_state() == 1
+        check_box.click_input()
     _find_descendant(dialog, title="適用", control_type="Button").click_input()
 
     assert dialog.is_visible()
     _wait_until(settings_file.is_file, "Apply後にsettings.jsonが保存されません")
-    _wait_until(
-        lambda: '"playback_rate": 1.25' in settings_file.read_text(encoding="utf-8"),
-        "適用した再生速度がsettings.jsonへ保存されません",
-    )
+    expected_settings = {
+        "playback_rate": 1.25,
+        "pitch_compensation": expected_pitch,
+        "waveform_visible": False,
+        "spectrum_visible": False,
+        "level_meter_visible": False,
+        "volume": 0.35,
+        "muted": True,
+        "repeat_mode": "all",
+        "shuffle_enabled": True,
+    }
+
+    def settings_are_saved() -> bool:
+        document = json.loads(settings_file.read_text(encoding="utf-8"))
+        return all(document.get(key) == value for key, value in expected_settings.items())
+
+    _wait_until(settings_are_saved, "適用した設定一式がsettings.jsonへ保存されません")
     _find_descendant(dialog, title="キャンセル", control_type="Button").click_input()
 
     session.window.close()
@@ -335,13 +372,89 @@ def test_packaged_gui_applies_and_restores_settings(packaged_window: PackagedSes
             environment=session.environment,
             work_directory=session.work_directory,
             app_data_directory=session.app_data_directory,
+            sources=session.sources,
         )
         restored_dialog = _open_settings(restarted)
-        assert "1.25×" in _visible_texts(restored_dialog)
+        restored_texts = _visible_texts(restored_dialog)
+        assert {"1.25×", "35％"} <= restored_texts
+        for title in ("ミュート", "シャッフル"):
+            assert (
+                _find_descendant(
+                    restored_dialog, title=title, control_type="CheckBox"
+                ).get_toggle_state()
+                == 1
+            )
+        for title in ("波形を表示", "スペクトラムを表示", "レベルメーターを表示"):
+            assert (
+                _find_descendant(
+                    restored_dialog, title=title, control_type="CheckBox"
+                ).get_toggle_state()
+                == 0
+            )
         _find_descendant(restored_dialog, title="キャンセル", control_type="Button").click_input()
+        assert (
+            _find_descendant(
+                restarted_window, title="シャッフル", control_type="CheckBox"
+            ).get_toggle_state()
+            == 1
+        )
+        assert (
+            _find_descendant(
+                restarted_window, title="ミュート", control_type="CheckBox"
+            ).get_toggle_state()
+            == 1
+        )
         assert restarted_window is not None
         restarted_window.close()
         assert restarted_process.wait(timeout=5) == 0
     finally:
         if restarted_process is not None:
             _cleanup_process(restarted_process, restarted_window)
+
+
+def test_packaged_gui_forwards_relative_path_to_running_instance(
+    packaged_window: PackagedSession,
+) -> None:
+    """相対pathをsecondaryから転送し、primaryを復元して1processへ集約する。"""
+    session = packaged_window
+    forwarded_audio = session.work_directory / "二重起動 転送.wav"
+    with wave.open(str(forwarded_audio), "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(8_000)
+        stream.writeframes(b"\0\0" * 8_000)
+
+    session.window.minimize()
+    _wait_until(session.window.is_minimized, "primaryを最小化できません")
+    secondary = subprocess.run(
+        [str(session.executable), forwarded_audio.name],
+        cwd=session.work_directory,
+        env=session.environment,
+        timeout=_WAIT_SECONDS,
+        check=False,
+    )
+
+    assert secondary.returncode == 0
+    assert session.process.poll() is None
+    _wait_until(lambda: not session.window.is_minimized(), "転送後にprimaryが復元されません")
+    _wait_until(
+        lambda: {"4曲", "1曲をプレイリストへ追加しました。"} <= _visible_texts(session.window),
+        "secondaryの相対pathがprimaryへ追加されません",
+    )
+    _wait_until(
+        (session.app_data_directory / "logs" / "sdp.log").is_file,
+        "配布版のログファイルが生成されません",
+    )
+
+    session.window.maximize()
+    _wait_until(session.window.is_maximized, "primaryを最大化できません")
+    activation_only = subprocess.run(
+        [str(session.executable)],
+        cwd=session.work_directory,
+        env=session.environment,
+        timeout=_WAIT_SECONDS,
+        check=False,
+    )
+    assert activation_only.returncode == 0
+    assert session.process.poll() is None
+    _wait_until(session.window.is_maximized, "転送要求でprimaryの最大化状態が失われました")
