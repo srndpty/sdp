@@ -38,8 +38,21 @@ class PlaybackBackend(QObject):
     ``MediaStatus`` だけでは、どの source の通知か分からない。source を切り替えた
     直後に前 source の通知が遅れて届くと、新しい source が終わったものと
     誤認して1曲飛ばしうる。**通知そのものへ source を識別する情報を載せる。**
+
+    実装が守る契約:
+
+    1. 添える世代は、**その通知を生んだ** :meth:`load` の世代とする。受信時点の
+       「最新の世代」を後付けしてはならない（それでは由来を記録したことにならない）。
+    2. 古い世代の通知を実装側で握りつぶさない。除外は :class:`PlaybackController`
+       の責務であり、Backend は由来を正しく記録することだけを担う。
     """
     error_occurred = Signal(PlaybackError)
+    """再生エラー。
+
+    source に属するエラーには :attr:`PlaybackError.generation` と
+    :attr:`PlaybackError.source` を添える（status と同じ理由）。特定の source に
+    属さない失敗は世代を持たせない。
+    """
 
     # -- 操作 ---------------------------------------------------------------
 

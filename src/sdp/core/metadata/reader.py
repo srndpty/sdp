@@ -303,6 +303,9 @@ class MetadataReader(QObject):
 
         時間内に全runnableが終われば ``STOPPED``、そうでなければ ``ABANDONED``。
         冪等だが、初回の結果は書き換えない。
+
+        ``timeout_ms`` の負値は 0 として扱う。Qt の待機APIでは負値が無期限待機を
+        意味しうるため、そのまま渡すと「待機上限」という契約を破ってしまう。
         """
         if self._shutdown:
             return self._recheck_shutdown_outcome(timeout_ms)
@@ -316,13 +319,14 @@ class MetadataReader(QObject):
             self._playlist.dataChanged.disconnect(self._on_data_changed)
             self._playlist.modelReset.disconnect(self._on_model_reset)
         self._clear_pending_tasks()
-        if self._pool.waitForDone(timeout_ms):
+        timeout = max(0, timeout_ms)
+        if self._pool.waitForDone(timeout):
             self._shutdown_outcome = ShutdownOutcome.STOPPED
         else:
             _logger.warning(
                 "メタデータ読み取りの終了待ちがタイムアウトしました（%dms）。"
                 "実行中のI/Oが戻るまで、後のQThreadPool破棄で終了が遅れます。",
-                timeout_ms,
+                timeout,
             )
             self._shutdown_outcome = ShutdownOutcome.ABANDONED
         return self._shutdown_outcome

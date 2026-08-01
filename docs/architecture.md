@@ -232,6 +232,18 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
   外部へは公開せず、UI と Controller は Qt の型に触れない。
   P5-A で QAudioBufferOutput も所有し `setAudioBufferOutput` で結び付けるが、
   これは `PlaybackBackend` の契約ではなく Qt 固有の補助ポートとして扱う（§6.2）。
+- **load 世代と player の identity**: `QMediaPlayer` は **`load()` ごとに作り直す**。
+  Qt のシグナル自体には発生元の source を識別する情報が無いため、1 つの player を
+  使い回すと、前 source から遅れて届いた通知にも受信時点の「現在世代」を後付けして
+  しまう（＝由来を記録したことにならない）。世代は player の identity へ結び付け、
+  player の子である中継 QObject（`_PlayerSession`）が通知へ世代と source を添える。
+  旧 player は停止して `deleteLater()` するが、シグナル接続は切らない。遅れて届く
+  通知は **旧世代のまま** 通知され、受け手が世代で除外できる。
+  状態・位置・duration・速度・ピッチ補正は現在世代の player のものだけを中継する。
+  `QAudioOutput` と `QAudioBufferOutput` は世代をまたいで同一のものを付け替え、
+  速度とピッチ補正は新しい player へ引き継ぐ（`PcmTap` の接続先も変えない）。
+  旧 player 側で `setAudioBufferOutput(None)` を呼んで明示的に外さない
+  （新しい player へ設定した時点で Qt 側が外すため、二重に外すと異常終了する。実測）。
 - **状態**: Qt は source 未設定でも `StoppedState` を返すため、`NO_MEDIA` と `STOPPED` を
   Qt の値だけでは区別できない。Backend が現在の source を内部で保持して判定する
   （公開契約へ source プロパティは追加しない。公開 source は Controller の責務）。
@@ -248,7 +260,9 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 - **エラー写像**: `ResourceError` / `FormatError` / `NetworkError` / `AccessDeniedError` を
   対応するコードへ写し、`NoError` からは `PlaybackError` を作らない。
   未知の Qt 値だけを `UNKNOWN_ERROR` とする。`detail` には Qt の enum 名・`errorString`・
-  現在の source を入れ、ユーザー向け `message` へは混ぜない。
+  **そのエラーを出した player の source** を入れ、ユーザー向け `message` へは混ぜない。
+  `PlaybackError` には load 世代と source も添える。変換境界の内部失敗は特定の source に
+  属さないため世代を持たせず（`None`）、受け手の世代フィルターで消さない。
   通常の再生エラーのログ記録は Controller の責務のため、Backend では重複して記録しない。
 - **変換境界の例外**: PySide6 はスロット内の例外を呼び出し元へ伝播させず処理を継続する
   （P0-C で確認）。状態・メディア状況・エラーの各変換では例外を放置せず、
@@ -260,8 +274,11 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 - **source の差し替え**: 異なるsourceを `load()` すると、再生中・一時停止中を問わず
   `STOPPED` へ1回だけ遷移し、positionは0へ戻る。durationとmedia statusは新しいsourceの
   非同期通知で更新する。先のsourceが読み込み中でも、最後に指定したsourceを有効とする。
-  同じsourceを再度 `load()` した場合はQt 6.10.3の実挙動に合わせ、positionだけを0へ戻し、
-  読み込み済みのdurationを保持して `LOADING` / `LOADED` を再通知しない。
+  同じsourceを再度 `load()` した場合も**新しい世代として読み込み直す**（Repeat ONE の
+  繰り返しはこの経路）。position と duration は 0 から始まり、`LOADING` / `LOADED` は
+  新しい世代の通知として届く。世代が変わることで、前の再生から遅れて届く通知と区別できる。
+  差し替えに伴う 0 へのリセットは旧 player の通知として捨てられるため、`load()` が
+  1 回だけ通知する（直前の値が 0 でない場合のみ）。
 - **読み込み通知順**: 有効な source は Controller が保持して `source_changed` を通知してから
   Backend の `load()` へ渡す。Backend が読み込み状態・再生状態・エラーを同期通知しても、
   UI は必ず新しい source を先に認識できる。通常の読み込み失敗は Python 例外ではなく
@@ -928,8 +945,12 @@ Mutagen による非同期メタデータ取得と表示（P2-D）。
   （実際の可否は探索時に確定し、その結果で可否が更新される）。
 - **`END_OF_MEDIA` の防御**: 現在 entry があるときだけ自動次曲する
   （「開く...」の単曲が終わってもプレイリストへ移らない）。
-  source変更ごとに世代を進め、positionが正になるまでその世代を未開始として扱う。
-  `END_OF_MEDIA` は開始済みのsource世代ごとに1回だけ消費し、sourceが変わるまで
+  `media_status_changed` に添えられた **load 世代** が現在のものでない通知は捨てる
+  （前sourceの遅延通知を、statusの種類では区別できないため）。除外は公開境界である
+  `PlaybackController` が行い、ここでは防御的にもう一度確認する。
+  positionやその前の読み込みstatusを「再生が始まった証拠」としては使わない
+  （0ms音源や数msの効果音を取りこぼすため）。
+  `END_OF_MEDIA` はsource世代ごとに1回だけ消費し、sourceが変わるまで
   消費済み状態を解除しない。受信時の世代・entry_id・sourceを控え、イベントループの
   次のターンでもすべて一致するときだけ進める。position/duration比率による推測は行わない。
 - **末尾到達**: 次の候補が無ければ新しい load を行わず、`current_entry_id` は
@@ -1625,9 +1646,14 @@ P7-B2の要件にしない。
   reaper thread上では参照を解放しない**。`QThread` などのQObjectをreaper
   thread上で最終解放すると、GUIでもworkerのaffinity threadでもないthread上で
   C++デストラクタが走るため、確認済みentryは保持し続ける。**この仕組みは
-  プロセス終了に向けた放棄を前提にしている。** 実行中にコンポーネントを停止・
-  再生成する用途で使う場合は、所有者のthreadから
-  `drain_completed_abandoned_threads()` を呼んで解放する。
+  プロセス終了に向けた放棄を前提にしている。** 汎用の解放API（所有者threadからの
+  drain）は用意しない。1つのentryにはthread affinityの異なるQObjectが混ざりうるため
+  （例: GUI threadのサービス自身と、解析thread affinityのworker）、「所有者threadから
+  まとめて解放すれば安全」という契約が成り立たないため。実行中に停止・再生成する
+  コンポーネントは、thread終了前に自分でworkerを片付ける。
+- 同じ `QThread` の二重登録は拒否する。放棄後にもう一度停止しようとする経路があっても、
+  同じオブジェクトグラフを二重に保持しない。呼び出し側でも、放棄した時点で
+  thread参照を手放す（例: `SingleInstanceService` の起動失敗経路）。
 - 各サービスの `shutdown()` は冪等だが、**初回の結果を書き換えない**。
   放棄したthreadが後から終了した場合だけ `STOPPED` へ更新する。
 

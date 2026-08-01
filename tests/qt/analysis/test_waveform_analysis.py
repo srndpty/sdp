@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from PySide6.QtCore import QThread, QTimer
+from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtTest import QSignalSpy
 from pytestqt.qtbot import QtBot
 from shiboken6 import isValid
@@ -599,6 +599,53 @@ def test_shutdown_does_not_rewrite_an_abandoned_result_as_stopped(
 
     # 実際に終わったあとは STOPPED へ更新してよい。
     assert service.shutdown() is ShutdownOutcome.STOPPED
+
+
+def test_cache_is_saved_when_the_source_changes_before_the_gui_handles_finished(
+    controller: PlaybackController, tmp_path: Path, qtbot: QtBot
+) -> None:
+    """Aの完了通知をGUIが処理する前にBへ切り替えても、Aのキャッシュは保存される。
+
+    「保存要求を作る前に、それが現在表示中の解析であること」を要求すると、
+    次の順序で正常な解析結果を捨ててしまう。
+
+    1. workerがAの解析を完了して ``finished`` をemit（GUIへqueued）
+    2. GUIがそれを処理する前にBをload
+    3. queued済みのAの完了通知が実行され、現在requestはBのため破棄
+
+    保存とUIへの適用は独立した判断にする。
+    """
+    first = make_audio_file(tmp_path, "A.wav")
+    second = make_audio_file(tmp_path, "B.wav")
+    cache_dir = tmp_path / "cache"
+    first_key = WaveformCacheKey.from_path(first)
+    emitted = threading.Event()
+
+    def decode(path: Path, cancelled: Callable[[], bool]) -> Iterator[DecodedChunk]:
+        del path, cancelled
+        yield DecodedChunk(np.zeros(20, dtype=np.float32), 1_000)
+
+    service = make_service(controller, cache_dir, decode)
+
+    def note_emitted(*_arguments: object) -> None:
+        emitted.set()
+
+    # worker thread上で（＝GUIへのqueued配送より前に）完了を知る。
+    service._worker.finished.connect(  # pyright: ignore[reportPrivateUsage]
+        note_emitted,
+        Qt.ConnectionType.DirectConnection,
+    )
+    service.start()
+    try:
+        controller.load(first)
+        # Qtのevent loopを回さずに待つ。Aの完了通知はqueueされたまま残る。
+        assert emitted.wait(timeout=5)
+
+        controller.load(second)
+
+        qtbot.waitUntil(lambda: (cache_dir / first_key.filename).is_file(), timeout=5_000)
+    finally:
+        service.shutdown()
 
 
 def test_cache_is_saved_even_when_the_next_source_starts_immediately(

@@ -134,6 +134,36 @@ VLC は比較のみで不採用（ピッチ切替と PCM 取得の双方で優�
 11. **Python 側の `qInstallMessageHandler` は終了前に解除する。**
     付けたままだと、Python の終了処理後に Qt がログを出した際にアクセス違反で落ちる
     （`QT_DEBUG_PLUGINS=1` で再現・原因特定済み）。
+12. **`QMediaPlayer` のシグナルは、発生元の source を識別できない。**
+    `mediaStatusChanged` などは「今どの source の通知か」を持たず、`source()` を
+    読み直しても、source を差し替えたあとに前 source の通知が遅れて届いた場合は
+    区別できない（受信時点の値は常に新しい source になる）。
+    そのため `QtMultimediaBackend` は **`load()` ごとに `QMediaPlayer` を作り直し**、
+    load 世代を player の identity へ結び付けて通知へ添える（下記の IF 変更）。
+13. **同じ `QAudioBufferOutput` を明示的に外してから別の player へ付け替えない。**
+    新しい player へ設定した時点で Qt が旧 player から外すため、旧 player 側で
+    `setAudioBufferOutput(None)` を呼ぶと二重に外れてアクセス違反で落ちる（実測）。
+    旧 player は停止して `deleteLater()` するだけにする。
+
+### PlaybackBackend の IF 変更（2026-08-01）
+
+「内部インターフェースは不変」という P7 の方針を破り、`PlaybackBackend` を変更した。
+記録として理由と契約を残す。
+
+- **理由**: 制約 12 のとおり、`MediaStatus` だけでは通知の由来を判定できない。
+  source 切替直後に前 source の `END_OF_MEDIA` が届くと 1 曲飛ばす実バグになる。
+  受け手側のヒューリスティック（position が正になったか、読み込み進行 status が
+  来たか）は 0ms 音源や status の取りこぼしで破綻するため、**通知そのものへ
+  source を識別する情報を載せる**方針へ切り替えた。
+- **変更点**: `load(path, generation)` と `media_status_changed(MediaStatus, int)`。
+  `PlaybackError` にも `generation` と `source` を持たせた。
+- **Backend 実装者が守る契約**:
+  1. `media_status_changed` には、**その通知を生んだ `load()` の世代** を添える。
+     受信時点の「最新の世代」を後付けしない。
+  2. source に属するエラーには、そのエラーを生んだ load の世代と source を添える。
+     特定の source に属さない失敗（変換境界の内部エラーなど）は世代を持たせない。
+  3. 世代による除外は行わない（除外は `PlaybackController` の責務）。
+     Backend は由来を正しく記録することだけを担う。
 
 ### 将来この決定を再評価する条件
 
@@ -155,7 +185,7 @@ VLC は比較のみで不採用（ピッチ切替と PCM 取得の双方で優�
 - 良い点（実測で確認済み）: 追加ランタイム DLL が不要で配布が単純。`QAudioBufferOutput` により
   リアルタイム可視化が素直に実装できる。Qt のイベントループとの統合も自然で、
   可視化処理を GUI スレッドで回しても CPU 占有は 0.1% 未満。
-- 悪い点 / 受け入れた制約: 上記「判明した制約」の 11 項目。
+- 悪い点 / 受け入れた制約: 上記「判明した制約」の 13 項目。
   とくに制約 1（PCM が速度・ピッチ処理前）は可視化の見え方に影響する。
 - 差し替えコストの抑制策: UI から再生実装を直接触らせず、
   [`IPlaybackBackend`](../architecture.md#3-主要クラスと責務) に

@@ -42,16 +42,35 @@ def backend(qtbot: QtBot) -> Iterator[QtMultimediaBackend]:
 
 
 def player_of(backend: QtMultimediaBackend) -> QMediaPlayer:
-    """所有されている QMediaPlayer を QObject の標準 API で取り出す（テスト専用）。"""
-    children = backend.findChildren(QMediaPlayer)
-    assert len(children) == 1
-    return children[0]
+    """現在世代の QMediaPlayer を返す（テスト専用）。
+
+    load ごとに player を作り直すため、破棄予約済みの旧世代 player が
+    event loop の次のターンまで子として残りうる。所有していること自体は
+    ``findChildren`` で確認する。
+    """
+    player = backend._player
+    assert player in backend.findChildren(QMediaPlayer)
+    return player
 
 
 def audio_output_of(backend: QtMultimediaBackend) -> QAudioOutput:
     children = backend.findChildren(QAudioOutput)
     assert len(children) == 1
     return children[0]
+
+
+def current_generation_errors(spy: QSignalSpy, generation: int) -> list[PlaybackError]:
+    """指定世代のエラーと、sourceに属さない内部失敗だけを取り出す（テスト専用）。
+
+    破棄待ちの旧 player は、source を切り替えたあとでも自分の世代でエラーを
+    通知しうる。現在世代の検証にそれを混ぜないためのフィルター。
+    """
+    errors = [spy.at(index)[0] for index in range(spy.count())]
+    return [
+        error
+        for error in errors
+        if isinstance(error, PlaybackError) and error.generation in {None, generation}
+    ]
 
 
 def write_silent_wav(path: Path, duration_ms: int) -> None:
@@ -226,7 +245,7 @@ def test_missing_media_status_mapping_reports_internal_error(
     )
     spy = QSignalSpy(backend.error_occurred)
 
-    backend._on_media_status_changed(QMediaPlayer.MediaStatus.LoadedMedia)
+    backend._on_media_status_changed(backend._load_generation, QMediaPlayer.MediaStatus.LoadedMedia)
 
     assert spy.count() == 1
     error = spy.at(0)[0]
@@ -251,7 +270,9 @@ def test_state_conversion_exception_reports_error_without_fabricating_state(
     spy = QSignalSpy(backend.error_occurred)
 
     with caplog.at_level(logging.ERROR):
-        backend._on_playback_state_changed(QMediaPlayer.PlaybackState.PlayingState)
+        backend._on_playback_state_changed(
+            backend._load_generation, QMediaPlayer.PlaybackState.PlayingState
+        )
 
     assert backend.state is PlaybackState.NO_MEDIA
     assert spy.count() == 1
@@ -273,7 +294,9 @@ def test_missing_error_message_reports_conversion_failure(
     )
     spy = QSignalSpy(backend.error_occurred)
 
-    backend._on_error_occurred(QMediaPlayer.Error.FormatError, "injected error")
+    backend._on_error_occurred(
+        backend._load_generation, None, QMediaPlayer.Error.FormatError, "injected error"
+    )
 
     assert spy.count() == 1
     error = spy.at(0)[0]
@@ -524,13 +547,13 @@ def test_replacing_source_stops_once_and_resets_timeline(
     source_a = test_audio_dir / "sine440.wav"
     source_b = tmp_path / "短いB.wav"
     write_silent_wav(source_b, 750)
-    player = player_of(backend)
 
     backend.load(source_a, 1)
     qtbot.waitUntil(lambda: backend.duration_ms > 1_500, timeout=LOAD_TIMEOUT_MS)
     backend.seek(1_000)
     qtbot.waitUntil(lambda: backend.position_ms >= 900, timeout=LOAD_TIMEOUT_MS)
-    player.playbackStateChanged.emit(qt_state)
+    # 現在世代の player から通知させる（load ごとに player は作り直される）。
+    player_of(backend).playbackStateChanged.emit(qt_state)
     assert backend.state is expected_before
 
     state_spy = QSignalSpy(backend.state_changed)
@@ -539,27 +562,35 @@ def test_replacing_source_stops_once_and_resets_timeline(
     status_spy = QSignalSpy(backend.media_status_changed)
     error_spy = QSignalSpy(backend.error_occurred)
 
-    backend.load(source_b, 1)
+    backend.load(source_b, 2)
 
     assert backend.state is PlaybackState.STOPPED
     assert state_spy.count() == 1
     assert state_spy.at(0)[0] is PlaybackState.STOPPED
     assert backend.position_ms == 0
     qtbot.waitUntil(lambda: 600 <= backend.duration_ms <= 900, timeout=LOAD_TIMEOUT_MS)
-    statuses = [status_spy.at(index)[0] for index in range(status_spy.count())]
+    statuses = [
+        status_spy.at(index)[0]
+        for index in range(status_spy.count())
+        if status_spy.at(index)[1] == 2
+    ]
     assert statuses[-1] is MediaStatus.LOADED
     assert position_spy.count() >= 1
     assert position_spy.at(position_spy.count() - 1)[0] == 0
     assert duration_spy.count() >= 1
     assert duration_spy.at(duration_spy.count() - 1)[0] == backend.duration_ms
-    assert Path(player.source().toLocalFile()) == source_b
-    assert error_spy.count() == 0
+    assert Path(player_of(backend).source().toLocalFile()) == source_b
+    assert current_generation_errors(error_spy, 2) == []
 
 
-def test_reloading_same_source_resets_position_without_reloading_media(
+def test_reloading_same_source_starts_a_new_generation_from_the_beginning(
     backend: QtMultimediaBackend, test_audio_dir: Path, qtbot: QtBot
 ) -> None:
-    """同じsourceの再ロードは先頭へ戻し、statusとdurationを再通知しない。"""
+    """同じsourceの再ロードでも新しい世代として読み込み直し、先頭へ戻す。
+
+    Repeat ONE はこの経路で繰り返す。世代が変わることで、前の再生から遅れて
+    届く通知と区別できる。
+    """
     source = test_audio_dir / "sine440.wav"
     backend.load(source, 1)
     qtbot.waitUntil(lambda: backend.duration_ms > 0, timeout=LOAD_TIMEOUT_MS)
@@ -571,16 +602,17 @@ def test_reloading_same_source_resets_position_without_reloading_media(
     status_spy = QSignalSpy(backend.media_status_changed)
     error_spy = QSignalSpy(backend.error_occurred)
 
-    backend.load(source, 1)
+    backend.load(source, 2)
 
     assert backend.state is PlaybackState.STOPPED
     assert backend.position_ms == 0
-    assert backend.duration_ms == duration_ms
-    assert position_spy.count() == 1
+    # タイムラインは 0 からやり直し、読み込み完了で元の長さへ戻る。
     assert position_spy.at(0)[0] == 0
-    assert duration_spy.count() == 0
-    assert status_spy.count() == 0
-    assert error_spy.count() == 0
+    assert duration_spy.at(0)[0] == 0
+    qtbot.waitUntil(lambda: backend.duration_ms == duration_ms, timeout=LOAD_TIMEOUT_MS)
+    generations = {status_spy.at(index)[1] for index in range(status_spy.count())}
+    assert generations == {2}
+    assert current_generation_errors(error_spy, 2) == []
 
 
 def test_new_source_supersedes_pending_invalid_source(
@@ -594,13 +626,137 @@ def test_new_source_supersedes_pending_invalid_source(
     error_spy = QSignalSpy(backend.error_occurred)
 
     backend.load(invalid_source, 1)
-    backend.load(source_b, 1)
+    backend.load(source_b, 2)
 
     qtbot.waitUntil(lambda: backend.duration_ms > 0, timeout=LOAD_TIMEOUT_MS)
-    statuses = [status_spy.at(index)[0] for index in range(status_spy.count())]
+    statuses = [
+        status_spy.at(index)[0]
+        for index in range(status_spy.count())
+        if status_spy.at(index)[1] == 2
+    ]
     assert statuses[-1] is MediaStatus.LOADED
     assert Path(player_of(backend).source().toLocalFile()) == source_b
-    assert error_spy.count() == 0
+    # Aの失敗が遅れて届いても、現在世代のエラーにはならない。
+    assert current_generation_errors(error_spy, 2) == []
+    for index in range(error_spy.count()):
+        error = error_spy.at(index)[0]
+        assert isinstance(error, PlaybackError)
+        assert error.generation == 1
+        assert error.source == invalid_source
+
+
+# -- 通知の由来（load 世代）--------------------------------------------------
+
+
+def test_late_status_from_the_previous_player_keeps_the_old_generation(
+    backend: QtMultimediaBackend, test_audio_dir: Path, tmp_path: Path
+) -> None:
+    """前sourceのplayerが遅れて出したENDは、旧世代のまま通知される。
+
+    受信時の可変フィールドを読むと、この通知にも現在世代が付いてしまい、
+    次の曲を飛ばす。世代は player の identity へ結び付いている必要がある。
+    """
+    source_a = test_audio_dir / "sine440.wav"
+    source_b = tmp_path / "B.wav"
+    write_silent_wav(source_b, 200)
+    backend.load(source_a, 1)
+    previous = player_of(backend)
+    backend.load(source_b, 2)
+    spy = QSignalSpy(backend.media_status_changed)
+
+    previous.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+    player_of(backend).mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+
+    assert spy.count() == 2
+    assert spy.at(0)[0] is MediaStatus.END_OF_MEDIA
+    assert spy.at(0)[1] == 1
+    assert spy.at(1)[0] is MediaStatus.END_OF_MEDIA
+    assert spy.at(1)[1] == 2
+
+
+def test_late_error_from_the_previous_player_keeps_its_own_source(
+    backend: QtMultimediaBackend, test_audio_dir: Path, tmp_path: Path
+) -> None:
+    """前sourceのplayerのエラーには、そのsourceと旧世代が添えられる。"""
+    source_a = test_audio_dir / "sine440.wav"
+    source_b = tmp_path / "B.wav"
+    write_silent_wav(source_b, 200)
+    backend.load(source_a, 1)
+    previous = player_of(backend)
+    backend.load(source_b, 2)
+    spy = QSignalSpy(backend.error_occurred)
+
+    previous.errorOccurred.emit(QMediaPlayer.Error.ResourceError, "A の遅延エラー")
+
+    assert spy.count() == 1
+    error = spy.at(0)[0]
+    assert isinstance(error, PlaybackError)
+    assert error.generation == 1
+    assert error.source == source_a
+    assert str(source_a) in error.detail
+
+
+def test_previous_player_does_not_drive_state_position_or_duration(
+    backend: QtMultimediaBackend, test_audio_dir: Path, tmp_path: Path
+) -> None:
+    """旧playerの状態・位置・長さの通知は、現在sourceのものとして扱わない。"""
+    source_a = test_audio_dir / "sine440.wav"
+    source_b = tmp_path / "B.wav"
+    write_silent_wav(source_b, 200)
+    backend.load(source_a, 1)
+    previous = player_of(backend)
+    backend.load(source_b, 2)
+    state_spy = QSignalSpy(backend.state_changed)
+    position_spy = QSignalSpy(backend.position_changed)
+    duration_spy = QSignalSpy(backend.duration_changed)
+
+    previous.playbackStateChanged.emit(QMediaPlayer.PlaybackState.PlayingState)
+    previous.positionChanged.emit(5_000)
+    previous.durationChanged.emit(120_000)
+
+    assert state_spy.count() == 0
+    assert position_spy.count() == 0
+    assert duration_spy.count() == 0
+    assert backend.state is PlaybackState.STOPPED
+
+
+def test_retired_players_are_destroyed_and_do_not_accumulate(
+    backend: QtMultimediaBackend, test_audio_dir: Path, tmp_path: Path, qtbot: QtBot
+) -> None:
+    """load を繰り返しても旧世代の player は破棄され、溜まらない。"""
+    source_b = tmp_path / "B.wav"
+    write_silent_wav(source_b, 200)
+
+    sources = (test_audio_dir / "sine440.wav", source_b, source_b, source_b)
+    for generation, source in enumerate(sources, 1):
+        backend.load(source, generation)
+        # deleteLater を処理させる。
+        qtbot.waitUntil(
+            lambda: backend.findChildren(QMediaPlayer) == [backend._player],
+            timeout=LOAD_TIMEOUT_MS,
+        )
+    assert backend.audio_buffer_output.parent() is backend
+
+
+def test_playback_rate_and_pitch_compensation_survive_a_new_load(
+    backend: QtMultimediaBackend, test_audio_dir: Path, tmp_path: Path
+) -> None:
+    """load で player を作り直しても、速度とピッチ補正は引き継がれる。"""
+    source_b = tmp_path / "B.wav"
+    write_silent_wav(source_b, 200)
+    backend.load(test_audio_dir / "sine440.wav", 1)
+    backend.set_playback_rate(1.5)
+    backend.set_pitch_compensation(False)
+    rate_spy = QSignalSpy(backend.playback_rate_changed)
+    pitch_spy = QSignalSpy(backend.pitch_compensation_changed)
+
+    backend.load(source_b, 2)
+
+    assert backend.playback_rate == pytest.approx(1.5, rel=1e-6)
+    assert backend.pitch_compensation is False
+    # 引き継ぎ自体は変更ではないため、通知し直さない。
+    assert rate_spy.count() == 0
+    assert pitch_spy.count() == 0
 
 
 # -- Controller との接続 -----------------------------------------------------

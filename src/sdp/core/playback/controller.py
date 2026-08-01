@@ -66,8 +66,8 @@ class PlaybackController(QObject):
     media_status_changed = Signal(MediaStatus, int)
     """読み込み状況と、その通知がどの :meth:`load` に由来するかの世代番号。
 
-    受け手は :attr:`load_generation` と突き合わせて、前 source の遅延通知を
-    切り分けられる。
+    **前 source の遅延通知はここで除外済み**（常に現在の :attr:`load_generation`）。
+    受け手は自身が追跡している世代と突き合わせて、二重の防御を置いてもよい。
     """
 
     error_occurred = Signal(PlaybackError)
@@ -298,6 +298,13 @@ class PlaybackController(QObject):
         self.duration_changed.emit(duration_ms)
 
     def _on_backend_media_status_changed(self, status: MediaStatus, generation: int) -> None:
+        """前 source の遅延 status を、公開境界であるここで捨てる。
+
+        受け手ごとに除外させると、除外し忘れた経路（ステータスバー表示など）へ
+        古い ``INVALID_MEDIA`` や ``LOADING`` が漏れる。除外はここへ集約する。
+        """
+        if generation != self._load_generation:
+            return
         self.media_status_changed.emit(status, generation)
 
     def _on_backend_volume_changed(self, volume: float) -> None:
@@ -332,6 +339,16 @@ class PlaybackController(QObject):
         self.pitch_compensation_changed.emit(enabled)
 
     def _on_backend_error_occurred(self, error: PlaybackError) -> None:
+        """source に属するエラーも status と同じ境界で世代を検査する。
+
+        世代を持たないエラー（変換境界の内部失敗など）は特定の source に
+        属さないため、除外せずそのまま通知する。
+        """
+        if error.generation is not None and error.generation != self._load_generation:
+            _logger.info(
+                "前sourceの再生エラーを無視しました: %s (%s)", error.code.name, error.detail
+            )
+            return
         _logger.error("再生エラー: %s (%s)", error.code.name, error.detail)
         self.error_occurred.emit(error)
 

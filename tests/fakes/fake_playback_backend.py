@@ -84,8 +84,10 @@ class FakePlaybackBackend(PlaybackBackend):
 
     # -- 操作 ---------------------------------------------------------------
 
-    def load(self, path: Path, generation: int = 1) -> None:
-        self.calls.append(("load", (path,)))
+    def load(self, path: Path, generation: int) -> None:
+        # 既定値を持たせない。generation を渡さない古い呼び出しをテストで通すと、
+        # 抽象 Backend の契約より緩い実装になってしまう。
+        self.calls.append(("load", (path, generation)))
         self._load_generation = generation
         if self.load_error is not None:
             self.error_occurred.emit(self.load_error)

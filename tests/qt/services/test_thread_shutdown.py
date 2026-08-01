@@ -6,6 +6,7 @@
 """
 
 import gc
+import logging
 import threading
 import time
 import weakref
@@ -19,7 +20,6 @@ from sdp.services.thread_shutdown import (
     ShutdownOutcome,
     abandoned_thread_count,
     completed_abandoned_thread_count,
-    drain_completed_abandoned_threads,
     stop_thread,
     wait_for_abandoned_threads,
 )
@@ -239,23 +239,27 @@ def test_keepalive_objects_survive_until_the_thread_returns(
     assert reference() is not None
 
 
-def test_completed_entries_can_be_drained_from_the_owner_thread(
-    release: threading.Event,
+def test_the_same_thread_is_not_abandoned_twice(
+    release: threading.Event, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """終了確認済みのentryは、所有者threadから明示的に解放できる。
+    """同じQThreadを二重に引き取らない。
 
-    アプリ終了時は解放せずプロセス終了へ任せるが、実行中に停止・再生成する
-    用途ではオブジェクトグラフを溜めないよう drain できる必要がある。
+    放棄したthreadをもう一度停止しようとする経路があると、同じオブジェクト
+    グラフを二重に保持し、hard timeoutぶんの待機も二重に払うことになる。
     """
     thread = _BlockingThread(release)
     thread.start()
     assert thread.entered.wait(timeout=5)
-    stop_thread(thread, label="テスト", soft_timeout_ms=1, hard_timeout_ms=5)
+    before = abandoned_thread_count()
+
+    first = stop_thread(thread, label="テスト", soft_timeout_ms=0, hard_timeout_ms=0)
+    with caplog.at_level(logging.WARNING):
+        second = stop_thread(thread, label="テスト", soft_timeout_ms=0, hard_timeout_ms=0)
+
+    assert first is ShutdownOutcome.ABANDONED
+    assert second is ShutdownOutcome.ABANDONED
+    assert abandoned_thread_count() == before + 1
+    assert "既に放棄済み" in caplog.text
+
     release.set()
     assert wait_for_abandoned_threads()
-    assert completed_abandoned_thread_count() >= 1
-
-    drained = drain_completed_abandoned_threads()
-
-    assert drained >= 1
-    assert completed_abandoned_thread_count() == 0

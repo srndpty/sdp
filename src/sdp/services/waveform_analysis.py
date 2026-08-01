@@ -499,15 +499,25 @@ class WaveformAnalysisService(QObject):
     def _on_worker_finished(
         self, request_value: object, key_value: object, data_value: object, from_cache: bool
     ) -> None:
+        if (
+            not from_cache
+            and not self._shutdown
+            and isinstance(request_value, WaveformRequest)
+            and isinstance(key_value, WaveformCacheKey)
+            and isinstance(data_value, WaveformData)
+        ):
+            # workerがfinishedを出した時点で解析は正常に完了している。この通知が
+            # GUIへ届くまでに表示対象が次の曲へ変わっていても、完了した結果は
+            # 捨てずに保存する（保存の可否＝表示中かどうか、ではない）。
+            # 保存に必要な値をすべて詰めて渡すため、workerの現在状態にも依存しない。
+            self._cache_save_requested.emit(
+                WaveformCacheSaveRequest(path=request_value.path, key=key_value, data=data_value)
+            )
+
+        # UIへの適用だけが「現在表示中の解析か」に依存する。
         request = self._applicable_request(request_value)
         if request is None or not isinstance(data_value, WaveformData):
             return
-        if not from_cache and isinstance(key_value, WaveformCacheKey):
-            # 保存に必要な値をすべて詰めて渡す。workerが次の曲の解析へ移っていても
-            # 取りこぼさない。
-            self._cache_save_requested.emit(
-                WaveformCacheSaveRequest(path=request.path, key=key_value, data=data_value)
-            )
         self.analysis_finished.emit(request.path, request.token, data_value, from_cache)
 
     @Slot(object, str)

@@ -534,7 +534,7 @@ def test_zero_length_source_still_advances_to_the_next_entry(
     """正のpositionを一度も通知しない音源でも次曲へ進む。
 
     0ms扱いの音源や数msの効果音では、positionが0のまま終了しうる。
-    読み込みが進んだstatusを世代開始の根拠にすることで、これを取りこぼさない。
+    「再生が始まった証拠」を条件にせず、現在load世代のENDだけを根拠にする。
     """
     entry_ids = playlist.add_paths(audio_files[:2])
     controller.play_entry(entry_ids[0])
@@ -565,14 +565,18 @@ def test_zero_length_source_repeats_with_repeat_one(
     assert len(backend.call_args("load")) == load_count + 1
 
 
-def test_buffered_status_alone_marks_the_source_as_started(
+def test_current_generation_end_advances_even_without_progress_statuses(
     controller: PlaylistPlaybackController,
     playlist: PlaylistModel,
     backend: FakePlaybackBackend,
     audio_files: list[Path],
     qtbot: QtBot,
 ) -> None:
-    """LOADEDを取りこぼしても、現在世代のENDなら次曲へ進む。"""
+    """positionにも事前の読み込みstatusにも依存せず、現在load世代のENDを処理する。
+
+    LOADEDを取りこぼしても（BUFFEREDだけが届いても）、通知に添えられた世代が
+    現在のものであれば次曲へ進む。
+    """
     entry_ids = playlist.add_paths(audio_files[:2])
     backend.defer_load_status = True
     controller.play_entry(entry_ids[0])

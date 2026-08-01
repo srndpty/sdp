@@ -23,9 +23,14 @@ affinity threadでもないthread上でC++デストラクタが走り、危険�
 reaperは「終了したこと」を確認するだけで、確認済みentryは保持し続ける。
 
 **この関数はプロセス終了に向けた放棄を前提にしている。** アプリ実行中に
-コンポーネントを停止・再生成する用途で使うと、停止のたびにオブジェクトグラフが
-残り続ける。その場合は所有者のthreadから :func:`drain_completed_abandoned_threads`
-を呼び、終了確認済みのentryを解放すること。
+コンポーネントを停止・再生成する用途では使わない（停止のたびにオブジェクトグラフが
+残り続ける）。
+
+汎用の解放API（所有者threadからのdrain）は用意しない。1つのentryには
+thread affinityの異なるQObjectが混ざりうるため（例: 波形解析ではGUI threadの
+サービス自身と、解析thread affinityのworkerを一緒に引き取る）、「所有者threadから
+まとめて解放すれば安全」という契約が成り立たない。実行中に停止・再生成したい
+コンポーネントは、thread終了前に自分でworkerを片付けること。
 
 強制終了（``QThread.terminate``）は使わない。保存中のユーザーデータが壊れうるため。
 """
@@ -74,6 +79,8 @@ class _Reaper:
 
     確認できたentryは参照を解放せず ``_completed`` へ移し、プロセス終了まで
     保持する。QObjectの最終解放をreaper thread上で起こさないための設計。
+    保持し続けるのは、entry内のQObjectが互いに異なるthread affinityを持ちうるため
+    でもある（どのthreadから解放しても安全とは言えない）。
     """
 
     def __init__(self) -> None:
@@ -94,20 +101,23 @@ class _Reaper:
         with self._lock:
             return len(self._completed)
 
-    def drain_completed(self) -> int:
-        """終了確認済みentryを解放する（呼び出し元のthreadで最終解放が起きる）。"""
-        with self._lock:
-            drained = len(self._completed)
-            self._completed.clear()
-        return drained
+    def add(self, entry: _AbandonedThread) -> bool:
+        """引き取って見張りを開始する。既に引き取り済みなら ``False``。
 
-    def add(self, entry: _AbandonedThread) -> None:
-        """引き取って見張りを開始する。"""
-        # 親のQObjectと一緒に破棄されると異常終了するため、所有権をここへ移す。
-        entry.thread.setParent(None)
+        同じQThreadを二重登録すると、同じオブジェクトグラフを二重に保持し、
+        wait() も二重に走る。呼び出し側の重複（放棄後にもう一度停止しようとする
+        経路）を、ここでも防御的に弾く。
+        """
         with self._lock:
+            for existing in (*self._entries, *self._completed):
+                if existing.thread is entry.thread:
+                    _logger.warning("%sは既に放棄済みのため、二重登録しません。", entry.label)
+                    return False
+            # 親のQObjectと一緒に破棄されると異常終了するため、所有権をここへ移す。
+            entry.thread.setParent(None)
             self._entries.append(entry)
             self._start_worker_locked()
+        return True
 
     def wait_for_empty(self, timeout_s: float) -> bool:
         """未確認entryがすべて終了確認されるまで待つ（テストと診断用）。"""
@@ -168,19 +178,6 @@ def completed_abandoned_thread_count() -> int:
 def wait_for_abandoned_threads(timeout_s: float = 5.0) -> bool:
     """放棄済みthreadがすべて終了確認されるまで待つ（テストと診断用）。"""
     return _reaper.wait_for_empty(timeout_s)
-
-
-def drain_completed_abandoned_threads() -> int:
-    """終了確認済みのentryを解放し、解放した件数を返す。
-
-    **所有者のthread（通常はGUI thread）から呼ぶこと。** ここでQObjectの最終解放が
-    起きるため、reaper threadからは呼ばない。
-
-    アプリ終了時は ``app.exec()`` のあとで解放先のevent loopが無く、そのまま
-    プロセスが終わるので呼ぶ必要はない。実行中にコンポーネントを停止・再生成する
-    用途で、放棄したオブジェクトグラフを溜めたくない場合に使う。
-    """
-    return _reaper.drain_completed()
 
 
 def stop_thread(

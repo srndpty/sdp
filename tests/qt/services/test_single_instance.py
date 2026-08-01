@@ -348,6 +348,57 @@ def test_abandoned_server_thread_keeps_the_lock_and_endpoint(
         lock.unlock()
 
 
+def test_startup_abandonment_is_not_stopped_again_by_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """起動時に放棄したIPC threadを、直後のshutdown()でもう一度停止しない。
+
+    二重に停止しようとすると、戻らないthreadでhard timeoutぶんの待機を二度払い、
+    同じQThreadをreaperへ二重登録しうる。放棄した時点で所有権はreaper側にある。
+    """
+    name = unique_server_name()
+
+    def listen_fails(_self: object) -> bool:
+        return False
+
+    monkeypatch.setattr(
+        single_instance._LocalServerEndpoint,  # pyright: ignore[reportPrivateUsage]
+        "listen",
+        listen_fails,
+    )
+    stopped: list[QThread] = []
+
+    def abandon(target: QThread, **_kwargs: object) -> ShutdownOutcome:
+        stopped.append(target)
+        return ShutdownOutcome.ABANDONED
+
+    monkeypatch.setattr(single_instance, "stop_thread", abandon)
+    removed: list[str] = []
+    monkeypatch.setattr(QLocalServer, "removeServer", staticmethod(removed.append))
+
+    service = SingleInstanceService(name, connect_timeout_ms=20, startup_timeout_ms=50)
+    lock = service._lock  # pyright: ignore[reportPrivateUsage]
+    try:
+        outcome = service.start_or_forward(LaunchRequest())
+
+        assert outcome is InstanceOutcome.FORWARD_FAILED
+        assert len(stopped) == 1
+
+        service.shutdown()
+
+        # 放棄済みthreadを再度停止しない。
+        assert len(stopped) == 1
+        # 二重起動を防ぐため、endpointもlockも解放しない。
+        assert removed == []
+        assert lock.isLocked()
+    finally:
+        # stop_threadを差し替えているため、threadはテスト側で確実に止める。
+        for thread in stopped:
+            thread.quit()
+            assert thread.wait(5_000)
+        lock.unlock()
+
+
 def test_shutdown_waits_even_when_the_thread_already_left_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

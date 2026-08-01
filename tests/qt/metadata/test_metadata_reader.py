@@ -6,6 +6,7 @@ qtbot.waitUntil / waitSignal で行い、固定 sleep は使わない。
 
 import logging
 import threading
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from pytestqt.qtbot import QtBot
 from sdp.core.metadata.reader import MetadataReader, MetadataResult
 from sdp.core.metadata.types import MetadataStatus, TrackMetadata
 from sdp.core.playlist.model import PlaylistModel
+from sdp.services.thread_shutdown import ShutdownOutcome
 
 WAIT_TIMEOUT_MS = 5_000
 SAMPLE = TrackMetadata(title="曲名", artist="奏者", album="盤", duration_ms=1000)
@@ -607,6 +609,36 @@ def test_shutdown_timeout_is_only_a_logical_cancellation(
 
     assert not reader.is_running
     assert "終了待ちがタイムアウト" in caplog.text
+
+    # QThreadPool破棄は実行中タスクを待つため、テストの終了前に協調的に解放する。
+    read_function.release()
+    assert reader._pool.waitForDone(2_000)  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("timeout_ms", [-1, 0, 10])
+def test_shutdown_never_waits_indefinitely(
+    playlist: PlaylistModel,
+    audio_files: list[Path],
+    qtbot: QtBot,
+    timeout_ms: int,
+) -> None:
+    """負値・0・正値のいずれでも、待機上限を超えずに制御を返す。
+
+    Qtの待機APIでは負値が無期限待機を意味しうるため、そのまま渡してはならない。
+    """
+    read_function = RecordingReader()
+    read_function.hold()
+    reader = MetadataReader(playlist, read_function=read_function, max_threads=1)
+    playlist.add_paths(audio_files[:1])
+    reader.start()
+    qtbot.waitUntil(lambda: read_function.started.is_set(), timeout=WAIT_TIMEOUT_MS)
+
+    started = time.monotonic()
+    outcome = reader.shutdown(timeout_ms=timeout_ms)
+    elapsed_ms = (time.monotonic() - started) * 1_000
+
+    assert outcome is ShutdownOutcome.ABANDONED
+    assert elapsed_ms < WAIT_TIMEOUT_MS
 
     # QThreadPool破棄は実行中タスクを待つため、テストの終了前に協調的に解放する。
     read_function.release()

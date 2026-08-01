@@ -239,9 +239,9 @@ def test_speed_panel_state_survives_playlist_switch_and_repeat_one(
     assert backend.call_args("set_playback_rate") == [(1.25,)]
     assert backend.call_args("set_pitch_compensation") == [(False,)]
     assert backend.call_args("load") == [
-        (sources[0].resolve(),),
-        (sources[1].resolve(),),
-        (sources[1].resolve(),),
+        (sources[0].resolve(), 1),
+        (sources[1].resolve(), 2),
+        (sources[1].resolve(), 3),
     ]
 
 
@@ -294,7 +294,7 @@ def test_selected_file_is_loaded_as_path(
 
     window.open_file()
 
-    assert backend.call_args("load") == [(audio_file.resolve(),)]
+    assert backend.call_args("load") == [(audio_file.resolve(), 1)]
 
 
 def test_all_files_filter_is_available() -> None:
@@ -440,7 +440,7 @@ def test_open_action_opens_the_file_dialog(
 
     action_of(window, "openAction").trigger()
 
-    assert backend.call_args("load") == [(audio_file.resolve(),)]
+    assert backend.call_args("load") == [(audio_file.resolve(), 1)]
 
 
 # -- 設定（P6-A）------------------------------------------------------------

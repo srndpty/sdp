@@ -17,7 +17,7 @@ from PySide6.QtTest import QSignalSpy
 from pytestqt.qtbot import QtBot
 
 from sdp.core.playback.qt_backend import QtMultimediaBackend
-from sdp.core.playback.types import MediaStatus, PlaybackState
+from sdp.core.playback.types import MediaStatus, PlaybackError, PlaybackState
 
 LOAD_TIMEOUT_MS = 10_000
 ACTION_TIMEOUT_MS = 5_000
@@ -124,7 +124,7 @@ def test_replace_source_while_playing_or_paused(
     position_spy = QSignalSpy(backend.position_changed)
     error_spy = QSignalSpy(backend.error_occurred)
 
-    backend.load(source_b, 1)
+    backend.load(source_b, 2)
 
     assert backend.state is PlaybackState.STOPPED
     assert state_spy.count() == 1
@@ -133,7 +133,12 @@ def test_replace_source_while_playing_or_paused(
     assert position_spy.count() >= 1
     assert position_spy.at(position_spy.count() - 1)[0] == 0
     qtbot.waitUntil(lambda: backend.duration_ms > 0, timeout=LOAD_TIMEOUT_MS)
+    # load ごとに player を作り直すため、旧世代は破棄予約されて消える。
+    qtbot.waitUntil(lambda: len(backend.findChildren(QMediaPlayer)) == 1, timeout=LOAD_TIMEOUT_MS)
     players = backend.findChildren(QMediaPlayer)
-    assert len(players) == 1
     assert Path(players[0].source().toLocalFile()) == source_b
-    assert error_spy.count() == 0
+    # 旧世代（A）の遅延エラーは現在世代のエラーとして扱われない。
+    for index in range(error_spy.count()):
+        error = error_spy.at(index)[0]
+        assert isinstance(error, PlaybackError)
+        assert error.generation == 1

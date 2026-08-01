@@ -369,6 +369,10 @@ class SingleInstanceService(QObject):
         )
         if stopped is ShutdownOutcome.STOPPED:
             return _ServerStartOutcome.FAILED_STOPPED
+        # 放棄したthreadの所有権はreaperへ移っている。ここで参照を残すと、直後の
+        # shutdown() が同じthreadをもう一度停止しようとし、hard timeoutまでの待機を
+        # 二重に払ったうえ、同じQThreadをreaperへ二重登録しうる。
+        self._server_thread = None
         return _ServerStartOutcome.FAILED_ABANDONED
 
     @Slot(object)

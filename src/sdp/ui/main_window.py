@@ -440,6 +440,8 @@ class MainWindow(QMainWindow):
         self._playlist_view.set_current_entry_id(entry_id if isinstance(entry_id, str) else None)
 
     def _on_media_status_changed(self, status: MediaStatus, load_generation: int) -> None:
+        # 前sourceの遅延statusはPlaybackControllerが除外済みのため、
+        # ここへ届くのは常に現在sourceの状況（世代は表示に使わない）。
         del load_generation
         if status is MediaStatus.INVALID_MEDIA and self._has_current_source_error:
             return

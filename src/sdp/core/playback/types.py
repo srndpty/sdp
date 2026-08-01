@@ -7,6 +7,7 @@ Qt の enum（``QMediaPlayer.PlaybackState`` など）や ``QUrl`` を
 
 from dataclasses import dataclass
 from enum import Enum, auto
+from pathlib import Path
 
 
 class PlaybackState(Enum):
@@ -81,3 +82,15 @@ class PlaybackError:
 
     detail: str
     """ログ向けの技術詳細（Qt のエラー文字列、パスなど）。"""
+
+    generation: int | None = None
+    """このエラーがどの :meth:`~sdp.core.playback.backend.PlaybackBackend.load` に
+    由来するかの読み込み世代。
+
+    status と同じく、遅れて届いた前 source のエラーを現在 source のものとして
+    扱わないために添える。``None`` は特定の source に属さないエラー
+    （変換境界の内部失敗など）を表し、世代では除外しない。
+    """
+
+    source: Path | None = None
+    """このエラーが属する音源。``generation`` が ``None`` のときは ``None`` になりうる。"""
