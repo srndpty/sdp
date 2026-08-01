@@ -117,7 +117,6 @@ class PlayerControls(QWidget):
 
         self._state_label = QLabel(_STATE_LABELS[PlaybackState.NO_MEDIA])
         self._state_label.setObjectName("stateLabel")
-        self._state_label.setAccessibleName("再生状態")
 
         self._build_layout()
         self._connect_widgets()

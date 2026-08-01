@@ -52,7 +52,7 @@ def test_repository_manifest_loads() -> None:
 
     assert len(components) >= 8
     identifiers = {item.identifier for item in components}
-    for expected in ("sdp", "python", "pyside6", "qt", "ffmpeg", "mutagen", "msvc-runtime"):
+    for expected in ("sdp", "python", "pyside6", "qt", "ffmpeg", "mutagen", "libffi"):
         assert expected in identifiers, expected
 
 
@@ -68,12 +68,14 @@ def test_repository_manifest_declares_runtime_reality() -> None:
     assert components["libffi"].status is ComponentStatus.RESOLVED
     assert "qt-virtualkeyboard" not in components
     assert "openssl" not in components
+    assert "mesa-llvmpipe" not in components
+    assert "msvc-runtime" not in components
 
 
 def test_repository_manifest_still_has_unresolved_items() -> None:
     """外部配布ブロッカーを「解決済み」と誤記していない。
 
-    対応sourceの公開場所やMSVC runtimeの扱いが決まるまでは未解決として扱う。
+    対応sourceの公開場所が決まるまでは未解決として扱う。
     """
     unresolved = unresolved_components(load_license_manifest(MANIFEST_PATH))
 

@@ -61,6 +61,11 @@ def test_spec_collects_metadata_and_only_declared_resources() -> None:
     assert "if not python_license.is_file():" in source
     assert "qt6virtualkeyboard.dll" in source
     assert "qopensslbackend.dll" in source
+    assert "opengl32sw.dll" in source
+    for runtime in ("vcruntime140", "msvcp140", "concrt140", "api-ms-win-", "ucrtbase.dll"):
+        assert runtime in source
+    assert "replace_hashed_msvc_imports(package_root)" in source
+    assert "NumPyのハッシュ付きMSVCP importを検出できません" in source
 
 
 def test_spec_embeds_icon_and_generated_version_resource() -> None:

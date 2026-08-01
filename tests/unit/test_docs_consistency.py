@@ -6,6 +6,7 @@
 という、機械的に判定できる点だけを検査する。
 """
 
+import json
 import re
 import tomllib
 from pathlib import Path
@@ -150,12 +151,25 @@ def test_readme_does_not_claim_unimplemented_features_as_missing() -> None:
 def test_project_license_is_consistently_gpl3() -> None:
     """metadata・README・配布manifest・Windows resourceのlicense表記を一致させる。"""
     pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    manifest = _LICENSE_MANIFEST.read_text(encoding="utf-8")
+    manifest = json.loads(_LICENSE_MANIFEST.read_text(encoding="utf-8"))
+    readme = _README.read_text(encoding="utf-8")
     version_info = (_REPO_ROOT / "packaging" / "windows-version-info.txt").read_text(
         encoding="utf-8"
     )
 
     assert pyproject["project"]["license"] == "GPL-3.0-only"
-    assert "GPL-3.0-only" in _README.read_text(encoding="utf-8")
-    assert '"license": "GPL-3.0-only"' in manifest
-    assert "GPL-3.0-only" in version_info
+    components = {item["id"]: item for item in manifest["components"]}
+    assert components["sdp"]["license"] == "GPL-3.0-only"
+
+    license_section = re.search(
+        r"^## ライセンス\r?\n\r?\n(?P<body>.*?)(?=^## |\Z)",
+        readme,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert license_section is not None
+    assert license_section.group("body").splitlines()[0] == (
+        "sdpのcombined workはGPL-3.0-onlyで配布する。"
+    )
+
+    legal_copyright = re.findall(r"StringStruct\('LegalCopyright',\s*'([^']+)'\)", version_info)
+    assert legal_copyright == ["Copyright (c) sdp contributors. GPL-3.0-only."]

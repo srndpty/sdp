@@ -28,7 +28,6 @@ def _create_minimum_package(root: Path) -> None:
         "_internal/PySide6/avformat-61.dll",
         "_internal/PySide6/avutil-59.dll",
         "_internal/PySide6/swresample-5.dll",
-        "_internal/VCRUNTIME140.dll",
         "_internal/LICENSE",
         "_internal/THIRD_PARTY_NOTICES.txt",
         "_internal/CORRESPONDING_SOURCE.md",
@@ -37,7 +36,6 @@ def _create_minimum_package(root: Path) -> None:
         "_internal/licenses/common/LGPL-2.1.txt",
         "_internal/licenses/common/Apache-2.0.txt",
         "_internal/licenses/common/libffi-LICENSE.txt",
-        "_internal/licenses/common/Mesa-llvmpipe-NOTICE.txt",
         "_internal/licenses/Python/LICENSE.txt",
         "_internal/licenses/PySide6/LicenseRef-Qt-Commercial.txt",
         "_internal/licenses/numpy/LICENSE.txt",
@@ -71,13 +69,20 @@ def test_missing_runtime_and_development_files_are_reported(tmp_path: Path) -> N
     assert any("ユーザーデータ" in failure for failure in failures)
 
 
-def test_unused_gpl_and_openssl_runtimes_are_rejected(tmp_path: Path) -> None:
-    """未使用のQt Virtual KeyboardとOpenSSL backendを再混入させない。"""
+def test_excluded_runtimes_are_rejected(tmp_path: Path) -> None:
+    """未使用runtimeとOS／Redistributable側のruntimeを再混入させない。"""
     _create_minimum_package(tmp_path)
     for relative in (
         "_internal/PySide6/Qt6VirtualKeyboard.dll",
         "_internal/PySide6/plugins/tls/qopensslbackend.dll",
         "_internal/PySide6/libssl-3-x64.dll",
+        "_internal/PySide6/opengl32sw.dll",
+        "_internal/PySide6/VCRUNTIME140.dll",
+        "_internal/PySide6/MSVCP140_2.dll",
+        "_internal/numpy.libs/msvcp140-hash.dll",
+        "_internal/concrt140.dll",
+        "_internal/ucrtbase.dll",
+        "_internal/api-ms-win-crt-runtime-l1-1-0.dll",
     ):
         path = tmp_path / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -85,7 +90,7 @@ def test_unused_gpl_and_openssl_runtimes_are_rejected(tmp_path: Path) -> None:
 
     failures = validate_package_layout(tmp_path)
 
-    assert len([failure for failure in failures if "未使用runtime" in failure]) == 3
+    assert len([failure for failure in failures if "未使用runtime" in failure]) == 10
 
 
 def test_license_documents_must_be_readable_next_to_the_executable(tmp_path: Path) -> None:

@@ -16,7 +16,16 @@ _FORBIDDEN_RUNTIME_NAMES: Final = frozenset(
         "qopensslbackend.dll",
         "libssl-3-x64.dll",
         "libcrypto-3-x64.dll",
+        "opengl32sw.dll",
+        "ucrtbase.dll",
     }
+)
+
+_FORBIDDEN_RUNTIME_PREFIXES: Final = (
+    "api-ms-win-",
+    "concrt140",
+    "msvcp140",
+    "vcruntime140",
 )
 
 
@@ -44,7 +53,6 @@ def validate_package_layout(package_directory: Path) -> tuple[str, ...]:
         "FFmpeg avformat": "avformat-*.dll",
         "FFmpeg avutil": "avutil-*.dll",
         "FFmpeg swresample": "swresample-*.dll",
-        "Visual C++ Runtime": "VCRUNTIME*.dll",
         "sdp license（_internal内）": "LICENSE",
         "third-party notices（_internal内）": "THIRD_PARTY_NOTICES.txt",
         "corresponding source notice（_internal内）": "CORRESPONDING_SOURCE.md",
@@ -53,7 +61,6 @@ def validate_package_layout(package_directory: Path) -> tuple[str, ...]:
         "LGPL-2.1 license": "licenses/common/LGPL-2.1.txt",
         "Apache-2.0 license": "licenses/common/Apache-2.0.txt",
         "libffi license": "licenses/common/libffi-LICENSE.txt",
-        "Mesa llvmpipe notice": "licenses/common/Mesa-llvmpipe-NOTICE.txt",
         "Python license": "licenses/Python/LICENSE.txt",
         "PySide6 license notice": "licenses/PySide6/LicenseRef-Qt-Commercial.txt",
         "NumPy license": "licenses/numpy/LICENSE.txt",
@@ -74,7 +81,10 @@ def validate_package_layout(package_directory: Path) -> tuple[str, ...]:
             failures.append(f"開発用ディレクトリが混入しています: {item.relative_to(root)}")
         if item.is_file() and item.name.lower() in _FORBIDDEN_USER_FILES:
             failures.append(f"ユーザーデータが混入しています: {item.relative_to(root)}")
-        if item.is_file() and item.name.lower() in _FORBIDDEN_RUNTIME_NAMES:
+        if item.is_file() and (
+            item.name.lower() in _FORBIDDEN_RUNTIME_NAMES
+            or item.name.lower().startswith(_FORBIDDEN_RUNTIME_PREFIXES)
+        ):
             failures.append(f"未使用runtimeが混入しています: {item.relative_to(root)}")
         if item.is_file() and item.suffix.lower() in {".py", ".pyc"}:
             failures.append(f"Pythonソース／キャッシュが混入しています: {item.relative_to(root)}")

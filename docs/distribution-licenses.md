@@ -23,11 +23,17 @@ release gateを管理するための資料である。
   package layout検査で再混入を失敗させる。
 - **OpenSSL**: sdpはTLSを使わない。`qopensslbackend.dll`、`libssl-3-x64.dll`、
   `libcrypto-3-x64.dll`を除外し、再混入をpackage layout検査で失敗させる。
+- **Mesa llvmpipe**: software OpenGL fallbackを必須要件としないため、由来を確定できない
+  `opengl32sw.dll`を除外する。package layout検査で再混入を失敗させる。
+- **MSVC／Universal CRT**: `VCRUNTIME140*.dll`、`MSVCP140*.dll`、`concrt140*.dll`、
+  `ucrtbase.dll`、`api-ms-win-*.dll`を除外する。Windows 11標準のUniversal CRTと、利用者が
+  別途導入するMicrosoft Visual C++ v14 Redistributable x64を前提条件にする。NumPyのpydは
+  ハッシュ付きMSVCP import名を標準の`MSVCP140.dll`へ戻し、処理前wheel、変換実装、lockfile、
+  生成物hashを対応source資料へ含める。
+  installerはHKLMを読み取って導入済みか確認し、不足時は公式ページを案内して中止する。
+  Redistributable自体は同梱・自動実行せず、per-user／UACなしの契約を維持する。
 - **libffi 3.4.6**: uvが使用するpython-build-standaloneの`BUILD=20260127`に対応する
   build sourceでversionと原文を確認し、原文を同梱する。
-- **Mesaの既知の表示**: Qt公式third-party attributionにあるBrian Paul、Khronos Group、
-  yohhoyのcopyrightとMIT／Boost Software License 1.0本文を同梱する。binaryの厳密な
-  構成特定は未完了のため、Mesa自体はblockerのままとする。
 - **原文**: GPL-3.0、LGPL-3.0、LGPL-2.1、Apache-2.0、libffiの原文を
   `packaging/license-texts/`でsource管理し、wheelの内容に依存せず同梱する。
 - **CPython / NumPy / PyInstaller bootloader**: 各配布元の原文を同梱する。
@@ -40,40 +46,22 @@ release gateを管理するための資料である。
 GPL/LGPL componentの対応sourceを、binaryと同じGitHub Releaseから取得可能にする必要がある。
 対象versionと必要物は`CORRESPONDING_SOURCE.md`に固定した。外部公開可能とする判断基準は次の通り。
 
-- sdp、PySide6 / Shiboken 6.10.3、Qt 6.10.3、Mutagen 1.48.1、FFmpeg n7.1.3、
-  CPython 3.13.11 / python-build-standalone BUILD 20260127のsource archiveがreleaseにある
+- sdp、PySide6 / Shiboken 6.10.3、Qt 6.10.3、Mutagen 1.48.1、FFmpeg n7.1.3の
+  source archiveがreleaseにある
 - FFmpeg archiveにLGPLだけでなくBSD／ISC／MIT／MPL-2.0等の全third-party attributionがある
 - sdpのbuild script、lockfile、PyInstaller spec、FFmpeg configure内容を取得できる
 - source archiveのSHA-256とcomponent versionをrelease manifestで検査できる
+- PySide6／Shiboken wheel、Qt DLL、source tag、SBOM／build configuration、patchの対応根拠を
+  `build-info.json`で照合できる
 - binaryだけのreleaseをCIが拒否する
 
 単にupstream URLを記載しただけでは完了扱いにしない。
 
-### 2. Mesa llvmpipe
-
-PySide6 wheelの`opengl32sw.dll`はQtのsoftware OpenGL fallbackである。Qt公式のattributionでは
-Mesa / LLVM由来のMIT・Boost系条件が示され、既知のcopyright・license本文は同梱したが、
-同梱binaryの正確なversion・patch・全componentをwheelだけから確定できていない。
-
-判断基準は、PySide6 6.10.3 binaryに対応するQt SBOMまたはbuild記録からversion・componentを
-特定し、そのすべてのcopyright・license原文を同梱すること。特定できない場合は
-`opengl32sw.dll`を除外し、software OpenGL fallbackなしで対応環境を明記して実機検証する。
-
-### 3. Microsoft Visual C++ Runtime
-
-現在のonedirには`VCRUNTIME140*.dll`等が含まれる。GPLのSystem Library例外とMicrosoftの
-再頒布条件を同時に満たす配布形態を確定していない。
-
-判断基準は、次のいずれかを専門家確認を含めて確定すること。
-
-- runtime DLLをsdp配布物から除外し、Microsoft Visual C++ Redistributableを前提条件として
-  clean Windows環境でinstall・起動・再生を確認する
-- runtimeを同梱できる明確な根拠と適用条件を文書化する
-
 ## 現在の公開可否
 
 **まだ外部公開可能とは判断しない。** GPL-3.0-onlyの選択、主要原文の同梱、未使用の
-Qt Virtual Keyboard / OpenSSL除外、libffiの特定までは完了したが、上記3 blockerが残る。
+Qt Virtual Keyboard／OpenSSL／Mesa／MSVC runtime除外、libffiの特定までは完了したが、
+対応source archiveとbinaryとの対応根拠が残る。
 ZIPとinstallerは引き続き技術検証用とする。
 
 ## 機械検査

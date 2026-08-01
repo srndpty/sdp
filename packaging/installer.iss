@@ -8,6 +8,7 @@
 ;
 ; 重要な契約:
 ;   - per-user（%LOCALAPPDATA%\Programs\sdp）。UAC 昇格を要求せず HKLM へ書かない。
+;   - VC++ v14 Redistributable x64は同梱せず、HKLMを読み取って導入済みか確認する。
 ;   - 「プログラムから開く」候補として登録するだけで、既定アプリは変更しない。
 ;     UserChoice には一切触れない。
 ;   - アンインストールしてもユーザーデータ（%LOCALAPPDATA%\sdp）は削除しない。
@@ -145,6 +146,8 @@ const
   FILE_USE_UNAVAILABLE = 2;
   ERROR_SHARING_VIOLATION = 32;
   ERROR_LOCK_VIOLATION = 33;
+  VC_RUNTIME_KEY = 'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64';
+  VC_RUNTIME_URL = 'https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist';
 
 var
   UpgradeBackupActive: Boolean;
@@ -180,6 +183,44 @@ begin
     'Inno Setup: App Path',
     Directory
   ) and (Directory <> '');
+end;
+
+function IsVCRuntimeInstalled(): Boolean;
+var
+  Installed: Cardinal;
+begin
+  Result := RegQueryDWordValue(
+    HKEY_LOCAL_MACHINE,
+    VC_RUNTIME_KEY,
+    'Installed',
+    Installed
+  ) and (Installed = 1);
+end;
+
+function EnsureVCRuntime(): Boolean;
+var
+  ErrorCode: Integer;
+  MessageText: String;
+begin
+  Result := IsVCRuntimeInstalled();
+  if Result then
+    Exit;
+
+  MessageText :=
+    'Microsoft Visual C++ v14 Redistributable x64が必要です。' + #13#10 + #13#10 +
+    'Microsoft公式の再頒布可能パッケージをインストールしてから、' +
+    'sdpのセットアップを再実行してください。' + #13#10 + #13#10 +
+    VC_RUNTIME_URL;
+  Log(MessageText);
+
+  if not WizardSilent then
+  begin
+    if MsgBox(MessageText + #13#10 + #13#10 +
+      'Microsoft公式ページを開きますか？', mbError, MB_YESNO) = IDYES then
+      if not ShellExec('open', VC_RUNTIME_URL, '', '', SW_SHOWNORMAL, ewNoWait, ErrorCode) then
+        MsgBox('Microsoft公式ページを開けませんでした。' + #13#10 + VC_RUNTIME_URL,
+          mbError, MB_OK);
+  end;
 end;
 
 function SameDirectory(const Left: String; const Right: String): Boolean;
@@ -277,7 +318,10 @@ var
   Registered: String;
   ErrorMessage: String;
 begin
-  Result := True;
+  Result := EnsureVCRuntime();
+  if not Result then
+    Exit;
+
   if not RegisteredInstallDirectory(Registered) then
     Exit;
 

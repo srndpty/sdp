@@ -309,6 +309,13 @@ PyInstaller 6の`onedir`形式で、consoleを表示しない`dist\sdp\sdp.exe`�
 Pythonやuvをインストールしていない環境でも、このディレクトリ全体を維持すれば起動できる。
 `sdp.exe`だけを`_internal`から切り離してコピーしてはならない。
 
+実行環境はWindows 11 x64と、Microsoft Visual C++ v14 Redistributable x64を必要とする。
+sdpはMSVC／Universal CRTのDLLを同梱しない。`VCRUNTIME140.dll`または`MSVCP140.dll`が
+見つからないと表示される場合は、[Microsoft公式の最新サポート対象Visual C++
+Redistributable](https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist)を
+インストールする。installerは導入済みかを確認するだけで、Redistributableの同梱・
+自動install・UAC昇格は行わない。
+
 ```powershell
 pwsh -File scripts/build-package.ps1
 pwsh -File scripts/package-smoke.ps1
@@ -567,5 +574,9 @@ FFmpeg CLI はテスト音源生成用の開発ツールであり、sdp 本体�
 
 ## ライセンス
 
-GPL-3.0-only。配布物に含まれる第三者componentと、対応source公開前の残課題は
+sdpのcombined workはGPL-3.0-onlyで配布する。
+過去にMIT Licenseで公開された部分は、元の条件でも引き続き利用できる。
+[LICENSES/MIT.txt](./LICENSES/MIT.txt)とgit履歴を参照する。
+
+配布物に含まれる第三者componentと、対応source公開前の残課題は
 [docs/distribution-licenses.md](./docs/distribution-licenses.md)を参照する。

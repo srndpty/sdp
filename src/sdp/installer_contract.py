@@ -7,7 +7,7 @@
 検査する主な契約:
 
 - per-user（``{localappdata}\\Programs\\sdp``）で、UAC昇格を要求しない
-- registryはHKCUだけ。HKLM・UserChoice・FileExtsへ書かない
+- registryへの書き込みはHKCUだけ。HKLMはVC++ Runtimeの導入確認で読み取るだけ
 - 「プログラムから開く」候補として登録するが、既定アプリは変更しない
 - uninstallでユーザーデータ（``%LOCALAPPDATA%\\sdp``）を削除しない
 - versionと入力配布物を外部から注入し、.issへ手書きしない
@@ -45,6 +45,8 @@ CONTRACT_CODE_SYMBOLS: Final = (
     "function CleanPreviousInstall(): Boolean",
     "function RestoreUpgradeBackup",
     "function InitializeSetup",
+    "function IsVCRuntimeInstalled",
+    "function EnsureVCRuntime",
     "function PrepareToInstall",
     "function InitializeUninstall",
     "procedure DeinitializeSetup",
@@ -61,11 +63,10 @@ copy／obsolete一覧）や中間ファイル名は契約に含めない。こ�
 _APPLICATIONS_KEY: Final = r"Software\Classes\Applications\sdp.exe"
 _CAPABILITIES_KEY: Final = r"Software\sdp\Capabilities"
 # コメント以外の行に現れてはならない語（既定アプリの奪取とmachine全体への書き込みの防止）。
+# HKLMはVC++ Runtimeの読み取りに限って許容し、[Registry]のroot検査で書き込みを拒否する。
 _FORBIDDEN_TERMS: Final = (
     "UserChoice",
     "FileExts",
-    "HKLM",
-    "HKEY_LOCAL_MACHINE",
     "HKCR",
     "HKEY_CLASSES_ROOT",
     "HKA",
@@ -123,6 +124,7 @@ def validate_installer_contract(script: InnoScript) -> tuple[str, ...]:
     failures.extend(_check_shortcuts(script))
     failures.extend(_check_uninstall(script))
     failures.extend(_check_presentation(script))
+    failures.extend(_check_runtime_prerequisite(script))
     failures.extend(_check_running_instance(script))
     return tuple(failures)
 
@@ -361,6 +363,26 @@ def _check_presentation(script: InnoScript) -> list[str]:
     confirm = script.directive("Messages", "japanese.ConfirmUninstall") or ""
     if "保持" not in confirm:
         failures.append("uninstall確認がユーザーデータ保持を伝えていません")
+    return failures
+
+
+def _check_runtime_prerequisite(script: InnoScript) -> list[str]:
+    failures: list[str] = []
+    code = script.code
+    for required in (
+        r"SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64",
+        "RegQueryDWordValue",
+        "HKEY_LOCAL_MACHINE",
+        "Installed",
+        "latest-supported-vc-redist",
+        "if not Result then",
+    ):
+        if required not in code:
+            failures.append(f"VC++ Redistributableの前提条件検査に{required}がありません")
+    if "ShellExec('open', VC_RUNTIME_URL" not in code:
+        failures.append("VC++ RedistributableのMicrosoft公式案内を開く経路がありません")
+    if "Result := EnsureVCRuntime();" not in code:
+        failures.append("InitializeSetupがVC++ Redistributableを検査していません")
     return failures
 
 

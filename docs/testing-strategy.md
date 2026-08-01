@@ -141,8 +141,9 @@ uv run pytest -m audio
 - pytest-qt の `qtbot` で主要操作を検証する
   （ボタン → Controller の呼び出し、ショートカット、シークバー）。
 - pytest-qtでMainWindowと主要controlの`accessibleName`を契約として固定する。
-- pywinautoで配布版exeを起動し、日本語・空白入りpath、主要control、設定dialog、
-  Cancel、正常終了をUI Automation経由で検証する。
+- pywinautoで配布版exeを起動し、日本語・空白入りpath、主要control、設定dialogの
+  Cancel／Apply／再起動復元、再生／pause／resume／mute／stop、正常終了を
+  UI Automation経由で検証する。
 - 可聴音、描画品質、DPI、Explorer D&D、foreground制約、SmartScreenは機械判定が
   不十分なため、該当する手動チェックだけを残す。
 
@@ -396,18 +397,22 @@ RSSは60.9→65.5MBでt=30s以降横ばい、リングバッファ3本合計1,03
 
 ## 6.12 P6-A 手動スモーク（設定画面と可視化ON/OFF）
 
-実画面で行う。自動テストでは代替できないため**リリース前ゲートとして残す**。
+画面の視認や負荷計測が必要な項目は**リリース前ゲートとして残す**。以下のうち
+`[x]`は配布版をpywinautoで操作し、隔離profile上の保存結果まで自動確認する。
 
-- [ ] 「ツール」→「設定...」で設定画面が開き、複数回開閉できる
+- [x] 「ツール」→「設定...」で設定画面が開き、複数回開閉できる
 - [ ] 開いている状態でもう一度開くと、新しい窓ではなく前面へ出る
-- [ ] Applyで閉じずに反映され、OKで反映して閉じる
-- [ ] Apply後にCancelしても、適用済みの変更が戻らない
-- [ ] Applyしていない編集はCancel／Escで破棄される
+- [x] Applyで閉じずに反映される
+- [ ] OKで反映して閉じる
+- [x] Apply後にCancelしても、適用済みの変更が戻らない
+- [x] Applyしていない編集はCancelで破棄される
+- [ ] Applyしていない編集はEscで破棄される
 - [ ] 波形・スペクトラム・レベルメーターを個別にON/OFFできる
 - [ ] 3つすべてOFFでもプレイリストと再生操作が崩れない
 - [ ] 3つすべてONへ戻すと、現在再生中の曲へ追従して表示が再開する
 - [ ] 非表示にするとCPU負荷が下がる（タスクマネージャで目視）
-- [ ] 再起動後に設定（速度・ピッチ・表示ON/OFF）が復元される
+- [x] 再起動後に設定した速度が復元される
+- [ ] 再起動後にピッチ・表示ON/OFFが復元される
 - [ ] 旧version 1の`settings.json`から正常起動し、可視化はすべて表示になる
 - [ ] version 1のファイルは起動しただけでは書き換わらず、設定変更後にversion 2になる
 - [ ] 破損した`settings.json`では既定値で起動し、元ファイルを上書きしない
@@ -498,8 +503,9 @@ QtのoffscreenテストではOSのforeground制約を完全に代替できない
 自動検証では、CLI純粋関数、通常起動／selftest境界、frozen時のresource path、
 selftestがWindow・設定・cacheを作らず、一時WAVを回収することを確認する。
 `tools/package_layout.py`は`sdp.exe`、Python DLL、Qt Core／GUI／Widgets／Multimedia、
-`qwindows.dll`、media plugin、FFmpeg DLL、VC Runtime、必須ライセンス原文を検査し、
-Python source、tests、開発ツール、ユーザー保存ファイルの混入を拒否する。
+`qwindows.dll`、media plugin、FFmpeg DLL、必須ライセンス原文を検査する。Python source、
+tests、開発ツール、ユーザー保存ファイルに加え、Mesa／MSVC／Universal CRT DLLの混入を
+拒否する。
 
 ```powershell
 pwsh -File scripts/build-package.ps1
@@ -510,22 +516,25 @@ pwsh -File scripts/package-gui-smoke.ps1
 スモークは配布物をrepository外の一時directoryへコピーし、開発用Pythonやuvを含まない
 制限PATHと隔離LOCALAPPDATAで`sdp.exe --selftest`を実行する。続けてcopy内のFFmpeg media
 pluginとavcodec DLLを1件ずつ退避し、どちらもselftestが終了コード1にすることを確認する。
-`package-gui-smoke.ps1`は実GUIを自動起動・操作・終了する。可聴音、OS統合、描画品質は
-判定しないため、以下の未チェック項目をWindows 11で別途確認する。
+`package-gui-smoke.ps1`は実GUIを自動起動し、設定のCancel／Apply／再起動復元と、
+QMediaPlayerによるWAVの再生／pause／resume／mute／stopをUI Automationで操作して終了する。
+可聴音、OS統合、描画品質は判定しないため、以下の未チェック項目をWindows 11で別途確認する。
 
 2026-08-01に生成ZIPをrepository外へ展開し、隔離`LOCALAPPDATA`でGUIを起動した。
-MainWindow表示、日本語・空白入りFLACのplaylist保存、通常closeのexit 0、ログ生成、
-終了後の残processなしまで機械的に確認した。画面内容と可聴再生は未確認。
+MainWindow表示、日本語・空白入りpath、主要control、WAVの再生状態遷移、設定の破棄と保存、
+同じprofileでの再起動、通常closeのexit 0、終了後の残processなしまで機械的に確認した。
+画面の描画品質と可聴音は未確認。
 
 - [x] `sdp.exe`を直接起動し、consoleが表示されずWindowが開く
 - [ ] WAV／MP3／FLAC／Ogg Vorbis／Opus／M4A／AACを低音量で再生できる
 - [x] 日本語・空白pathと複数の絶対pathを受け取れる
+- [x] WAVを実際に再生し、pause／resume／mute／stopの状態遷移が成立する
 - [ ] 相対pathを受け取れる
 - [ ] 起動済み配布版へ別PowerShellから転送でき、2つ目のprocessが残らない
 - [ ] 最小化復帰と最大化維持が動作する
 - [ ] 波形・スペクトラム・レベル、速度・ピッチを実音で確認できる
 - [x] UI Automationから通常終了するとprocessが残らない
-- [ ] 終了直後に同じprofileで再起動できる
+- [x] 終了直後に同じprofileで再起動し、Apply済み設定を復元できる
 - [ ] read-onlyな配置directoryから起動してもユーザーデータは`LOCALAPPDATA`へ保存される
 - [ ] Windows Defenderのスキャン結果と初回起動警告を記録する
 - [x] `dist/sdp`をZIP化・展開してもselftestとGUI起動が成功する
@@ -566,7 +575,7 @@ uv run python tools/license_audit.py dist/sdp
 | ユーザーdata書き込み先 | `LOCALAPPDATA`配下のみ（`sdp/logs/sdp.log`、GUI起動時は`playlist.json`／`ui-state.json`） |
 | repository外からのGUI起動 | Window表示・正常終了・残プロセスなし |
 | Defender（engine 1.1.26060.3008 / signature 1.455.422.0 / 2026-07-30） | ZIPとdist/sdpのquick scanで検出0件、quarantineなし |
-| package | 332ファイル / 156.8 MiB（ZIP 65.5 MiB） |
+| package | 278ファイル / 132.7 MiB（ZIP 56.2 MiB） |
 | build時間 | onedir build 約56〜68秒、release全体 約69〜97秒 |
 | 再現性 | 2回buildでファイル集合・数・サイズ・runtime・pluginが一致。`sdp.exe`と`base_library.zip`はbuild時刻埋め込みのため不一致で、ZIP hashも不一致 |
 
@@ -604,6 +613,8 @@ uv run python tools/license_audit.py dist/sdp
 
 - **scope**: `PrivilegesRequired=lowest`、`PrivilegesRequiredOverridesAllowed`が空、
   install先が`{localappdata}\Programs\sdp`、`MinVersion`指定、Program Files非使用。
+- **前提runtime**: VC++ v14 Redistributable x64をHKLMから読み取りだけで検出し、不足時は
+  Microsoft公式ページを案内して中止する。Redistributableを同梱・自動実行しない。
 - **upgrade**: AppIdが固定でversionを含まない、`OutputBaseFilename`へversionが入る、
   cleanup対象を固定AppIdの登録済みinstall directoryに限定すること、旧runtimeを
   backupへ退避して失敗時に復元すること、アンインストーラーの保護。

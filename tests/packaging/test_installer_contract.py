@@ -140,15 +140,26 @@ def test_files_come_from_the_verified_package_only(script: InnoScript) -> None:
 
 
 def test_registry_writes_stay_in_hkcu(script: InnoScript) -> None:
-    """registryはHKCUだけ。HKLM／HKCRへ書かない。"""
+    """registry書き込みはHKCUだけ。HKLMは前提runtimeの読み取りに限る。"""
     assert registry_roots(script.section_entries("registry")) == ("HKCU",)
 
 
 def test_default_application_is_never_taken(script: InnoScript) -> None:
     """UserChoiceとFileExtsへ触れず、既定アプリを奪わない。"""
     body = non_comment_source(script)
-    for term in ("UserChoice", "FileExts", "HKLM", "HKCR"):
+    for term in ("UserChoice", "FileExts", "HKCR"):
         assert term not in body
+
+
+def test_vc_runtime_is_checked_without_elevation_or_bundling(script: InnoScript) -> None:
+    """VC++ v14 x64をHKLMから読み、不足時は公式案内を出して中止する。"""
+    assert "function IsVCRuntimeInstalled" in script.code
+    assert r"SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" in script.code
+    assert "RegQueryDWordValue" in script.code
+    assert "HKEY_LOCAL_MACHINE" in script.code
+    assert "latest-supported-vc-redist" in script.code
+    assert "Result := EnsureVCRuntime();" in script.code
+    assert "vc_redist.x64.exe" not in script.source
 
 
 def test_open_with_registration(script: InnoScript) -> None:
@@ -349,6 +360,11 @@ def _mutate(source: str, old: str, new: str) -> tuple[str, ...]:
             "AppId",
         ),
         ("function InitializeSetup", "function OnInitialize", "function InitializeSetup"),
+        (
+            "Result := EnsureVCRuntime();",
+            "Result := True;",
+            "VC++ Redistributable",
+        ),
         (
             "OutputBaseFilename=sdp-{#AppVersion}-windows-{#Architecture}-setup",
             "OutputBaseFilename=sdp-windows-{#Architecture}-setup",

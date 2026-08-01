@@ -9,6 +9,7 @@ import sys
 from PyInstaller.utils.hooks import copy_metadata
 
 from sdp import __version__
+from sdp.package_runtime import replace_hashed_msvc_imports
 from sdp.windows_version import render_version_info
 
 
@@ -96,7 +97,6 @@ for license_name in (
     "LGPL-2.1.txt",
     "Apache-2.0.txt",
     "libffi-LICENSE.txt",
-    "Mesa-llvmpipe-NOTICE.txt",
 ):
     license_path = STATIC_LICENSE_DIRECTORY / license_name
     if not license_path.is_file():
@@ -136,19 +136,30 @@ analysis = Analysis(
     optimize=0,
 )
 
-# sdpが利用しないGPL-only moduleとTLS backendはwheelの包括的hookから入るため、
-# Analysis後に配布対象から除く。Qt Networkのlocal socketとWindows native TLS pluginは残す。
+# sdpが利用しないruntimeと、OS／別installerから提供するruntimeはAnalysis後に除く。
+# Qt Networkのlocal socketとWindows native TLS pluginは残す。
 _excluded_runtime_suffixes = (
     "/pyside6/qt6virtualkeyboard.dll",
     "/pyside6/plugins/platforminputcontexts/qtvirtualkeyboardplugin.dll",
     "/pyside6/plugins/tls/qopensslbackend.dll",
     "/libssl-3-x64.dll",
     "/libcrypto-3-x64.dll",
+    "/pyside6/opengl32sw.dll",
 )
+
+
+def is_excluded_runtime(destination):
+    """配布しないruntimeかをPyInstaller上の配置先で判定する。"""
+    normalized = "/" + destination.replace("\\", "/").lower()
+    name = normalized.rsplit("/", 1)[-1]
+    return normalized.endswith(_excluded_runtime_suffixes) or (
+        name.startswith(("vcruntime140", "msvcp140", "concrt140", "api-ms-win-"))
+        and name.endswith(".dll")
+    ) or name == "ucrtbase.dll"
+
+
 analysis.binaries = [
-    entry
-    for entry in analysis.binaries
-    if not ("/" + entry[0].replace("\\", "/").lower()).endswith(_excluded_runtime_suffixes)
+    entry for entry in analysis.binaries if not is_excluded_runtime(entry[0])
 ]
 pyz = PYZ(analysis.pure)
 
@@ -187,3 +198,9 @@ collect = COLLECT(
 package_root = Path(DISTPATH) / "sdp"
 for document in project_documents:
     shutil.copy2(document, package_root / document.name)
+
+# NumPy wheelが私有名へ書き換えたMSVCP importを標準名へ戻す。これにより
+# runtime DLLを同梱せず、VC++ Redistributableから解決できる。
+patched_numpy_extensions = replace_hashed_msvc_imports(package_root)
+if not patched_numpy_extensions:
+    raise RuntimeError("NumPyのハッシュ付きMSVCP importを検出できません")

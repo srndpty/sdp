@@ -69,6 +69,7 @@ sdp/
 │   │   └── logging_setup.py  # RotatingFileHandler、Qt ログ統合、未捕捉例外処理
 │   └── ui/
 │       ├── main_window.py    # レイアウト骨格・メニュー・ドック配置のみ（god class 禁止）
+│       ├── legal_dialog.py   # GPL告知・ライセンス文書の読み取り専用表示
 │       ├── player_controls.py# 再生ボタン群・シークバー・音量・時間表示
 │       ├── speed_panel.py    # 速度スライダー・プリセット・ピッチ補正トグル
 │       ├── playlist_view.py  # QTableView と D&D、コンテキストメニュー
@@ -1497,7 +1498,7 @@ Qt tempへ生成し、FFmpeg backendを明示した`QAudioDecoder`で最低1buff
 成功0、依存または書き込み失敗1、不正引数2を返す。これは音を出さずにplugin loadを診断するが、
 実音や圧縮形式を含む全codecの受け入れは代替しない。
 
-layout検査はFFmpeg／Windows media plugin、FFmpeg runtime DLL、VC Runtimeに加え、宣言した
+layout検査はFFmpeg／Windows media plugin、FFmpeg runtime DLLに加え、宣言した
 project／Python／PySide6／NumPy／Mutagen／PyInstallerのライセンス文書を必須にする。specも
 必須ライセンス原文をwheelから検出できない場合はbuildを失敗させ、欠落した配布物を作らない。
 

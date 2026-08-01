@@ -6,6 +6,7 @@
 
 import logging
 from collections.abc import Callable, Sequence
+from functools import partial
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, Signal
@@ -34,6 +35,7 @@ from sdp.services.ui_state import (
     fit_window_state,
 )
 from sdp.services.waveform_analysis import WaveformAnalysisService
+from sdp.ui.legal_dialog import ABOUT_NOTICE, LegalDocumentDialog, load_legal_document
 from sdp.ui.player_controls import PlayerControls
 from sdp.ui.playlist_view import PlaylistView
 from sdp.ui.settings_dialog import SettingsDialog
@@ -104,6 +106,7 @@ class MainWindow(QMainWindow):
         self._controller = controller
         self._app_settings = app_settings
         self._settings_dialog: SettingsDialog | None = None
+        self._legal_dialog: LegalDocumentDialog | None = None
         self._has_current_source_error = False
         self._last_open_directory: Path | None = None
         # 表示前はレイアウトが確定しないため、最初のshowEventで比率を適用し直す。
@@ -215,6 +218,17 @@ class MainWindow(QMainWindow):
         settings_action.triggered.connect(self.open_settings)
         tools_menu.addAction(settings_action)
 
+        help_menu = self.menuBar().addMenu("ヘルプ(&H)")
+        for label, object_name, callback in (
+            ("sdpについて(&A)", "aboutAction", self.show_about),
+            ("ライセンスを表示(&L)", "showLicenseAction", self.show_license),
+            ("第三者ライセンス(&T)", "showThirdPartyLicensesAction", self.show_third_party),
+        ):
+            action = QAction(label, self)
+            action.setObjectName(object_name)
+            action.triggered.connect(callback)
+            help_menu.addAction(action)
+
     # -- 操作 ---------------------------------------------------------------
 
     @property
@@ -231,6 +245,36 @@ class MainWindow(QMainWindow):
     def settings_dialog(self) -> SettingsDialog | None:
         """開いている設定ダイアログ（無ければ ``None``）。"""
         return self._settings_dialog
+
+    @property
+    def legal_dialog(self) -> LegalDocumentDialog | None:
+        """開いている法的告知ダイアログ（無ければ``None``）。"""
+        return self._legal_dialog
+
+    def show_about(self) -> None:
+        """GPLの適切な法的告知を表示する。"""
+        self._show_legal_dialog("sdpについて", ABOUT_NOTICE)
+
+    def show_license(self) -> None:
+        """GPLv3本文を表示する。"""
+        self._show_legal_dialog("ライセンス", load_legal_document("LICENSE"))
+
+    def show_third_party(self) -> None:
+        """第三者ソフトウェアの通知を表示する。"""
+        self._show_legal_dialog("第三者ライセンス", load_legal_document("THIRD_PARTY_NOTICES.txt"))
+
+    def _show_legal_dialog(self, title: str, text: str) -> None:
+        dialog = self._legal_dialog
+        if dialog is not None:
+            dialog.close()
+        dialog = LegalDocumentDialog(title, text, self)
+        dialog.finished.connect(partial(self._forget_legal_dialog, dialog))
+        self._legal_dialog = dialog
+        dialog.show()
+
+    def _forget_legal_dialog(self, dialog: LegalDocumentDialog, _result: int) -> None:
+        if self._legal_dialog is dialog:
+            self._legal_dialog = None
 
     def open_settings(self) -> None:
         """設定ダイアログを開く。既に開いていれば前面へ出す（二重に開かない）。"""
