@@ -443,6 +443,11 @@ class MainWindow(QMainWindow):
         total = sum(self._splitter.sizes())
         player, playlist = distribute_splitter_sizes(state, total)
         self._splitter.setSizes([player, playlist])
+        # playerPanel は内容高を上限にしている。保存値がその上限を超えると、
+        # QSplitter は要求した領域だけ確保する一方、子Widget自体は上限高で止まり、
+        # playerPanel とプレイリストの間に描画されない空間が残る。復元後にも
+        # 実際の内容高で再配分し、確保領域とWidget geometryを一致させる。
+        self._fit_player_panel_to_contents()
 
     def _fit_player_panel_to_contents(self) -> None:
         """上側Panelを内容高へ固定し、Splitterの余剰をプレイリストへ渡す。

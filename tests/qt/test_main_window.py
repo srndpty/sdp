@@ -35,14 +35,7 @@ from sdp.core.playlist.playback_controller import PlaylistPlaybackController
 from sdp.core.playlist.types import RepeatMode
 from sdp.services.pcm_tap import PcmTap
 from sdp.services.settings import AppSettings, AppSettingsController
-from sdp.services.ui_state import (
-    MINIMUM_SPLITTER_SIZE,
-    ScreenRect,
-    SplitterState,
-    UiState,
-    WindowState,
-    distribute_splitter_sizes,
-)
+from sdp.services.ui_state import ScreenRect, SplitterState, UiState, WindowState
 from sdp.services.waveform_analysis import WaveformAnalysisService
 from sdp.ui import main_window as main_window_module
 from sdp.ui.legal_dialog import LegalDocumentDialog
@@ -785,19 +778,18 @@ def window_state_of(window: MainWindow) -> WindowState:
     return state
 
 
-def expected_player_ratio(window: MainWindow, saved: SplitterState, total: int) -> float:
-    """保存比率を子Widgetのminimum sizeで補正した期待値。"""
+def assert_player_and_playlist_are_packed(window: MainWindow) -> None:
+    """上側Panelとプレイリストの間にはSplitter handle以外の空間がない。"""
     splitter = window.findChild(QSplitter, "mainSplitter")
     assert splitter is not None
     player = splitter.widget(0)
     playlist = splitter.widget(1)
     assert player is not None
     assert playlist is not None
-    player_minimum = max(player.minimumHeight(), player.minimumSizeHint().height(), 0)
-    playlist_minimum = max(playlist.minimumHeight(), playlist.minimumSizeHint().height(), 0)
-    requested_player, _ = distribute_splitter_sizes(saved, total)
-    fitted_player = max(player_minimum, min(total - playlist_minimum, requested_player))
-    return fitted_player / total
+    player_layout = player.layout()
+    assert player_layout is not None
+    assert player.height() == player_layout.sizeHint().height()
+    assert playlist.geometry().top() - player.geometry().bottom() - 1 == splitter.handleWidth()
 
 
 def test_capture_returns_the_current_geometry(window: MainWindow, qtbot: QtBot) -> None:
@@ -923,8 +915,8 @@ def test_restore_moves_an_offscreen_window_back(window: MainWindow) -> None:
     assert window.geometry().y() >= 0
 
 
-def test_restore_and_capture_round_trip_the_splitter(window: MainWindow, qtbot: QtBot) -> None:
-    """Splitterは比率として復元され、captureで取り出せる。"""
+def test_restore_does_not_leave_a_gap_below_the_player(window: MainWindow, qtbot: QtBot) -> None:
+    """上側へ偏った保存値でもRMSとプレイリストの間に空間を残さない。"""
     window.resize(800, 900)
     window.show()
     qtbot.waitExposed(window)
@@ -932,19 +924,13 @@ def test_restore_and_capture_round_trip_the_splitter(window: MainWindow, qtbot: 
     saved = SplitterState(600, 200)
     window.restore_ui_state(UiState(main_splitter=saved), screens())
     qtbot.wait(20)
-    captured = window.capture_ui_state().main_splitter
-
-    assert captured is not None
-    assert captured.player_size > captured.playlist_size
-    assert captured.player_ratio == pytest.approx(
-        expected_player_ratio(window, saved, captured.total), abs=0.03
-    )
+    assert_player_and_playlist_are_packed(window)
 
 
 def test_splitter_restore_adapts_to_the_current_window_size(
     window: MainWindow, qtbot: QtBot
 ) -> None:
-    """保存時と違うWindow高さでも、比率を保って再配分する。"""
+    """保存時と違うWindow高さでも、内容を詰めてプレイリストへ割り当てる。"""
     window.resize(800, 500)
     window.show()
     qtbot.waitExposed(window)
@@ -958,9 +944,7 @@ def test_splitter_restore_adapts_to_the_current_window_size(
     assert captured is not None
     assert captured.total <= window.height()
     assert captured.playlist_size > 0
-    assert captured.player_ratio == pytest.approx(
-        expected_player_ratio(window, saved, captured.total), abs=0.03
-    )
+    assert_player_and_playlist_are_packed(window)
 
 
 def test_splitter_restore_works_with_every_visualization_hidden(
@@ -986,10 +970,8 @@ def test_splitter_restore_works_with_every_visualization_hidden(
     captured = window.capture_ui_state().main_splitter
 
     assert captured is not None
-    assert captured.playlist_size >= MINIMUM_SPLITTER_SIZE
-    assert captured.player_ratio == pytest.approx(
-        expected_player_ratio(window, saved, captured.total), abs=0.03
-    )
+    assert captured.playlist_size >= window._playlist_view.minimumHeight()  # pyright: ignore[reportPrivateUsage]
+    assert_player_and_playlist_are_packed(window)
 
 
 def test_splitter_restore_works_with_every_visualization_visible(
@@ -1006,10 +988,8 @@ def test_splitter_restore_works_with_every_visualization_visible(
     captured = window.capture_ui_state().main_splitter
 
     assert captured is not None
-    assert captured.playlist_size >= MINIMUM_SPLITTER_SIZE
-    assert captured.player_ratio == pytest.approx(
-        expected_player_ratio(window, saved, captured.total), abs=0.03
-    )
+    assert captured.playlist_size >= window._playlist_view.minimumHeight()  # pyright: ignore[reportPrivateUsage]
+    assert_player_and_playlist_are_packed(window)
 
 
 # -- 前回フォルダー ---------------------------------------------------------
