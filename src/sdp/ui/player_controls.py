@@ -153,6 +153,10 @@ class PlayerControls(QWidget):
         self._state_label = QLabel(_STATE_LABELS[PlaybackState.NO_MEDIA])
         self._state_label.setObjectName("stateLabel")
 
+        mode_button_width = self._play_button.sizeHint().width()
+        self._repeat_button.setFixedWidth(mode_button_width)
+        self._shuffle_button.setFixedWidth(mode_button_width)
+
         self._build_layout()
         self._connect_widgets()
         self._connect_controller()

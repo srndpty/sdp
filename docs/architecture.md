@@ -863,8 +863,10 @@ Mutagen による非同期メタデータ取得と表示（P2-D）。
 リピート・シャッフルはP2-C、メタデータはP2-Dで実装済み。
 
 - **`PlaylistView`**: 受け取るのは `PlaylistModel` だけ。表示、ファイル追加、
-  削除、全消去、選択に応じたボタン活性、短いステータスメッセージの要求
+  Deleteキーによる選択行の削除、全消去、短いステータスメッセージの要求
   （`message_requested`）まで。再生操作は持たず、`playlist.json` も知らない。
+  追加・削除・全消去のボタン行は重複操作なので表示しない。追加はファイルメニューか
+  D&D、全行削除はCtrl+A後のDeleteで行える。
   高さは最低240pxを確保し、復元されたSplitter比率で一覧が潰れないようにする。
 - **`MainWindow`**: `PlaybackController` と `PlaylistModel` だけを受け取り、
   `PlayerControls` と `PlaylistView` を QSplitter へ配置して

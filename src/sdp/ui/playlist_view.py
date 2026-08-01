@@ -7,15 +7,12 @@
 from pathlib import Path
 
 from PySide6.QtCore import QModelIndex, QPersistentModelIndex, Qt, Signal
-from PySide6.QtGui import QPalette
+from PySide6.QtGui import QKeyEvent, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
-    QHBoxLayout,
     QHeaderView,
-    QLabel,
     QMessageBox,
-    QPushButton,
     QStyledItemDelegate,
     QStyleOptionViewItem,
     QTableView,
@@ -91,9 +88,20 @@ class PlaylistTableView(QTableView):
     Model は内部 MIME を受け取った時点で常に移動として扱う。
     """
 
+    delete_requested = Signal()
+    """選択行の削除が要求された。Model操作はPlaylistViewへ委譲する。"""
+
     def startDrag(self, supportedActions: Qt.DropAction) -> None:
         del supportedActions
         super().startDrag(Qt.DropAction.CopyAction)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        """Deleteをプレイリスト行の削除操作として扱う。"""
+        if event.key() == Qt.Key.Key_Delete and event.modifiers() == Qt.KeyboardModifier.NoModifier:
+            self.delete_requested.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class PlaylistView(QWidget):
@@ -118,33 +126,12 @@ class PlaylistView(QWidget):
         self._table.setItemDelegate(self._delegate)
         self._configure_table()
 
-        self._add_button = QPushButton("ファイルを追加...")
-        self._add_button.setObjectName("addFilesButton")
-        self._add_button.setAccessibleName("ファイルを追加")
-        self._remove_button = QPushButton("選択項目を削除")
-        self._remove_button.setObjectName("removeSelectedButton")
-        self._remove_button.setAccessibleName("選択項目を削除")
-        self._clear_button = QPushButton("すべて消去")
-        self._clear_button.setObjectName("clearPlaylistButton")
-        self._clear_button.setAccessibleName("プレイリストを全消去")
-        self._count_label = QLabel()
-        self._count_label.setObjectName("playlistCountLabel")
-
         self._build_layout()
 
-        self._add_button.clicked.connect(self.add_files)
-        self._remove_button.clicked.connect(self.remove_selected)
-        self._clear_button.clicked.connect(self.clear_playlist)
-
-        model.rowsInserted.connect(self._update_state)
-        model.rowsRemoved.connect(self._update_state)
-        model.modelReset.connect(self._update_state)
-        self._table.selectionModel().selectionChanged.connect(self._update_state)
         # activated はダブルクリックと Enter の両方で出る（Windows の既定）。
         # doubleClicked も繋ぐと 1 回の操作で 2 度通知されるため、こちらだけ使う。
         self._table.activated.connect(self._on_entry_activated)
-
-        self._update_state()
+        self._table.delete_requested.connect(self.remove_selected)
 
     # -- 現在再生中の行 -----------------------------------------------------
 
@@ -191,16 +178,10 @@ class PlaylistView(QWidget):
         self._table.setSortingEnabled(False)
 
     def _build_layout(self) -> None:
-        buttons = QHBoxLayout()
-        buttons.addWidget(self._add_button)
-        buttons.addWidget(self._remove_button)
-        buttons.addWidget(self._clear_button)
-        buttons.addStretch(1)
-        buttons.addWidget(self._count_label)
-
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         layout.addWidget(self._table, stretch=1)
-        layout.addLayout(buttons)
 
     # -- 操作 ---------------------------------------------------------------
 
@@ -253,15 +234,6 @@ class PlaylistView(QWidget):
             return
         self._model.clear()
         self.message_requested.emit("プレイリストを消去しました。")
-
-    # -- 表示状態 -----------------------------------------------------------
-
-    def _update_state(self) -> None:
-        """件数表示とボタンの活性をまとめて更新する（唯一の更新経路）。"""
-        count = self._model.rowCount()
-        self._count_label.setText(f"{count}曲")
-        self._remove_button.setEnabled(bool(self._selected_rows()))
-        self._clear_button.setEnabled(count > 0)
 
     def _selected_rows(self) -> list[int]:
         return sorted(index.row() for index in self._table.selectionModel().selectedRows())

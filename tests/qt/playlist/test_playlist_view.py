@@ -13,13 +13,13 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import QItemSelectionModel, QModelIndex, Qt
 from PySide6.QtGui import QPalette
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHeaderView,
-    QLabel,
-    QPushButton,
     QStyleOptionViewItem,
     QTableView,
+    QWidget,
 )
 from pytestqt.qtbot import QtBot
 
@@ -56,18 +56,6 @@ def table_of(view: PlaylistView) -> QTableView:
     table = view.findChild(QTableView, "playlistTable")
     assert table is not None
     return table
-
-
-def button(view: PlaylistView, name: str) -> QPushButton:
-    widget = view.findChild(QPushButton, name)
-    assert widget is not None, name
-    return widget
-
-
-def count_text(view: PlaylistView) -> str:
-    label = view.findChild(QLabel, "playlistCountLabel")
-    assert label is not None
-    return label.text()
 
 
 def stub_open_files(selected: list[str]) -> Callable[..., tuple[list[str], str]]:
@@ -190,9 +178,15 @@ def test_internal_drag_runs_as_copy_action(
     assert recorded == [Qt.DropAction.CopyAction]
 
 
-def test_initial_count_is_zero(view: PlaylistView) -> None:
-    """初期件数は 0。"""
-    assert count_text(view) == "0曲"
+def test_redundant_action_row_is_not_created(view: PlaylistView) -> None:
+    """追加・削除・全消去・件数の重複した操作行を表示しない。"""
+    for name in (
+        "addFilesButton",
+        "removeSelectedButton",
+        "clearPlaylistButton",
+        "playlistCountLabel",
+    ):
+        assert view.findChild(QWidget, name) is None
 
 
 # -- ファイル追加 -----------------------------------------------------------
@@ -232,7 +226,6 @@ def test_multiple_files_are_added_in_one_batch(
     assert [entry.path for entry in model.entries()] == list(audio_files)
     assert inserted == [len(audio_files)]
     assert messages == [f"{len(audio_files)}曲を追加しました。"]
-    assert count_text(view) == "5曲"
 
 
 def test_same_file_can_be_added_twice(
@@ -263,18 +256,6 @@ def test_all_files_filter_is_available() -> None:
 # -- 削除 -------------------------------------------------------------------
 
 
-def test_remove_button_requires_a_selection(
-    view: PlaylistView, model: PlaylistModel, audio_files: list[Path]
-) -> None:
-    """選択が無ければ削除ボタンは無効。"""
-    model.add_paths(audio_files)
-    assert not button(view, "removeSelectedButton").isEnabled()
-
-    select_rows(view, [1])
-
-    assert button(view, "removeSelectedButton").isEnabled()
-
-
 def test_remove_without_selection_is_a_no_op(
     view: PlaylistView, model: PlaylistModel, audio_files: list[Path]
 ) -> None:
@@ -284,6 +265,25 @@ def test_remove_without_selection_is_a_no_op(
     view.remove_selected()
 
     assert model.rowCount() == len(audio_files)
+
+
+def test_delete_key_removes_selected_rows(
+    view: PlaylistView, model: PlaylistModel, audio_files: list[Path], qtbot: QtBot
+) -> None:
+    """Deleteは選択行を削除し、Ctrl+A後なら全行を削除する。"""
+    model.add_paths(audio_files)
+    table = table_of(view)
+    view.show()
+    qtbot.waitExposed(view)
+    table.setFocus()
+    select_rows(view, [1])
+
+    QTest.keyClick(table, Qt.Key.Key_Delete)
+
+    assert model.rowCount() == len(audio_files) - 1
+    QTest.keyClick(table, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+    QTest.keyClick(table, Qt.Key.Key_Delete)
+    assert model.rowCount() == 0
 
 
 def test_remove_non_contiguous_selection(
@@ -300,7 +300,6 @@ def test_remove_non_contiguous_selection(
     view.remove_selected()
 
     assert [entry.entry_id for entry in model.entries()] == kept_ids
-    assert count_text(view) == "4曲"
 
 
 def test_remove_reports_the_number_of_removed_rows(
@@ -335,17 +334,6 @@ def test_selection_moves_to_the_next_row_after_removal(
 
 
 # -- 全消去 -----------------------------------------------------------------
-
-
-def test_clear_button_is_disabled_when_empty(
-    view: PlaylistView, model: PlaylistModel, audio_files: list[Path]
-) -> None:
-    """空のときは全消去ボタンが無効。"""
-    assert not button(view, "clearPlaylistButton").isEnabled()
-
-    model.add_paths(audio_files[:1])
-
-    assert button(view, "clearPlaylistButton").isEnabled()
 
 
 def test_clear_is_cancelled(
@@ -388,7 +376,6 @@ def test_clear_is_confirmed(
     view.clear_playlist()
 
     assert model.rowCount() == 0
-    assert count_text(view) == "0曲"
     assert messages == ["プレイリストを消去しました。"]
     assert all(path.exists() for path in audio_files)
 
@@ -444,8 +431,6 @@ def test_missing_row_stays_selectable_and_removable(
     assert model.entry_at(0).is_missing
 
     select_rows(view, [0])
-    assert button(view, "removeSelectedButton").isEnabled()
-
     view.remove_selected()
     assert model.rowCount() == 0
 
@@ -466,7 +451,7 @@ def test_missing_row_keeps_its_tooltip(model: PlaylistModel, tmp_path: Path) -> 
 def test_view_handles_1000_entries(
     view: PlaylistView, model: PlaylistModel, tmp_path: Path, qtbot: QtBot
 ) -> None:
-    """1000 件の一括追加で rowsInserted は 1 回、件数表示も追随する。"""
+    """1000件の一括追加でもrowsInsertedは1回でUIイベント処理が継続する。"""
     paths = [tmp_path / f"曲 {index:04d}.wav" for index in range(1000)]
     for path in paths:
         path.write_bytes(b"x")
@@ -476,10 +461,10 @@ def test_view_handles_1000_entries(
     model.add_paths(paths)
 
     assert inserted == [1000]
-    assert count_text(view) == "1000曲"
+    assert model.rowCount() == 1000
     assert table_of(view).model() is model
     # UI イベント処理が継続できる。
-    qtbot.waitUntil(lambda: count_text(view) == "1000曲", timeout=5000)
+    qtbot.wait(0)
 
 
 # -- 寿命 -------------------------------------------------------------------

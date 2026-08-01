@@ -5,6 +5,7 @@
 
 import inspect
 from collections.abc import Callable, Iterator
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -724,6 +725,20 @@ def test_playlist_keeps_a_useful_height_and_player_panel_does_not_expand(
     player_layout = player_panel.layout()
     assert player_layout is not None
     assert player_layout.spacing() == 0
+    assert player_panel.height() <= player_layout.sizeHint().height()
+
+    packed_widgets = [
+        window.findChild(QWidget, name) for name in ("speedPanel", "waveformPanel", "spectrumPanel")
+    ]
+    controls = window.findChild(PlayerControls)
+    assert controls is not None
+    assert all(widget is not None for widget in packed_widgets)
+    widgets = [controls, *[widget for widget in packed_widgets if widget is not None]]
+    gaps = [
+        following.geometry().top() - current.geometry().bottom() - 1
+        for current, following in pairwise(widgets)
+    ]
+    assert gaps == [0, 0, 0]
 
 
 def test_hidden_waveform_panel_stops_following_the_position(

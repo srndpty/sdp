@@ -194,6 +194,9 @@ def test_buttons_and_volume_share_one_row(controls: PlayerControls, qtbot: QtBot
         assert widget is not None
         centers.append(widget.geometry().center().y())
     assert max(centers) - min(centers) <= 1
+    play_width = button(controls, "playButton").width()
+    assert button(controls, "repeatModeButton").width() == play_width
+    assert button(controls, "shuffleButton").width() == play_width
 
 
 # -- シークバー -------------------------------------------------------------

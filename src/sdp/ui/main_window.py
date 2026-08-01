@@ -124,6 +124,8 @@ class MainWindow(QMainWindow):
         player_panel = QWidget()
         player_panel.setObjectName("playerPanel")
         player_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        self._player_panel = player_panel
+        self._player_panel_unbounded_height = player_panel.maximumHeight()
         player_layout = QVBoxLayout(player_panel)
         player_layout.setContentsMargins(0, 0, 0, 0)
         player_layout.setSpacing(0)
@@ -142,6 +144,7 @@ class MainWindow(QMainWindow):
         splitter.splitterMoved.connect(self._on_ui_state_changed)
         self._splitter = splitter
         self.setCentralWidget(splitter)
+        self._fit_player_panel_to_contents()
         # 波形とスペクトラムが増えた分だけ既定の高さを広げ、プレイリスト領域を残す。
         self.resize(720, 700)
 
@@ -441,6 +444,25 @@ class MainWindow(QMainWindow):
         player, playlist = distribute_splitter_sizes(state, total)
         self._splitter.setSizes([player, playlist])
 
+    def _fit_player_panel_to_contents(self) -> None:
+        """上側Panelを内容高へ固定し、Splitterの余剰をプレイリストへ渡す。
+
+        QBoxLayoutは非伸長Widgetだけで親が内容より高い場合、余剰をWidget間へ
+        均等に配る。Splitterの保存比率で上側が過大になると、各バーの前後へ
+        空白が現れるため、可視な子のsizeHintを上限として発生源を断つ。
+        """
+        self._player_panel.setMaximumHeight(self._player_panel_unbounded_height)
+        layout = self._player_panel.layout()
+        if layout is None:
+            return
+        layout.invalidate()
+        layout.activate()
+        content_height = max(1, layout.sizeHint().height())
+        self._player_panel.setMaximumHeight(content_height)
+        total = sum(self._splitter.sizes())
+        if total > 0:
+            self._splitter.setSizes([content_height, max(0, total - content_height)])
+
     def _screen_rects(self) -> list[ScreenRect]:
         """現在の画面の利用可能領域（primaryを先頭にする）。"""
         primary = QGuiApplication.primaryScreen()
@@ -530,6 +552,7 @@ class MainWindow(QMainWindow):
         self._waveform_panel.setVisible(settings.waveform_visible)
         self._spectrum_panel.set_spectrum_visible(settings.spectrum_visible)
         self._spectrum_panel.set_level_meter_visible(settings.level_meter_visible)
+        self._fit_player_panel_to_contents()
 
     # -- Controller からの通知（続き）---------------------------------------
 
