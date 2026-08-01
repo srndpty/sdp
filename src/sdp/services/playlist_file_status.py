@@ -208,5 +208,15 @@ class PlaylistFileStatusChecker(QObject):
         # 「バッチ実行中に modelReset が起きた」ときに誰も再開せず、
         # 以後のUNKNOWNが永久に未確認のまま残る。
         if generation == self._generation and isinstance(results, dict):
-            self._playlist.apply_file_statuses(cast("dict[str, FileStatus]", results))
+            current_results: dict[str, FileStatus] = {}
+            for entry_id, status in cast("dict[str, FileStatus]", results).items():
+                row = self._playlist.row_of_entry_id(entry_id)
+                # バッチ開始後に再生直前の同期確認で確定したentryへ、
+                # 先に取得した背景結果を上書きしない。
+                if (
+                    row is not None
+                    and self._playlist.entry_at(row).file_status is FileStatus.UNKNOWN
+                ):
+                    current_results[entry_id] = status
+            self._playlist.apply_file_statuses(current_results)
         self.schedule()

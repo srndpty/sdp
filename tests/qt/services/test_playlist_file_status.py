@@ -226,6 +226,35 @@ def test_model_reset_during_a_batch_does_not_stall_further_checks(
     checker.shutdown()
 
 
+def test_batch_does_not_overwrite_a_newer_synchronous_status(
+    playlist: PlaylistModel, audio_files: list[Path], pool: QThreadPool, qtbot: QtBot
+) -> None:
+    """背景確認中の同期判定を、後着した古いバッチ結果で上書きしない。"""
+    entered = threading.Event()
+    release = threading.Event()
+
+    def stale_missing_probe(_path: Path) -> FileStatus:
+        entered.set()
+        release.wait(timeout=5)
+        return FileStatus.MISSING
+
+    entry_id = playlist.add_paths([audio_files[0]])[0]
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(playlist_file_status, "probe_file_status", stale_missing_probe)
+        checker = PlaylistFileStatusChecker(playlist, pool=pool)
+        checker.start()
+        assert entered.wait(timeout=5)
+
+        assert playlist.refresh_entry_status(entry_id) is True
+        assert playlist.entry_at(0).file_status is FileStatus.AVAILABLE
+        release.set()
+
+    qtbot.waitUntil(lambda: checker.is_running is False, timeout=WAIT_TIMEOUT_MS)
+
+    assert playlist.entry_at(0).file_status is FileStatus.AVAILABLE
+    checker.shutdown()
+
+
 def test_shutdown_does_not_rewrite_a_failed_result_as_success(
     playlist: PlaylistModel, audio_files: list[Path], pool: QThreadPool
 ) -> None:
