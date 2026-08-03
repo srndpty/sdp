@@ -71,7 +71,7 @@ sdp/
 │       ├── main_window.py    # レイアウト骨格・メニュー・ドック配置のみ（god class 禁止）
 │       ├── legal_dialog.py   # GPL告知・ライセンス文書の読み取り専用表示
 │       ├── player_controls.py# 再生ボタン群・シークバー・音量・時間表示
-│       ├── speed_panel.py    # 速度スライダー・プリセット・ピッチ補正トグル
+│       ├── speed_panel.py    # 速度スライダー・数値入力・ピッチ補正トグル
 │       ├── playlist_view.py  # QTableView と D&D、コンテキストメニュー
 │       ├── waveform_widget.py# 追従波形（QPainter 自前描画）
 │       ├── waveform_panel.py # 再生・解析Signalと波形Widgetの調停
@@ -106,7 +106,7 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 | `PlaybackBackend` | `load` / `play` / `pause` / `stop` / `seek` / `set_volume` / `set_muted` / `set_playback_rate` / `set_pitch_compensation` と、位置・長さ・状態・メディア状況・エラーのシグナル。**mpv 差し替えに必要な最小限のみ** | プレイリストの知識、UI の知識 |
 | `QtMultimediaBackend` | load 世代ごとの QMediaPlayer / QAudioBufferOutput と QAudioOutput の所有、上記インターフェースへの変換、通知への load 世代の付与。Qt の enum・QUrl・エラーをアプリ内の型へ写す | 曲順ロジック、値の検証 |
 | `PlaybackController` | 1 つの source の再生（読み込み・状態・位置・音量・速度）と Backend との境界 | 曲順、プレイリストの知識 |
-| `SpeedPanel` | 0.5～2.0倍の速度操作、プリセット、ピッチ補正切替とControllerとの双方向同期 | Backend、プレイリスト、メタデータ、永続化 |
+| `SpeedPanel` | 0.5～2.0倍の速度操作、ピッチ補正切替とControllerとの双方向同期 | Backend、プレイリスト、メタデータ、永続化 |
 | `ShortcutManager` | WindowShortcutの生成、フォーカスに応じた抑止、Controller群への操作委譲 | Backend、Modelの直接操作、設定保存 |
 | `PlaylistPlaybackController` | 「今どの entry を再生中か」の唯一の管理者。順次再生、前後曲、曲終了時の次曲決定、欠損スキップ | デコード、描画、行データの所有 |
 | `PlaylistModel` | 行データ、並べ替え、D&D、欠損フラグ、重複許可（entry_id 採番） | 再生状態の所有（現在行は Controller が entry_id で参照する） |
@@ -185,11 +185,11 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 - **双方向同期**: Slider／SpinBoxのユーザー変更を互いへ反映してControllerへ1回だけ送り、
   Controller通知は両Widgetへ反映するだけでsetterへ返送しない。Widget更新は
   `QSignalBlocker`で囲み、同期Signalによる再帰・二重Backend呼出を防ぐ。
-- **プリセットとreset**: 0.50 / 0.75 / 1.00 / 1.25 / 1.50 / 2.00を一つの定数で定義する。
-  「1.0倍に戻す」は速度だけを1.00へ戻し、ピッチ補正状態は変えない。同値はno-op。
+- **reset**: 「1.0倍に戻す」は速度だけを1.00へ戻し、ピッチ補正状態は変えない。
+  同値はno-op。
 - **ピッチモード**: 補正ONは速度だけを変えて音高をおおむね維持するtime-stretch、
-  OFFはレコード回転数変更のように速度と音高が連動するvarispeed。文字とツールチップで
-  区別し、色だけに依存しない。切替は再生中も即時反映する。
+  OFFはレコード回転数変更のように速度と音高が連動するvarispeed。チェック状態と
+  ツールチップで区別し、色だけに依存しない。切替は再生中も即時反映する。
 - **セッション内設定**: sourceなしでも変更できる。速度・ピッチ変更はload／再生状態／positionを
   操作しない。直接load、プレイリスト曲切替、自動次曲、Repeat ONE／ALL、シャッフルでも
   1.00へ戻さず維持する。再起動後も`SettingsSession`が速度とピッチ補正を復元する。

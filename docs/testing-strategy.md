@@ -45,7 +45,7 @@
 | `playlist` のロジック | 次曲決定（順次 / 1 曲リピート / 全曲リピート / シャッフルの網羅）、欠損スキップ、重複 entry_id |
 | `services/logging_setup.py` | ログファイルの UTF-8 出力、多重初期化でハンドラーが増えないこと、出力先変更時のハンドラー置換、ローテーション設定、出力先の決定、未捕捉例外フックの記録と多重インストールの抑止 |
 | `ui/player_controls.py` の時間整形 | `m:ss` / `h:mm:ss` の境界値と負値の扱い |
-| `ui/speed_panel.py` | Slider整数値とrateの境界変換、Slider／SpinBoxの双方向同期、Controller同期Signalへの耐性、float32読み戻し時の要求表示維持、6プリセット、1.0倍reset、pitch補正ON/OFF、sourceなし操作、load／transport／seekを呼ばないこと |
+| `ui/speed_panel.py` | Slider整数値とrateの境界変換、Slider／SpinBoxの双方向同期、Controller同期Signalへの耐性、float32読み戻し時の要求表示維持、1.0倍reset、pitch補正ON/OFF、sourceなし操作、load／transport／seekを呼ばないこと |
 | `services/settings.py`（P6-A時点の契約。現在のschemaは下のP6-C行を参照） | UTF-8往復、保存キー限定（速度・ピッチ・可視化3項目）、欠落キーの既定値補完、未知キーの無視、version／型／0.5～2.0／NaN／inf検証、bool欄の厳密判定（0／1／文字列を拒否）、非UTF-8・不正JSON、fsync／replace失敗時の既存ファイル保持と一時ファイル回収。**schema version 1→2の移行**（v1の可視化設定を表示ONで補完し、同名v2キーがfalse／不正型でも未知キーとして無視すること、読み込みだけではファイルを書き換えないこと、変更後はv2で保存されること、v2の3項目の独立往復と厳密検証、未知versionの拒否）、`validate_settings`が適用前検証としてboolと値域を拒否すること |
 | `services/settings.py`（P6-C） | schema v1／v2／v3の読み分けと既定補完、古いversionが後のversionのキーを未知キーとして無視すること、v3の往復、volumeの境界（0.0／1.0）とbool・文字列・NaN／inf・範囲外の拒否（暗黙clampしない）、mutedとshuffle_enabledの厳密bool、repeat_modeの全値往復と未知値拒否、core `RepeatMode` と保存用 `RepeatModeSetting` の1対1対応、`validate_settings` が適用前検証でも同じ規則を課すこと、再生位置・再生状態・entry_idを保存しないことを検証する |
 | `services/ui_state.py`（P6-B） | UiStateの既定値と不変性、schema version 1の往復、window／splitter／last_open_directoryの欠落を「未保存」として扱うこと、未知キーの無視、未知schema versionの拒否、boolをint欄で拒否、width／height=0や負値の拒否、負座標の受理、maximizedの厳密bool、splitterの0以上と合計0拒否、絶対パスのみ受理（相対パス拒否・Unicode／空白パス）、存在しないフォルダーでも読み込みを失敗させないこと、非UTF-8・不正JSON・非objectルート、atomic save（fsync／replace／json.dump失敗時の既存ファイル保持と一時ファイル回収）。**画面補正**は整数矩形を注入して、単一画面内・左/上モニターの負座標・一部だけ画面内・完全画面外のprimary中央復帰・タイトル帯／矩形の重なりによる所属画面選択・大小が異なるsecondary基準のサイズclamp・最小サイズ・極端な座標・screenなしのfallback・最大化フラグの保持を検証する。**Splitter**は比率での再配分、合計の一致、片側が潰れないこと、総量が小さい場合の下限、総量0での保存値維持を検証する |
@@ -292,7 +292,7 @@ D&D は実際のマウス操作でしか確認できないため自動化しな�
 
 - [ ] SpeedPanelがプレイリストを過度に圧迫せず、sourceなしでも操作できる
 - [ ] Sliderと数値入力が同期し、0.50～2.00を超えない
-- [ ] 6プリセットと「1.0倍に戻す」が正しく反映され、UIが振動・再帰しない
+- [ ] 「1.0倍に戻す」が正しく反映され、UIが振動・再帰しない
 - [ ] pitch補正ON（time-stretch）で0.75 / 1.25 / 1.50 / 2.00倍を聴き、テンポだけが変わり音高がおおむね維持される
 - [ ] pitch補正OFF（varispeed）で0.75倍は音高が下がり、1.25倍以上では音高が上がる
 - [ ] 再生中にON→OFF→ON、0.5→2.0→1.0を操作して再生・positionが継続する

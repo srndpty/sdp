@@ -7,7 +7,6 @@ from PySide6.QtCore import QSignalBlocker, Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QDoubleSpinBox,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -21,7 +20,6 @@ from sdp.core.playback.preferences import (
     DEFAULT_PLAYBACK_RATE,
     MAX_PLAYBACK_RATE,
     MIN_PLAYBACK_RATE,
-    PLAYBACK_RATE_PRESETS,
     PLAYBACK_RATE_STEP,
 )
 
@@ -42,17 +40,6 @@ def slider_value_to_rate(value: int) -> float:
 def rate_to_slider_value(rate: float) -> int:
     """再生速度をスライダーの整数値へ変換する。"""
     return round(rate * _RATE_SCALE)
-
-
-def _rate_text(rate: float) -> str:
-    text = f"{rate:.2f}".rstrip("0")
-    if text.endswith("."):
-        text += "0"
-    return f"{text}×"
-
-
-def _preset_object_name(rate: float) -> str:
-    return f"ratePreset{rate_to_slider_value(rate):03d}Button"
 
 
 class SpeedPanel(QWidget):
@@ -89,19 +76,9 @@ class SpeedPanel(QWidget):
         self._out_of_range_label.setObjectName("outOfRangePlaybackRateLabel")
         self._out_of_range_label.setVisible(False)
 
-        self._pitch_check_box = QCheckBox("速度変更時にピッチを維持")
+        self._pitch_check_box = QCheckBox("ピッチ維持")
         self._pitch_check_box.setObjectName("pitchCompensationCheckBox")
         self._pitch_check_box.setToolTip(_PITCH_TOOLTIP)
-        self._pitch_mode_label = QLabel()
-        self._pitch_mode_label.setObjectName("pitchModeLabel")
-        self._pitch_mode_label.setToolTip(_PITCH_TOOLTIP)
-
-        self._preset_buttons: list[QPushButton] = []
-        for rate in PLAYBACK_RATE_PRESETS:
-            button = QPushButton(_rate_text(rate))
-            button.setObjectName(_preset_object_name(rate))
-            button.clicked.connect(lambda checked=False, value=rate: self._request_rate(value))
-            self._preset_buttons.append(button)
 
         self._build_layout()
         self._connect_signals()
@@ -109,26 +86,14 @@ class SpeedPanel(QWidget):
         self._apply_controller_pitch(controller.pitch_compensation)
 
     def _build_layout(self) -> None:
-        rate_row = QHBoxLayout()
-        rate_row.addWidget(QLabel("速度"))
-        rate_row.addWidget(self._rate_slider, stretch=1)
-        rate_row.addWidget(self._rate_spin_box)
-        rate_row.addWidget(self._reset_button)
-        rate_row.addWidget(self._out_of_range_label)
-
-        preset_row = QHBoxLayout()
-        preset_row.addWidget(QLabel("プリセット"))
-        for button in self._preset_buttons:
-            preset_row.addWidget(button)
-        preset_row.addStretch(1)
-        preset_row.addWidget(self._pitch_check_box)
-        preset_row.addWidget(self._pitch_mode_label)
-
-        layout = QGridLayout(self)
-        layout.setContentsMargins(9, 4, 9, 4)
-        layout.addWidget(QLabel("再生速度"), 0, 0)
-        layout.addLayout(rate_row, 0, 1)
-        layout.addLayout(preset_row, 1, 0, 1, 2)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(9, 2, 9, 2)
+        layout.addWidget(QLabel("再生速度"))
+        layout.addWidget(self._out_of_range_label)
+        layout.addWidget(self._rate_slider, stretch=1)
+        layout.addWidget(self._rate_spin_box)
+        layout.addWidget(self._reset_button)
+        layout.addWidget(self._pitch_check_box)
 
     def _connect_signals(self) -> None:
         self._rate_slider.valueChanged.connect(self._on_slider_changed)
@@ -199,6 +164,3 @@ class SpeedPanel(QWidget):
     def _apply_pitch_to_widgets(self, enabled: bool) -> None:
         with QSignalBlocker(self._pitch_check_box):
             self._pitch_check_box.setChecked(enabled)
-        self._pitch_mode_label.setText(
-            "ピッチ維持 (time-stretch)" if enabled else "ピッチ連動 (varispeed)"
-        )
