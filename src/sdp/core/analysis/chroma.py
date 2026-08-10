@@ -14,7 +14,7 @@ from typing import cast
 import numpy as np
 from numpy.typing import NDArray
 
-from sdp.core.analysis.spectrum import FFT_SIZE, magnitude_spectrum
+from sdp.core.analysis.spectrum import FFT_SIZE, FrequencyAnalysisFrame, analysis_for
 
 CHROMA_CLASS_COUNT = 12
 """1オクターブのピッチクラス数（C, C#, ... B）。"""
@@ -86,11 +86,15 @@ def compute_chroma(
     fft_size: int = FFT_SIZE,
     min_hz: float = CHROMA_MIN_HZ,
     max_hz: float = CHROMA_MAX_HZ,
+    analysis: FrequencyAnalysisFrame | None = None,
 ) -> ChromaFrame:
     """PCMから12ピッチクラスの正規化強度を求める（入力配列は変更しない）。
 
     手順は 振幅スペクトラム → 帯域内のbin抽出 → 各binを最寄りのピッチクラスへ集約
     → 最大値で正規化。最大値が実質0の（無音の）場合は全0を返す。
+
+    ``analysis`` を渡すと rFFT を再実行せずその結果を使う（同一tickで
+    スペクトラム・スペクトログラムとFFTを共有するため）。
     """
     if sample_rate < 1:
         raise ValueError("sample_rateは1以上である必要があります")
@@ -99,7 +103,9 @@ def compute_chroma(
     if max_hz <= min_hz:
         raise ValueError("max_hzはmin_hzより大きい必要があります")
 
-    frequencies, magnitude = magnitude_spectrum(samples, sample_rate, fft_size=fft_size)
+    frame = analysis_for(samples, sample_rate, fft_size=fft_size, analysis=analysis)
+    frequencies = frame.frequencies_hz
+    magnitude = frame.magnitudes
     limit_hz = min(max_hz, sample_rate / 2.0)
     inside = (frequencies >= min_hz) & (frequencies <= limit_hz)
     if not bool(inside.any()):
@@ -159,8 +165,17 @@ class ChromaProcessor:
         self._smoothed = None
         self._sample_rate = None
 
-    def process(self, samples: NDArray[np.float32], sample_rate: int) -> ChromaFrame:
-        """1フレームを解析し、平滑化済みのフレームを返す。"""
+    def process(
+        self,
+        samples: NDArray[np.float32],
+        sample_rate: int,
+        *,
+        analysis: FrequencyAnalysisFrame | None = None,
+    ) -> ChromaFrame:
+        """1フレームを解析し、平滑化済みのフレームを返す。
+
+        ``analysis`` を渡すと同一tickの他の可視化とrFFTを共有する。
+        """
         if sample_rate != self._sample_rate:
             self._smoothed = None
             self._sample_rate = sample_rate
@@ -170,6 +185,7 @@ class ChromaProcessor:
             fft_size=self._fft_size,
             min_hz=self._min_hz,
             max_hz=self._max_hz,
+            analysis=analysis,
         )
         current = frame.values.astype(np.float64)
         previous = self._smoothed

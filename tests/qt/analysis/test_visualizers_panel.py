@@ -13,7 +13,8 @@ from pytestqt.qtbot import QtBot
 from fakes.fake_playback_backend import FakePlaybackBackend
 from sdp.core.analysis.oscilloscope import OscilloscopeFrame
 from sdp.core.playback.controller import PlaybackController
-from sdp.services.pcm_tap import PcmTap
+from sdp.services.pcm_tap import SNAPSHOT_RETRY_DELAYS_MS, PcmTap
+from sdp.ui import visualizers_panel
 from sdp.ui.visualizers_panel import FAILED_MESSAGE, STOPPED_MESSAGE, VisualizersPanel
 
 
@@ -238,3 +239,121 @@ def test_shutdown_stops_timer(
     controller.play()
 
     assert not panel.is_timer_active
+
+
+def test_reenabling_a_failed_visualizer_retries_it(
+    panel: VisualizersPanel,
+    controller: PlaybackController,
+    tap: PcmTap,
+    source: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot: QtBot,
+) -> None:
+    """一時的に失敗した可視化も、OFF→ONで再試行して復旧する。"""
+    original = visualizers_panel.compute_oscilloscope
+
+    def explode(*args: object, **kwargs: object) -> OscilloscopeFrame:
+        raise RuntimeError("一時的なオシロスコープ失敗")
+
+    monkeypatch.setattr(visualizers_panel, "compute_oscilloscope", explode)
+    start_playing(controller, tap, source)
+    qtbot.waitUntil(lambda: panel.oscilloscope_widget.status_text == FAILED_MESSAGE, timeout=3_000)
+
+    monkeypatch.setattr(visualizers_panel, "compute_oscilloscope", original)
+    panel.set_oscilloscope_visible(False)
+    panel.set_oscilloscope_visible(True)
+    feed(tap)
+
+    qtbot.waitUntil(lambda: panel.oscilloscope_count >= 1, timeout=3_000)
+    assert panel.oscilloscope_widget.frame is not None
+    assert panel.oscilloscope_widget.status_text == ""
+
+
+def test_a_single_snapshot_failure_does_not_stop_the_visualizers(
+    panel: VisualizersPanel,
+    controller: PlaybackController,
+    tap: PcmTap,
+    source: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot: QtBot,
+) -> None:
+    """PCM取得が1回だけ失敗しても、次tickで復旧する。"""
+    original = tap.snapshot_visualization
+    failures: list[int] = []
+
+    def flaky(**kwargs: int) -> object:
+        if not failures:
+            failures.append(1)
+            raise RuntimeError("一時的なsnapshot失敗")
+        return original(**kwargs)  # pyright: ignore[reportArgumentType]
+
+    monkeypatch.setattr(tap, "snapshot_visualization", flaky)
+    start_playing(controller, tap, source)
+
+    qtbot.waitUntil(lambda: panel.chromagram_count >= 1, timeout=3_000)
+    assert failures == [1]
+    assert panel.snapshot_failure_count == 0
+    assert panel.chromagram_widget.status_text != FAILED_MESSAGE
+    assert panel.is_timer_active
+
+
+def test_continuous_snapshot_failures_stop_the_visualizers(
+    panel: VisualizersPanel,
+    controller: PlaybackController,
+    tap: PcmTap,
+    source: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot: QtBot,
+) -> None:
+    """PCM取得の失敗が続く場合は再試行を打ち切り、失敗表示にする。"""
+
+    def always_fail(**kwargs: int) -> object:
+        raise RuntimeError("継続的なsnapshot失敗")
+
+    monkeypatch.setattr(tap, "snapshot_visualization", always_fail)
+    start_playing(controller, tap, source)
+
+    # 1回目の失敗では失敗表示にしない（回復可能な障害として再試行する）。
+    qtbot.wait(50)
+    assert panel.chromagram_widget.status_text != FAILED_MESSAGE
+
+    qtbot.waitUntil(
+        lambda: panel.chromagram_widget.status_text == FAILED_MESSAGE,
+        timeout=sum(SNAPSHOT_RETRY_DELAYS_MS) + 3_000,
+    )
+    assert panel.snapshot_failure_count > len(SNAPSHOT_RETRY_DELAYS_MS)
+    assert panel.oscilloscope_widget.status_text == FAILED_MESSAGE
+    assert not panel.is_timer_active
+
+
+def test_one_shared_fft_serves_both_spectrogram_and_chromagram(
+    panel: VisualizersPanel,
+    controller: PlaybackController,
+    tap: PcmTap,
+    source: Path,
+    qtbot: QtBot,
+) -> None:
+    """スペクトログラムとクロマグラムは1tickで同じFFT結果を使う。"""
+    start_playing(controller, tap, source)
+
+    qtbot.waitUntil(lambda: panel.chromagram_count >= 3, timeout=3_000)
+
+    assert panel.analysis_count == panel.spectrogram_count
+    assert panel.analysis_count == panel.chromagram_count
+
+
+def test_no_fft_runs_when_both_fft_visualizers_are_hidden(
+    panel: VisualizersPanel,
+    controller: PlaybackController,
+    tap: PcmTap,
+    source: Path,
+    qtbot: QtBot,
+) -> None:
+    """スペクトログラムとクロマグラムを消すとFFTを実行しない。"""
+    panel.set_spectrogram_visible(False)
+    panel.set_chromagram_visible(False)
+    start_playing(controller, tap, source)
+
+    qtbot.waitUntil(lambda: panel.vectorscope_count >= 3, timeout=3_000)
+
+    assert panel.analysis_count == 0

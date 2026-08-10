@@ -1,5 +1,7 @@
 """SpectrumFrame・Hann窓FFT・対数band集約・dB変換・平滑化の数値検証。"""
 
+from typing import cast
+
 import numpy as np
 import pytest
 from numpy.typing import NDArray
@@ -14,8 +16,10 @@ from sdp.core.analysis.spectrum import (
     SPECTRUM_MIN_HZ,
     SPECTRUM_RELEASE,
     SPECTRUM_TIMER_INTERVAL_MS,
+    FrequencyAnalysisFrame,
     SpectrumFrame,
     SpectrumProcessor,
+    compute_frequency_analysis,
     compute_spectrum,
     effective_max_hz,
     empty_spectrum_frame,
@@ -501,3 +505,65 @@ def test_processor_does_not_modify_the_input_array() -> None:
     processor.process(samples, SAMPLE_RATE)
 
     assert np.array_equal(samples, original)
+
+
+# -- FFT結果の共有（FrequencyAnalysisFrame）--------------------------------
+
+
+def test_shared_analysis_gives_the_same_spectrum_as_a_standalone_call() -> None:
+    """共有したFFT結果から作ったスペクトラムは、単独計算と一致する。"""
+    samples = sine(1_000.0)
+    analysis = compute_frequency_analysis(samples, SAMPLE_RATE)
+
+    shared = compute_spectrum(samples, SAMPLE_RATE, analysis=analysis)
+    standalone = compute_spectrum(samples, SAMPLE_RATE)
+
+    assert np.array_equal(shared.levels_db, standalone.levels_db)
+    assert np.array_equal(shared.frequencies_hz, standalone.frequencies_hz)
+
+
+def test_shared_analysis_runs_the_fft_only_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """共有結果を渡した呼び出しはrFFTを実行しない。"""
+    samples = sine(1_000.0)
+    analysis = compute_frequency_analysis(samples, SAMPLE_RATE)
+    calls: list[int] = []
+    original = np.fft.rfft
+
+    def counting(*args: object, **kwargs: object) -> object:
+        calls.append(1)
+        return cast("object", original(*args, **kwargs))  # pyright: ignore[reportCallIssue, reportArgumentType]
+
+    monkeypatch.setattr(np.fft, "rfft", counting)
+    compute_spectrum(samples, SAMPLE_RATE, analysis=analysis)
+
+    assert calls == []
+
+
+def test_shared_analysis_is_not_consumed_by_the_first_reader() -> None:
+    """共有結果は読み取り側で書き換わらず、2度目以降も同じ値を返す。"""
+    samples = sine(1_000.0)
+    analysis = compute_frequency_analysis(samples, SAMPLE_RATE)
+    magnitudes = analysis.magnitudes.copy()
+
+    compute_spectrum(samples, SAMPLE_RATE, analysis=analysis)
+
+    assert np.array_equal(analysis.magnitudes, magnitudes)
+    assert not analysis.magnitudes.flags.writeable
+
+
+def test_shared_analysis_with_a_different_sample_rate_is_rejected() -> None:
+    """古い世代のFFT結果を黙って使わない。"""
+    analysis = compute_frequency_analysis(sine(1_000.0), SAMPLE_RATE)
+
+    with pytest.raises(ValueError, match="sample_rate"):
+        compute_spectrum(sine(1_000.0), 44_100, analysis=analysis)
+
+
+def test_analysis_frame_rejects_mismatched_arrays() -> None:
+    """bin周波数と振幅のshape不一致は失敗させる。"""
+    with pytest.raises(ValueError, match="shape"):
+        FrequencyAnalysisFrame(
+            frequencies_hz=np.zeros(3, dtype=np.float64),
+            magnitudes=np.zeros(4, dtype=np.float64),
+            sample_rate=SAMPLE_RATE,
+        )

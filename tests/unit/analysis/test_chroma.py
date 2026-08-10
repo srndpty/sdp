@@ -10,6 +10,7 @@ from sdp.core.analysis.chroma import (
     compute_chroma,
     empty_chroma_frame,
 )
+from sdp.core.analysis.spectrum import compute_frequency_analysis
 
 SAMPLE_RATE = 48_000
 
@@ -121,3 +122,30 @@ def test_processor_values_stay_in_range() -> None:
         frame = processor.process(_tone(_A4_HZ), SAMPLE_RATE)
     assert float(frame.values.max()) <= 1.0
     assert float(frame.values.min()) >= 0.0
+
+
+def test_shared_analysis_gives_the_same_chroma_as_a_standalone_call() -> None:
+    """共有したFFT結果から作ったクロマは、単独計算と一致する。"""
+    samples = _tone(440.0)
+    analysis = compute_frequency_analysis(samples, SAMPLE_RATE)
+
+    shared = compute_chroma(samples, SAMPLE_RATE, analysis=analysis)
+    standalone = compute_chroma(samples, SAMPLE_RATE)
+
+    assert np.array_equal(shared.values, standalone.values)
+
+
+def test_shared_analysis_skips_the_fft(monkeypatch: pytest.MonkeyPatch) -> None:
+    """共有結果を渡したクロマ計算はrFFTを実行しない。"""
+    samples = _tone(440.0)
+    analysis = compute_frequency_analysis(samples, SAMPLE_RATE)
+    calls: list[int] = []
+
+    def explode(*args: object, **kwargs: object) -> object:
+        calls.append(1)
+        raise AssertionError("共有結果があるときにrFFTしてはならない")
+
+    monkeypatch.setattr(np.fft, "rfft", explode)
+    ChromaProcessor().process(samples, SAMPLE_RATE, analysis=analysis)
+
+    assert calls == []

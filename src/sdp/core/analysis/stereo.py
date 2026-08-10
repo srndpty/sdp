@@ -26,10 +26,10 @@ CORRELATION_WINDOW = 4_096
 """位相相関を求める窓長。レベルメーターと揃えて約85ms（48kHz）。"""
 
 CORRELATION_ATTACK = 0.5
-"""相関が現在値へ近づくときの平滑化係数（大きいほど速い）。"""
+"""相関が下がる（モノ互換性が悪化する）方向の平滑化係数（大きいほど速い）。"""
 
 CORRELATION_RELEASE = 0.2
-"""相関が現在値から離れるときの平滑化係数（小さいほど滑らか）。"""
+"""相関が上がる（回復する）方向の平滑化係数（小さいほど滑らか）。"""
 
 _ENERGY_EPSILON = 1e-12
 """無音判定に用いるエネルギーの下限。0除算を避ける。"""
@@ -128,6 +128,11 @@ class CorrelationProcessor:
 
     QWidgetへ平滑化状態を持たせないため、Panel側がこのProcessorを所有する。
     source変更・停止・sample rate変更では :meth:`reset` で履歴を捨てる。
+
+    平滑化はメーターの用途に合わせて**非対称**にする。相関が下がる方向
+    （逆相成分が増え、モノラル再生で打ち消し合う危険が増す方向）は ``attack``
+    で速く追従させ、上がる方向は ``release`` でゆっくり戻す。値の絶対値では
+    判定しない（+0.9→-0.95のような符号をまたぐ悪化も「下がる方向」として扱う）。
     """
 
     def __init__(
@@ -149,13 +154,13 @@ class CorrelationProcessor:
         self._smoothed = None
 
     def process(self, left: NDArray[np.float32], right: NDArray[np.float32]) -> float:
-        """L／Rから平滑化済みの相関値を返す。"""
+        """L／Rから平滑化済みの相関値を返す（下降は速く、上昇は緩やか）。"""
         current = phase_correlation(left, right)
         previous = self._smoothed
         if previous is None:
             self._smoothed = current
         else:
-            coefficient = self._attack if abs(current) > abs(previous) else self._release
+            coefficient = self._attack if current < previous else self._release
             self._smoothed = previous + coefficient * (current - previous)
         return min(1.0, max(-1.0, self._smoothed))
 

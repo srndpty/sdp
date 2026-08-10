@@ -5,7 +5,7 @@ L／Rから作った45度回転座標の点群を描く。点群計算・位相�
 """
 
 from PySide6.QtCore import QEvent, QLineF, QPointF, QRectF, Qt
-from PySide6.QtGui import QPainter, QPaintEvent, QPalette, QPen
+from PySide6.QtGui import QPainter, QPaintEvent, QPalette, QPen, QPolygonF
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from sdp.core.analysis.stereo import VectorscopeFrame
@@ -114,11 +114,21 @@ class VectorscopeWidget(QWidget):
         radius: float,
         palette: QPalette,
     ) -> None:
-        painter.setPen(QPen(palette.color(QPalette.ColorRole.Highlight), 1.0))
-        brush = palette.brush(QPalette.ColorRole.Highlight)
-        painter.setBrush(brush)
-        for x_value, y_value in zip(frame.x, frame.y, strict=True):
-            x = center.x() + float(x_value) * radius
-            y = center.y() - float(y_value) * radius
-            painter.drawEllipse(QPointF(x, y), _POINT_RADIUS, _POINT_RADIUS)
-            self._last_point_count += 1
+        # 点ごとに drawEllipse を呼ぶと30FPS × 最大1,024点でPython→Qt境界を跨ぎ続ける。
+        # 丸い点はRoundCapのpen幅で表し、描画呼び出しは drawPoints の1回にまとめる。
+        pen = QPen(palette.color(QPalette.ColorRole.Highlight), _POINT_RADIUS * 2.0)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        # 座標計算はNumPy側でまとめて行い、Pythonのループを座標の組み立てだけに留める。
+        x_values = (frame.x * radius).tolist()
+        y_values = (frame.y * radius).tolist()
+        origin_x = center.x()
+        origin_y = center.y()
+        points = QPolygonF(
+            [
+                QPointF(origin_x + x_value, origin_y - y_value)
+                for x_value, y_value in zip(x_values, y_values, strict=True)
+            ]
+        )
+        painter.drawPoints(points)
+        self._last_point_count = points.size()

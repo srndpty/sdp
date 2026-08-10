@@ -18,7 +18,7 @@ from sdp.core.analysis.level import LEVEL_WINDOW_SIZE, LevelProcessor
 from sdp.core.analysis.spectrum import SPECTRUM_TIMER_INTERVAL_MS, SpectrumProcessor
 from sdp.core.playback.controller import PlaybackController
 from sdp.core.playback.types import PlaybackState
-from sdp.services.pcm_tap import PcmTap
+from sdp.services.pcm_tap import SNAPSHOT_RETRY_DELAYS_MS, PcmTap
 from sdp.ui.level_meter_widget import NO_SOURCE_MESSAGE as LEVEL_NO_SOURCE_MESSAGE
 from sdp.ui.level_meter_widget import LevelMeterWidget
 from sdp.ui.spectrum_widget import NO_SOURCE_MESSAGE, SpectrumWidget
@@ -29,15 +29,6 @@ STOPPED_MESSAGE = "停止中"
 WAITING_MESSAGE = "PCMを待機中…"
 FAILED_MESSAGE = "スペクトラムを表示できません"
 LEVEL_FAILED_MESSAGE = "レベルを表示できません"
-
-SNAPSHOT_RETRY_DELAYS_MS = (100, 500, 2_000)
-"""共有PCM snapshotの取得に失敗したときの再試行間隔（指数的に広げる）。
-
-snapshotの失敗は、解析アルゴリズム自体の誤りではなく、一時的な競合・
-メモリ確保失敗・format切替の隙間といった回復可能な事象でも起こる。
-1回の失敗でその曲の可視化を最後まで止めない。この回数だけ再試行しても
-駄目なら、初めて失敗表示にする。
-"""
 
 
 class SpectrumPanel(QWidget):

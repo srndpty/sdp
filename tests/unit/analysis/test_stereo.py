@@ -163,3 +163,28 @@ def test_invalid_coefficient_is_rejected(value: float) -> None:
     """平滑化係数は0より大きく1以下に限る。"""
     with pytest.raises(ValueError, match="attack"):
         CorrelationProcessor(attack=value)
+
+
+def test_processor_falls_faster_than_it_recovers() -> None:
+    """相関が下がる方向は速く、戻る方向は緩やかに追従する（非対称）。"""
+    tone = _tone(1_000.0)
+    falling = CorrelationProcessor()
+    falling.process(tone, tone)  # +1 から開始
+    fallen = falling.process(tone, -tone)  # -1 方向（悪化）
+
+    rising = CorrelationProcessor()
+    rising.process(tone, -tone)  # -1 から開始
+    risen = rising.process(tone, tone)  # +1 方向（回復）
+
+    # 悪化側の移動量が回復側より大きい。
+    assert abs(fallen - 1.0) > abs(risen + 1.0)
+
+
+def test_sign_crossing_towards_negative_is_treated_as_worsening() -> None:
+    """+から-へ大きく振れる変化は、絶対値ではなく符号を見て「悪化」とする。"""
+    processor = CorrelationProcessor(attack=1.0, release=0.01)
+    tone = _tone(1_000.0)
+    processor.process(tone, tone)
+
+    # attack=1.0 なので、悪化方向なら1フレームで現在値へ到達する。
+    assert processor.process(tone, -tone) == pytest.approx(-1.0, abs=1e-6)

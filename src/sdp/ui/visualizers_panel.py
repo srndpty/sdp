@@ -5,6 +5,8 @@
 PCMのdecode、QAudioBuffer、キャッシュ、PlaylistModel、Backendの具体型は知らない。
 
 各可視化の例外境界は独立させる。片方の失敗で他方と音声再生を止めない。
+失敗した可視化は自動では再開しないが、設定でOFF→ONし直したときは再試行する
+（一時的な失敗のあと、その曲の間ずっと表示できないままにしない）。
 """
 
 import logging
@@ -17,7 +19,12 @@ from PySide6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 from sdp.core.analysis.chroma import ChromaProcessor
 from sdp.core.analysis.oscilloscope import OSCILLOSCOPE_WINDOW, compute_oscilloscope
 from sdp.core.analysis.spectrogram import SpectrogramProcessor
-from sdp.core.analysis.spectrum import FFT_SIZE, SPECTRUM_TIMER_INTERVAL_MS
+from sdp.core.analysis.spectrum import (
+    FFT_SIZE,
+    SPECTRUM_TIMER_INTERVAL_MS,
+    FrequencyAnalysisFrame,
+    compute_frequency_analysis,
+)
 from sdp.core.analysis.stereo import (
     VECTORSCOPE_WINDOW,
     CorrelationProcessor,
@@ -25,7 +32,7 @@ from sdp.core.analysis.stereo import (
 )
 from sdp.core.playback.controller import PlaybackController
 from sdp.core.playback.types import PlaybackState
-from sdp.services.pcm_tap import PcmTap
+from sdp.services.pcm_tap import SNAPSHOT_RETRY_DELAYS_MS, PcmTap
 from sdp.ui.chromagram_widget import NO_SOURCE_MESSAGE as CHROMA_NO_SOURCE_MESSAGE
 from sdp.ui.chromagram_widget import ChromagramWidget
 from sdp.ui.correlation_meter_widget import NO_SOURCE_MESSAGE as CORRELATION_NO_SOURCE_MESSAGE
@@ -77,6 +84,8 @@ class VisualizersPanel(QWidget):
         self._shutdown = False
         self._watched_window: QWidget | None = None
         self._snapshot_count = 0
+        self._snapshot_failure_count = 0
+        self._analysis_count = 0
         self._oscilloscope_count = 0
         self._vectorscope_count = 0
         self._correlation_count = 0
@@ -107,6 +116,10 @@ class VisualizersPanel(QWidget):
         self._timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._timer.setInterval(SPECTRUM_TIMER_INTERVAL_MS)
         self._timer.timeout.connect(self._on_timeout)
+        # snapshot失敗からの再試行（SpectrumPanelと同じ間隔で段階的に広げる）。
+        self._retry_timer = QTimer(self)
+        self._retry_timer.setSingleShot(True)
+        self._retry_timer.timeout.connect(self._on_retry)
 
         playback.source_changed.connect(self._on_source_changed)
         playback.state_changed.connect(self._on_state_changed)
@@ -143,6 +156,16 @@ class VisualizersPanel(QWidget):
     @property
     def snapshot_count(self) -> int:
         return self._snapshot_count
+
+    @property
+    def analysis_count(self) -> int:
+        """スペクトログラムとクロマグラムで共有したrFFTの実行回数。"""
+        return self._analysis_count
+
+    @property
+    def snapshot_failure_count(self) -> int:
+        """連続して失敗しているPCM snapshot取得の回数（成功で0へ戻る）。"""
+        return self._snapshot_failure_count
 
     @property
     def oscilloscope_count(self) -> int:
@@ -185,6 +208,7 @@ class VisualizersPanel(QWidget):
             return
         self._shutdown = True
         self._timer.stop()
+        self._retry_timer.stop()
         for signal, slot in (
             (self._playback.source_changed, self._on_source_changed),
             (self._playback.state_changed, self._on_state_changed),
@@ -228,7 +252,7 @@ class VisualizersPanel(QWidget):
         if self._shutdown:
             return
         self._reset_processors()
-        self._failed = dict.fromkeys(self._failed, False)
+        self._clear_failures()
         waiting = source is not None
         self._clear_all(WAITING_MESSAGE if waiting else None)
         self._update_timer()
@@ -245,7 +269,7 @@ class VisualizersPanel(QWidget):
         if self._shutdown:
             return
         self._reset_processors()
-        self._failed = dict.fromkeys(self._failed, False)
+        self._clear_failures()
         self._update_timer()
 
     # -- 内部 ---------------------------------------------------------------
@@ -266,6 +290,18 @@ class VisualizersPanel(QWidget):
         self._correlation_processor.reset()
         self._spectrogram_processor.reset()
 
+    def _clear_failures(self) -> None:
+        """失敗状態と再試行の待機を捨て、次tickから全可視化をやり直せるようにする。"""
+        self._failed = dict.fromkeys(self._failed, False)
+        self._snapshot_failure_count = 0
+        self._retry_timer.stop()
+
+    @Slot()
+    def _on_retry(self) -> None:
+        if self._shutdown:
+            return
+        self._update_timer()
+
     def _items(self) -> tuple[_VisualizationItem, ...]:
         return (
             _VisualizationItem(
@@ -282,6 +318,9 @@ class VisualizersPanel(QWidget):
             ),
             _VisualizationItem("chromagram", self._chromagram_widget, CHROMA_NO_SOURCE_MESSAGE),
         )
+
+    def _widget_of(self, name: str) -> QWidget:
+        return next(item.widget for item in self._items() if item.name == name)
 
     def _set_status_for_active(self, text: str) -> None:
         for item in self._items():
@@ -300,7 +339,13 @@ class VisualizersPanel(QWidget):
         self._enabled[name] = visible
         item = next(item for item in self._items() if item.name == name)
         item.widget.setVisible(visible)
-        if not visible:
+        if visible:
+            # 明示的な再表示は再試行の要求として扱う（一時的な失敗を持ち越さない）。
+            self._failed[name] = False
+            self._snapshot_failure_count = 0
+            self._retry_timer.stop()
+            self._set_widget_status(item.widget, self._placeholder_message(item.no_source_message))
+        else:
             self._clear_widget(item.widget, self._placeholder_message(item.no_source_message))
             if name == "correlation":
                 self._correlation_processor.reset()
@@ -364,26 +409,68 @@ class VisualizersPanel(QWidget):
                     mono_frames=mono_frames,
                     level_frames=stereo_frames,
                 )
-                self._snapshot_count += 1
             except Exception:
-                _logger.exception("追加可視化のPCMスナップショット取得に失敗しました")
-                for name in self._enabled:
-                    if self._active(name):
-                        self._failed[name] = True
-                self._clear_all(FAILED_MESSAGE)
-                self._update_timer()
+                self._handle_snapshot_failure()
                 return
+            self._snapshot_count += 1
+            self._snapshot_failure_count = 0
 
             if snapshot.sample_rate < 1:
                 return
+            analysis = self._frequency_analysis(snapshot.mono, snapshot.sample_rate)
             self._update_oscilloscope(snapshot.mono)
             self._update_vectorscope(snapshot.left, snapshot.right)
             self._update_correlation(snapshot.left, snapshot.right)
-            self._update_spectrogram(snapshot.mono, snapshot.sample_rate)
-            self._update_chromagram(snapshot.mono, snapshot.sample_rate)
+            self._update_spectrogram(snapshot.mono, snapshot.sample_rate, analysis)
+            self._update_chromagram(snapshot.mono, snapshot.sample_rate, analysis)
             self._update_timer()
         finally:
             self._processing = False
+
+    def _handle_snapshot_failure(self) -> None:
+        """snapshot取得の失敗を、回復可能な障害として扱う。
+
+        規定回数までは間隔を広げながら再試行し（その間は直前の表示を保つ）、
+        超えて初めて全可視化を失敗表示にする。同じ例外を毎フレーム記録しない。
+        """
+        self._snapshot_failure_count += 1
+        attempt = self._snapshot_failure_count
+        if attempt == 1:
+            _logger.exception("追加可視化のPCMスナップショット取得に失敗しました。再試行します")
+        else:
+            _logger.debug(
+                "追加可視化のPCMスナップショット取得に再度失敗しました（%d回目）", attempt
+            )
+
+        self._timer.stop()
+        if attempt <= len(SNAPSHOT_RETRY_DELAYS_MS):
+            self._retry_timer.start(SNAPSHOT_RETRY_DELAYS_MS[attempt - 1])
+            return
+
+        _logger.error("PCMスナップショットの取得に%d回失敗したため追加可視化を停止します", attempt)
+        for name in self._enabled:
+            if self._active(name):
+                self._failed[name] = True
+        self._clear_all(FAILED_MESSAGE)
+        self._update_timer()
+
+    def _frequency_analysis(self, mono: object, sample_rate: int) -> FrequencyAnalysisFrame | None:
+        """スペクトログラムとクロマグラムで共有するrFFTを、1tickで1回だけ実行する。
+
+        FFT自体の失敗はこの2つの可視化に共通するため、両方をまとめて失敗させる。
+        """
+        shared = ("spectrogram", "chromagram")
+        if not any(self._active(name) for name in shared):
+            return None
+        try:
+            analysis = compute_frequency_analysis(mono, sample_rate)  # pyright: ignore[reportArgumentType]
+        except Exception:
+            for name in shared:
+                if self._active(name):
+                    self._fail(name, self._widget_of(name))
+            return None
+        self._analysis_count += 1
+        return analysis
 
     def _needs_mono(self) -> bool:
         return any(self._active(name) for name in ("oscilloscope", "spectrogram", "chromagram"))
@@ -424,22 +511,26 @@ class VisualizersPanel(QWidget):
         except Exception:
             self._fail("correlation", self._correlation_widget)
 
-    def _update_spectrogram(self, mono: object, sample_rate: int) -> None:
+    def _update_spectrogram(
+        self, mono: object, sample_rate: int, analysis: FrequencyAnalysisFrame | None
+    ) -> None:
         if not self._active("spectrogram"):
             return
         try:
-            frame = self._spectrogram_processor.process(mono, sample_rate)  # pyright: ignore[reportArgumentType]
+            frame = self._spectrogram_processor.process(mono, sample_rate, analysis=analysis)  # pyright: ignore[reportArgumentType]
             self._spectrogram_count += 1
             self._spectrogram_widget.set_frame(frame)
             self._spectrogram_widget.set_status_text("")
         except Exception:
             self._fail("spectrogram", self._spectrogram_widget)
 
-    def _update_chromagram(self, mono: object, sample_rate: int) -> None:
+    def _update_chromagram(
+        self, mono: object, sample_rate: int, analysis: FrequencyAnalysisFrame | None
+    ) -> None:
         if not self._active("chromagram"):
             return
         try:
-            frame = self._chroma_processor.process(mono, sample_rate)  # pyright: ignore[reportArgumentType]
+            frame = self._chroma_processor.process(mono, sample_rate, analysis=analysis)  # pyright: ignore[reportArgumentType]
             self._chromagram_count += 1
             self._chromagram_widget.set_frame(frame)
             self._chromagram_widget.set_status_text("")

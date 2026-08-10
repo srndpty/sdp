@@ -714,6 +714,45 @@ MainWindow の依存を増やしたり、汎用オーディオグラフやイベ
   タイマーを止めるとき（pause / 非表示 / 最小化 / 停止）は時計を無効化し、
   **止まっていた実時間を減衰へ数えない**。
 
+### 6.10.1 VisualizersPanel（追加可視化のタイマーと処理量）
+
+`VisualizersPanel(playback: PlaybackController, pcm_tap: PcmTap)` が
+オシロスコープ・ベクトルスコープ・位相相関・スペクトログラム・クロマグラムの
+5 種をまとめ、`SpectrumPanel` と同じ 33ms の `PreciseTimer` で回す。
+タイマーを動かす条件、最小化の監視、`PcmTap` を切断しない方針は §6.10 と同じ。
+
+1 tick の処理順は次のとおり。
+
+1. 表示中の可視化が必要とする長さだけを指定して統合 snapshot を**1 回**取得
+2. スペクトログラムかクロマグラムが表示中なら、共有する rFFT
+   （`FrequencyAnalysisFrame`）を**1 回**だけ計算する
+3. 5 種それぞれを最大 1 回ずつ更新する（例外境界は独立）
+
+- **同じ PCM に対して rFFT を 2 回実行しない。** スペクトログラムの band 集約と
+  クロマのピッチクラス集約は、同じ `FrequencyAnalysisFrame` から派生させる。
+  共有する振幅配列は read-only とし、読み取り側で `out=` による in-place 演算をしない。
+  `SpectrumPanel` は別 tick で自分の FFT を持つ（Panel 統合は行っていない）。
+- **スペクトログラムの履歴はリング**とし、1 tick の書き込みは 1 列だけにする
+  （全列のシフトをしない）。フレームは古い順へ並べ替えた**1 回のコピー**で作り、
+  Processor 側のリングとメモリを共有しない。
+- **スペクトログラムの描画はセルごとの `fillRect` を使わない。**
+  `spectrogram_cells()`（Qt 非依存、NumPy）で表示解像度へ間引いた 0〜255 の強度へ写し、
+  Widget は 256 色のカラーテーブルを持つ `QImage` を 1 枚作って `drawImage` を 1 回呼ぶ。
+  強度 0（floor 以下）は透明にして背景を残す。色の決定は UI 層に閉じる。
+- **ベクトルスコープは点ごとに `drawEllipse` を呼ばない。** 座標を NumPy でまとめて
+  求め、`QPolygonF` へ入れて `drawPoints` を 1 回呼ぶ（点の丸みは RoundCap の pen 幅で表す）。
+- **位相相関の平滑化は非対称**とし、相関が**下がる**方向（モノ互換性が悪化する方向）を
+  attack で速く、上がる方向を release で緩やかに追従させる。絶対値では判定しない。
+- 例外境界は可視化ごとに独立させる（1 種の失敗で他の 4 種と再生を止めない）。
+  共有 rFFT の失敗はスペクトログラムとクロマグラムの両方の失敗として扱う。
+- 共有 snapshot の失敗は回復可能な障害として扱い、`SNAPSHOT_RETRY_DELAYS_MS`
+  （`services/pcm_tap.py`。`SpectrumPanel` と同じ方針を共有する）の回数だけ
+  間隔を広げながら再試行する。再試行中は直前の表示を保ち、超えて初めて
+  全可視化を失敗表示にしてタイマーを止める。
+- 失敗状態は source 変更・format 変更・停止で解除する。加えて、**設定での
+  OFF→ON は明示的な再試行の要求として扱い、その可視化の失敗状態を解除する**
+  （一時的な失敗をその曲の間ずっと引きずらない）。
+
 ### 6.11 MainWindow と app.py
 
 `MainWindow` は PlayerControls → SpeedPanel → WaveformPanel → **SpectrumPanel
@@ -1254,8 +1293,10 @@ objectNameは`settingsDialog`、各入力は`settingsPlaybackRateSpinBox`、
 
 - 再表示時は最新PCMから表示を再開する。**非表示だった実時間はPeak holdの減衰へ
   加算しない**（タイマー停止時に経過時間の時計を無効化する）。
-- 非表示→再表示だけでは解析の失敗状態を消さない（復帰はsource変更・format変更のまま）。
-  非表示中は解析しないため、新たな失敗もログも生まれない。
+- 非表示中は解析しないため、新たな失敗もログも生まれない。
+  `SpectrumPanel`の波形・スペクトラム・レベルは、非表示→再表示だけでは解析の失敗状態を
+  消さない（復帰はsource変更・format変更のまま）。追加可視化（`VisualizersPanel`）は
+  再表示を明示的な再試行の要求として扱い、その可視化の失敗状態を解除する（§6.10.1）。
 
 ### 9.6 UI状態（P6-B / P6-C）
 

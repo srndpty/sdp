@@ -121,3 +121,26 @@ def test_chromagram_paints_bars(qtbot: QtBot) -> None:
     repaint(widget, qtbot)
 
     assert widget.last_bar_count > 0
+
+
+@pytest.mark.parametrize("width", [400, 401, 403])
+def test_spectrogram_image_is_not_skewed_at_any_width(width: int, qtbot: QtBot) -> None:
+    """4の倍数でない幅でも、画像の走査線がずれず一様な色で描かれる。
+
+    強度が全セル同じフレームなので、走査線がずれていれば列ごとに色が変わる。
+    """
+    widget = prepare(SpectrogramWidget(), qtbot, width=width, height=64)
+    processor = SpectrogramProcessor(history=8)
+    frame = processor.process(tone(), SAMPLE_RATE)
+    for _ in range(7):
+        frame = processor.process(tone(), SAMPLE_RATE)
+    widget.set_frame(frame)
+    widget.set_status_text("")
+    repaint(widget, qtbot)
+
+    image = widget.grab().toImage()
+    row = image.height() // 2
+    colors = {image.pixelColor(x, row).rgb() for x in range(4, image.width() - 4)}
+
+    assert widget.last_cell_count > 0
+    assert len(colors) == 1
