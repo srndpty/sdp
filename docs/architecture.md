@@ -78,6 +78,12 @@ sdp/
 │       ├── spectrum_widget.py# スペクトラム（QPainter 自前描画）
 │       ├── spectrum_panel.py # 再生状態・PCMタップ・スペクトラムWidgetの調停
 │       ├── level_meter_widget.py # Peak / RMS メーター（P5-B で追加）
+│       ├── visualizers_panel.py # 追加可視化（オシロ・位相・スペクトログラム等）の調停
+│       ├── oscilloscope_widget.py # 時間軸波形（トリガー同期）
+│       ├── vectorscope_widget.py  # L/R のリサージュ表示
+│       ├── correlation_meter_widget.py # 位相相関メーター
+│       ├── spectrogram_widget.py  # スペクトログラム（時間×周波数）
+│       ├── chromagram_widget.py   # 12音クラス強度
 │       ├── settings_dialog.py# 設定ダイアログ（Apply / OK / Cancel）
 │       └── shortcuts.py      # QShortcut 定義の一元管理
 ├── tests/                    # テスト構成は testing-strategy.md を参照
@@ -120,8 +126,10 @@ PyQtGraph の汎用 API に合わせるコストの方が高いと判断し、**
 | `PcmTap` | QAudioBuffer の受領と妥当性確認、float32 mono への正規化、リングバッファへの書き込み、sample rate変更検出、source／stop時のclear | FFT、Hann窓、dB変換、QWidget、PlaylistModel、cache、settings、波形解析、シーク |
 | `PcmRingBuffer` | 固定容量のmono float32保持、wrap上書き、最新N sampleのread-only snapshot、短時間lock | Qt、全履歴、FFT |
 | `SpectrumFrame` / `spectrum.py` | Qt非依存のread-only帯域別dBと、Hann窓・rFFT・dB変換・対数band集約・attack/release平滑化 | QColor、QWidget、PCM取得 |
+| `oscilloscope.py` / `stereo.py` / `spectrogram.py` / `chroma.py` | Qt非依存の追加可視化ロジック（トリガー波形、ベクトルスコープ、位相相関、スペクトログラム履歴、12音クロマ） | QColor、QWidget、PCM取得 |
 | `SpectrumWidget` | band別dBのpaletteベースQPainter一括描画、dB基準線、状態文字 | Controller、PcmTap、FFT、平滑化状態、マウス操作 |
 | `SpectrumPanel` | Controllerのstate/source監視、QTimer管理、snapshot取得、Processor呼出、Widget反映、visible／最小化での更新制御 | PCM decode、QAudioBuffer、cache、PlaylistModel、波形data、settings、Backend具体型 |
+| `VisualizersPanel` | 追加可視化Widget群のQTimer管理、snapshot取得、Processor呼出、Widget反映、visible／最小化での更新制御 | PCM decode、QAudioBuffer、cache、PlaylistModel、波形data、settings、Backend具体型 |
 | `SettingsSession` | 速度・ピッチ設定の復元、変更監視、デバウンス／終了時保存 | UI、プレイリスト、P6以降の設定 |
 | `SingleInstanceService` | サーバー / クライアントの判定、パス転送、受信通知 | 受け取ったファイルの解釈 |
 
@@ -706,20 +714,61 @@ MainWindow の依存を増やしたり、汎用オーディオグラフやイベ
   タイマーを止めるとき（pause / 非表示 / 最小化 / 停止）は時計を無効化し、
   **止まっていた実時間を減衰へ数えない**。
 
+### 6.10.1 VisualizersPanel（追加可視化のタイマーと処理量）
+
+`VisualizersPanel(playback: PlaybackController, pcm_tap: PcmTap)` が
+オシロスコープ・ベクトルスコープ・位相相関・スペクトログラム・クロマグラムの
+5 種をまとめ、`SpectrumPanel` と同じ 33ms の `PreciseTimer` で回す。
+タイマーを動かす条件、最小化の監視、`PcmTap` を切断しない方針は §6.10 と同じ。
+
+1 tick の処理順は次のとおり。
+
+1. 表示中の可視化が必要とする長さだけを指定して統合 snapshot を**1 回**取得
+2. スペクトログラムかクロマグラムが表示中なら、共有する rFFT
+   （`FrequencyAnalysisFrame`）を**1 回**だけ計算する
+3. 5 種それぞれを最大 1 回ずつ更新する（例外境界は独立）
+
+- **同じ PCM に対して rFFT を 2 回実行しない。** スペクトログラムの band 集約と
+  クロマのピッチクラス集約は、同じ `FrequencyAnalysisFrame` から派生させる。
+  共有する振幅配列は read-only とし、読み取り側で `out=` による in-place 演算をしない。
+  `SpectrumPanel` は別 tick で自分の FFT を持つ（Panel 統合は行っていない）。
+- **スペクトログラムの履歴はリング**とし、1 tick の書き込みは 1 列だけにする
+  （全列のシフトをしない）。フレームは古い順へ並べ替えた**1 回のコピー**で作り、
+  Processor 側のリングとメモリを共有しない。
+- **スペクトログラムの描画はセルごとの `fillRect` を使わない。**
+  `spectrogram_cells()`（Qt 非依存、NumPy）で表示解像度へ間引いた 0〜255 の強度へ写し、
+  Widget は 256 色のカラーテーブルを持つ `QImage` を 1 枚作って `drawImage` を 1 回呼ぶ。
+  強度 0（floor 以下）は透明にして背景を残す。色の決定は UI 層に閉じる。
+- **ベクトルスコープは点ごとに `drawEllipse` を呼ばない。** 座標を NumPy でまとめて
+  求め、`QPolygonF` へ入れて `drawPoints` を 1 回呼ぶ（点の丸みは RoundCap の pen 幅で表す）。
+- **位相相関の平滑化は非対称**とし、相関が**下がる**方向（モノ互換性が悪化する方向）を
+  attack で速く、上がる方向を release で緩やかに追従させる。絶対値では判定しない。
+- 例外境界は可視化ごとに独立させる（1 種の失敗で他の 4 種と再生を止めない）。
+  共有 rFFT の失敗はスペクトログラムとクロマグラムの両方の失敗として扱う。
+- 共有 snapshot の失敗は回復可能な障害として扱い、`SNAPSHOT_RETRY_DELAYS_MS`
+  （`services/pcm_tap.py`。`SpectrumPanel` と同じ方針を共有する）の回数だけ
+  間隔を広げながら再試行する。再試行中は直前の表示を保ち、超えて初めて
+  全可視化を失敗表示にしてタイマーを止める。
+- 失敗状態は source 変更・format 変更・停止で解除する。加えて、**設定での
+  OFF→ON は明示的な再試行の要求として扱い、その可視化の失敗状態を解除する**
+  （一時的な失敗をその曲の間ずっと引きずらない）。
+
 ### 6.11 MainWindow と app.py
 
 `MainWindow` は PlayerControls → SpeedPanel → WaveformPanel → **SpectrumPanel
-（スペクトラム + レベルメーター）** → PlaylistView の順に配置するだけで、
-FFT・Peak / RMS・Peak hold・タイマー・リングバッファ・LevelProcessor を持たない。
-レベルメーターは `SpectrumPanel` の中へ入れるため、MainWindow の依存も既定高も増やさない。
-可視化が 2 つに増えた分だけ既定ウィンドウ高を 540 → 700 へ広げ、プレイリスト領域を残す。
+（スペクトラム + レベルメーター）** → **VisualizersPanel
+（オシロスコープ + ベクトルスコープ + 位相相関 + スペクトログラム + クロマグラム）**
+→ PlaylistView の順に配置するだけで、FFT・Peak / RMS・Peak hold・追加可視化Processor・
+タイマー・リングバッファを持たない。
+レベルメーターは `SpectrumPanel`、追加可視化は `VisualizersPanel` の中へ入れる。
+可視化が増えた分だけ既定ウィンドウ高を広げ、プレイリスト領域を残す。
 `MainWindow` へ具体 Backend は渡さない（`PcmTap` は既存の `WaveformAnalysisService` と
 同じく composition 済みサービスとして受け取る）。
 
 `app.py`（composition root）が `QtMultimediaBackend` → `PlaybackController` →
 `PcmTap` → Backend の PCM 供給シグナルへの接続 → `MainWindow` の順に組み立て、
 `PlayerComposition` が `pcm_tap` を保持する。**`build_player()` だけではタイマーを開始しない。**
-終了時は可視化を先に止める（`spectrum_panel.shutdown()` → `pcm_tap.shutdown()` →
+終了時は可視化を先に止める（`visualizers_panel.shutdown()` → `spectrum_panel.shutdown()` → `pcm_tap.shutdown()` →
 `waveform_analysis.shutdown()` → `metadata_reader.shutdown()` → settings / playlist 保存）。
 破棄済み QObject へシグナルが飛ばないようにするため、この順序を変えない。
 
@@ -1140,6 +1189,11 @@ Mutagen による非同期メタデータ取得と表示（P2-D）。
   | `waveform_visible` | v2 | 波形の表示ON/OFF |
   | `spectrum_visible` | v2 | スペクトラムの表示ON/OFF |
   | `level_meter_visible` | v2 | Peak／RMSレベルメーターの表示ON/OFF |
+  | `oscilloscope_visible` | v4 | オシロスコープの表示ON/OFF |
+  | `vectorscope_visible` | v4 | ベクトルスコープの表示ON/OFF |
+  | `correlation_meter_visible` | v4 | 位相相関メーターの表示ON/OFF |
+  | `spectrogram_visible` | v4 | スペクトログラムの表示ON/OFF |
+  | `chromagram_visible` | v4 | クロマグラムの表示ON/OFF |
   | `volume` | v3 | 0.0〜1.0 の音量 |
   | `muted` | v3 | ミュートのON/OFF |
   | `repeat_mode` | v3 | `"off"` / `"all"` / `"one"` |
@@ -1196,7 +1250,10 @@ Mutagen による非同期メタデータ取得と表示（P2-D）。
 `ui/settings_dialog.py`。`QDialog` + `QDialogButtonBox`（OK / キャンセル / 適用）。
 objectNameは`settingsDialog`、各入力は`settingsPlaybackRateSpinBox`、
 `settingsPitchCompensationCheckBox`、`settingsWaveformVisibleCheckBox`、
-`settingsSpectrumVisibleCheckBox`、`settingsLevelMeterVisibleCheckBox`。
+`settingsSpectrumVisibleCheckBox`、`settingsLevelMeterVisibleCheckBox`、
+`settingsOscilloscopeVisibleCheckBox`、`settingsVectorscopeVisibleCheckBox`、
+`settingsCorrelationMeterVisibleCheckBox`、`settingsSpectrogramVisibleCheckBox`、
+`settingsChromagramVisibleCheckBox`。
 
 | 操作 | 意味 |
 |---|---|
@@ -1227,11 +1284,19 @@ objectNameは`settingsDialog`、各入力は`settingsPlaybackRateSpinBox`、
 | `spectrum_visible` | `SpectrumWidget`を隠し、**mono snapshotとFFTを行わない**（frame数0で要求し、コピーもしない）。平滑化履歴と旧フレームは破棄する |
 | `level_meter_visible` | `LevelMeterWidget`を隠し、**L／R snapshotとPeak／RMSを行わない**。Peak holdも破棄する |
 | 両方OFF | `SpectrumPanel`ごと畳み、**タイマーを停止**する。PCMタップは固定容量bufferへの受信を継続する |
+| `oscilloscope_visible` | `OscilloscopeWidget`を隠し、オシロスコープ用のmono snapshotとトリガー整列を行わない |
+| `vectorscope_visible` | `VectorscopeWidget`を隠し、ベクトルスコープ用のL／R snapshotと点群計算を行わない |
+| `correlation_meter_visible` | `CorrelationMeterWidget`を隠し、位相相関計算と平滑化を行わない |
+| `spectrogram_visible` | `SpectrogramWidget`を隠し、スペクトログラム用FFTと履歴更新を行わない |
+| `chromagram_visible` | `ChromagramWidget`を隠し、クロマ集約と平滑化を行わない |
+| 追加可視化が全OFF | `VisualizersPanel`ごと畳み、**追加可視化タイマーを停止**する。PCMタップは固定容量bufferへの受信を継続する |
 
 - 再表示時は最新PCMから表示を再開する。**非表示だった実時間はPeak holdの減衰へ
   加算しない**（タイマー停止時に経過時間の時計を無効化する）。
-- 非表示→再表示だけでは解析の失敗状態を消さない（復帰はsource変更・format変更のまま）。
-  非表示中は解析しないため、新たな失敗もログも生まれない。
+- 非表示中は解析しないため、新たな失敗もログも生まれない。
+  `SpectrumPanel`の波形・スペクトラム・レベルは、非表示→再表示だけでは解析の失敗状態を
+  消さない（復帰はsource変更・format変更のまま）。追加可視化（`VisualizersPanel`）は
+  再表示を明示的な再試行の要求として扱い、その可視化の失敗状態を解除する（§6.10.1）。
 
 ### 9.6 UI状態（P6-B / P6-C）
 
@@ -1374,7 +1439,7 @@ objectNameは`settingsDialog`、各入力は`settingsPlaybackRateSpinBox`、
   変更がないApplyではファイルを書き換えない。
 - UI状態の監視は**Window表示後**に開始する（表示で生じるmove／resizeを
   ユーザー変更として保存しないため）。
-- 終了順は「単一instance IPC → SpectrumPanel → PcmTap → 波形解析 → MetadataReader → **UI状態flush** →
+- 終了順は「単一instance IPC → VisualizersPanel → SpectrumPanel → PcmTap → 波形解析 → MetadataReader → **UI状態flush** →
   設定flush → プレイリスト保存 → 各session stop → AppSettingsController shutdown」。
   **Windowが破棄された後にgeometryを取得しない**（破棄済みならUI状態の保存を諦めて
   終了処理を止めない）。

@@ -118,6 +118,36 @@ class SettingsDialog(QDialog):
             "レベルメーターを表示",
             _VISUALIZATION_TOOLTIP,
         )
+        self._oscilloscope_check_box = self._make_check_box(
+            "settingsOscilloscopeVisibleCheckBox",
+            "オシロスコープを表示する(&O)",
+            "オシロスコープを表示",
+            _VISUALIZATION_TOOLTIP,
+        )
+        self._vectorscope_check_box = self._make_check_box(
+            "settingsVectorscopeVisibleCheckBox",
+            "ベクトルスコープを表示する(&V)",
+            "ベクトルスコープを表示",
+            _VISUALIZATION_TOOLTIP,
+        )
+        self._correlation_meter_check_box = self._make_check_box(
+            "settingsCorrelationMeterVisibleCheckBox",
+            "位相相関メーターを表示する(&C)",
+            "位相相関メーターを表示",
+            _VISUALIZATION_TOOLTIP,
+        )
+        self._spectrogram_check_box = self._make_check_box(
+            "settingsSpectrogramVisibleCheckBox",
+            "スペクトログラムを表示する(&G)",
+            "スペクトログラムを表示",
+            _VISUALIZATION_TOOLTIP,
+        )
+        self._chromagram_check_box = self._make_check_box(
+            "settingsChromagramVisibleCheckBox",
+            "クロマグラムを表示する(&K)",
+            "クロマグラムを表示",
+            _VISUALIZATION_TOOLTIP,
+        )
 
         self._volume_slider = QSlider(Qt.Orientation.Horizontal, self)
         self._volume_slider.setObjectName("settingsVolumeSlider")
@@ -189,6 +219,11 @@ class SettingsDialog(QDialog):
         display_layout.addWidget(self._waveform_check_box)
         display_layout.addWidget(self._spectrum_check_box)
         display_layout.addWidget(self._level_meter_check_box)
+        display_layout.addWidget(self._oscilloscope_check_box)
+        display_layout.addWidget(self._vectorscope_check_box)
+        display_layout.addWidget(self._correlation_meter_check_box)
+        display_layout.addWidget(self._spectrogram_check_box)
+        display_layout.addWidget(self._chromagram_check_box)
 
         self._button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -217,7 +252,12 @@ class SettingsDialog(QDialog):
             (self._shuffle_check_box, self._waveform_check_box),
             (self._waveform_check_box, self._spectrum_check_box),
             (self._spectrum_check_box, self._level_meter_check_box),
-            (self._level_meter_check_box, self._button_box),
+            (self._level_meter_check_box, self._oscilloscope_check_box),
+            (self._oscilloscope_check_box, self._vectorscope_check_box),
+            (self._vectorscope_check_box, self._correlation_meter_check_box),
+            (self._correlation_meter_check_box, self._spectrogram_check_box),
+            (self._spectrogram_check_box, self._chromagram_check_box),
+            (self._chromagram_check_box, self._button_box),
         ):
             QWidget.setTabOrder(previous, following)
 
@@ -253,6 +293,11 @@ class SettingsDialog(QDialog):
         self._waveform_check_box.setChecked(settings.waveform_visible)
         self._spectrum_check_box.setChecked(settings.spectrum_visible)
         self._level_meter_check_box.setChecked(settings.level_meter_visible)
+        self._oscilloscope_check_box.setChecked(settings.oscilloscope_visible)
+        self._vectorscope_check_box.setChecked(settings.vectorscope_visible)
+        self._correlation_meter_check_box.setChecked(settings.correlation_meter_visible)
+        self._spectrogram_check_box.setChecked(settings.spectrogram_visible)
+        self._chromagram_check_box.setChecked(settings.chromagram_visible)
         self._clear_error()
 
     def refresh_if_unedited(self, settings: AppSettings) -> bool:
@@ -278,6 +323,11 @@ class SettingsDialog(QDialog):
             waveform_visible=self._waveform_check_box.isChecked(),
             spectrum_visible=self._spectrum_check_box.isChecked(),
             level_meter_visible=self._level_meter_check_box.isChecked(),
+            oscilloscope_visible=self._oscilloscope_check_box.isChecked(),
+            vectorscope_visible=self._vectorscope_check_box.isChecked(),
+            correlation_meter_visible=self._correlation_meter_check_box.isChecked(),
+            spectrogram_visible=self._spectrogram_check_box.isChecked(),
+            chromagram_visible=self._chromagram_check_box.isChecked(),
             volume=self._volume_spin_box.value() / _VOLUME_SCALE,
             muted=self._muted_check_box.isChecked(),
             repeat_mode=self._current_repeat_mode(),

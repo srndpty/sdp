@@ -41,6 +41,15 @@ _logger = logging.getLogger(__name__)
 _DISCARD_LOG_INTERVAL = 100
 """無効bufferのログ間隔。音声コールバックからログを大量に出さないため。"""
 
+SNAPSHOT_RETRY_DELAYS_MS = (100, 500, 2_000)
+""":meth:`PcmTap.snapshot_visualization` の失敗に対する再試行間隔（指数的に広げる）。
+
+snapshotの失敗は、解析アルゴリズム自体の誤りではなく、一時的な競合・
+メモリ確保失敗・format切替の隙間といった回復可能な事象でも起こる。
+1回の失敗でその曲の可視化を最後まで止めない。この回数だけ再試行しても
+駄目なら、初めて失敗表示にする。可視化Panelはこの方針を共有する。
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class VisualizationPcmSnapshot:

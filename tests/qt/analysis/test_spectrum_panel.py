@@ -27,13 +27,12 @@ from sdp.core.analysis.spectrum import (
 )
 from sdp.core.playback.controller import PlaybackController
 from sdp.core.playback.types import PlaybackState
-from sdp.services.pcm_tap import PcmTap
+from sdp.services.pcm_tap import SNAPSHOT_RETRY_DELAYS_MS, PcmTap
 from sdp.ui.level_meter_widget import NO_SOURCE_MESSAGE as LEVEL_NO_SOURCE_MESSAGE
 from sdp.ui.level_meter_widget import LevelMeterWidget
 from sdp.ui.spectrum_panel import (
     FAILED_MESSAGE,
     LEVEL_FAILED_MESSAGE,
-    SNAPSHOT_RETRY_DELAYS_MS,
     STOPPED_MESSAGE,
     WAITING_MESSAGE,
     SpectrumPanel,

@@ -85,6 +85,96 @@ def _validated_array(name: str, value: object) -> NDArray[np.float32]:
     return array
 
 
+@dataclass(frozen=True, slots=True)
+class FrequencyAnalysisFrame:
+    """1tick分のrFFT結果（bin周波数と窓補正済みの線形振幅）。
+
+    同じPCMに対してスペクトラム・スペクトログラム・クロマグラムがそれぞれ
+    rFFTを実行しないための共有単位。dB変換・band集約・ピッチクラス集約は
+    まだ行っておらず、各可視化の解釈をここへ持ち込まない。
+
+    配列はread-onlyにするため、受け取り側は ``out=`` によるin-place演算を
+    行ってはならない。
+    """
+
+    frequencies_hz: NDArray[np.float64]
+    magnitudes: NDArray[np.float64]
+    sample_rate: int
+
+    def __post_init__(self) -> None:
+        frequencies = _validated_float64("frequencies_hz", self.frequencies_hz)
+        magnitudes = _validated_float64("magnitudes", self.magnitudes)
+        if frequencies.shape != magnitudes.shape:
+            raise ValueError("frequencies_hzとmagnitudesのshapeが一致しません")
+        if self.sample_rate < 1:
+            raise ValueError("sample_rateは1以上である必要があります")
+        object.__setattr__(self, "frequencies_hz", _read_only(frequencies))
+        object.__setattr__(self, "magnitudes", _read_only(magnitudes))
+
+
+def compute_frequency_analysis(
+    samples: NDArray[np.float32],
+    sample_rate: int,
+    *,
+    fft_size: int = FFT_SIZE,
+) -> FrequencyAnalysisFrame:
+    """PCMから共有可能なrFFT結果を1回だけ求める（入力配列は変更しない）。"""
+    frequencies, magnitudes = magnitude_spectrum(samples, sample_rate, fft_size=fft_size)
+    return FrequencyAnalysisFrame(
+        frequencies_hz=frequencies,
+        magnitudes=magnitudes,
+        sample_rate=sample_rate,
+    )
+
+
+def analysis_for(
+    samples: NDArray[np.float32],
+    sample_rate: int,
+    *,
+    fft_size: int,
+    analysis: FrequencyAnalysisFrame | None,
+) -> FrequencyAnalysisFrame:
+    """共有済みのrFFT結果を検証して返す。無ければその場で1回計算する。
+
+    共有結果のsample rateが要求と食い違う場合は、古い世代の解析を黙って使わず失敗させる。
+    """
+    if analysis is None:
+        return compute_frequency_analysis(samples, sample_rate, fft_size=fft_size)
+    if analysis.sample_rate != sample_rate:
+        raise ValueError(
+            "共有されたFFT結果のsample_rateが要求と一致しません"
+            f"（要求 {sample_rate}、実際 {analysis.sample_rate}）"
+        )
+    return analysis
+
+
+def _read_only(array: NDArray[np.float64]) -> NDArray[np.float64]:
+    """呼び出し側の配列を書き換えないまま、read-onlyの配列を返す。
+
+    書き込み可能な配列は防御的にコピーする（呼び出し側の配列のflagsを変えない）。
+    既にread-onlyな配列——``magnitude_spectrum`` などが作ったばかりの一時配列を
+    呼び出し側で凍結したもの——は、そのまま共有してコピーを省く。
+    """
+    if not array.flags.writeable:
+        return array
+    copied = array.copy()
+    copied.setflags(write=False)
+    return copied
+
+
+def _validated_float64(name: str, value: object) -> NDArray[np.float64]:
+    if not isinstance(value, np.ndarray):
+        raise TypeError(f"{name}はNumPy配列である必要があります")
+    array = cast("NDArray[np.float64]", value)
+    if array.dtype != np.dtype(np.float64):
+        raise TypeError(f"{name}のdtypeはfloat64である必要があります")
+    if array.ndim != 1:
+        raise ValueError(f"{name}は1次元である必要があります")
+    if not bool(np.all(np.isfinite(array))):
+        raise ValueError(f"{name}にNaNまたはinfが含まれています")
+    return array
+
+
 def effective_max_hz(sample_rate: int, max_hz: float = SPECTRUM_MAX_HZ) -> float:
     """Nyquist以下へ制限した表示上限周波数を返す。"""
     return min(max_hz, sample_rate / 2.0)
@@ -109,6 +199,33 @@ def fit_fft_input(samples: NDArray[np.float32], fft_size: int = FFT_SIZE) -> NDA
     return fitted
 
 
+def magnitude_spectrum(
+    samples: NDArray[np.float32],
+    sample_rate: int,
+    *,
+    fft_size: int = FFT_SIZE,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """PCMから ``(bin周波数[Hz], 窓補正済みの線形振幅)`` を求める（入力は変更しない）。
+
+    手順は FFT長へ整形 → DC除去 → Hann窓 → rFFT → 振幅 → コヒーレントゲイン補正。
+    振幅補正は「0dBFSの正弦波が約1.0（=0dB）になる」ように正規化する。
+    :func:`compute_spectrum`（対数band別dB）と :mod:`sdp.core.analysis.chroma`
+    （bin単位のピッチクラス集約）の双方から再利用し、Hann窓・rFFTを重複実装しない。
+    """
+    if sample_rate < 1:
+        raise ValueError("sample_rateは1以上である必要があります")
+    frame = fit_fft_input(samples, fft_size).astype(np.float64, copy=True)
+    frame -= frame.mean()
+    window = np.hanning(frame.size)
+    # Hann窓のコヒーレントゲイン補正。実正弦波は正負の対を持つため係数2を掛ける。
+    # fft_size 2 では窓が全0になるため、0除算を避けて補正なしとする。
+    window_sum = float(window.sum())
+    correction = 2.0 / window_sum if window_sum > 0.0 else 1.0
+    magnitude = np.abs(np.fft.rfft(frame * window)) * correction
+    frequencies = np.fft.rfftfreq(frame.size, d=1.0 / sample_rate)
+    return frequencies, magnitude
+
+
 def compute_spectrum(
     samples: NDArray[np.float32],
     sample_rate: int,
@@ -118,12 +235,17 @@ def compute_spectrum(
     min_hz: float = SPECTRUM_MIN_HZ,
     max_hz: float = SPECTRUM_MAX_HZ,
     db_floor: float = SPECTRUM_DB_FLOOR,
+    analysis: FrequencyAnalysisFrame | None = None,
 ) -> SpectrumFrame:
     """PCMから対数band別dBのスペクトラムを求める（入力配列は変更しない）。
 
     手順は DC除去 → Hann窓 → rFFT → 振幅 → 窓補正 → dB → floor clamp →
     band集約。振幅補正は「0dBFSの正弦波が約0dBになる」ように正規化する
     （音響測定器としての校正精度は要求しない）。
+
+    ``analysis`` を渡すと rFFT を再実行せずその結果を使う（同一tickで
+    スペクトログラムやクロマグラムとFFTを共有するため）。渡した場合、
+    ``samples`` と ``fft_size`` は使わない。
     """
     if sample_rate < 1:
         raise ValueError("sample_rateは1以上である必要があります")
@@ -139,17 +261,11 @@ def compute_spectrum(
         # 低sample rateで有効帯域が無い場合は band を捏造しない。
         return empty_spectrum_frame()
 
-    frame = fit_fft_input(samples, fft_size).astype(np.float64, copy=True)
-    frame -= frame.mean()
-    window = np.hanning(frame.size)
-    # Hann窓のコヒーレントゲイン補正。実正弦波は正負の対を持つため係数2を掛ける。
-    # fft_size 2 では窓が全0になるため、0除算を避けて補正なしとする。
-    window_sum = float(window.sum())
-    correction = 2.0 / window_sum if window_sum > 0.0 else 1.0
-    magnitude = np.abs(np.fft.rfft(frame * window)) * correction
-    np.maximum(magnitude, _MAGNITUDE_EPSILON, out=magnitude)
+    frame = analysis_for(samples, sample_rate, fft_size=fft_size, analysis=analysis)
+    bin_hz = frame.frequencies_hz
+    # 共有されたread-only配列を壊さないため、in-placeのmaximumは使わない。
+    magnitude = np.maximum(frame.magnitudes, _MAGNITUDE_EPSILON)
     bin_db = np.clip(20.0 * np.log10(magnitude), db_floor, 0.0)
-    bin_hz = np.fft.rfftfreq(frame.size, d=1.0 / sample_rate)
 
     # np.logspace の戻り値型は PySide6 環境の numpy stub で Unknown になるため明示する。
     edges = cast(
@@ -222,8 +338,17 @@ class SpectrumProcessor:
         self._smoothed = None
         self._sample_rate = None
 
-    def process(self, samples: NDArray[np.float32], sample_rate: int) -> SpectrumFrame:
-        """1フレームを解析し、平滑化済みのフレームを返す。"""
+    def process(
+        self,
+        samples: NDArray[np.float32],
+        sample_rate: int,
+        *,
+        analysis: FrequencyAnalysisFrame | None = None,
+    ) -> SpectrumFrame:
+        """1フレームを解析し、平滑化済みのフレームを返す。
+
+        ``analysis`` を渡すと同一tickの他の可視化とrFFTを共有する。
+        """
         if sample_rate != self._sample_rate:
             # 旧formatの平滑化状態を新formatへ混ぜない。
             self._smoothed = None
@@ -236,6 +361,7 @@ class SpectrumProcessor:
             min_hz=self._min_hz,
             max_hz=self._max_hz,
             db_floor=self._db_floor,
+            analysis=analysis,
         )
         if frame.band_count == 0:
             self._smoothed = None

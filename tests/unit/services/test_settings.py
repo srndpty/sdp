@@ -35,6 +35,11 @@ def test_app_settings_is_immutable_and_holds_playback_and_visibility() -> None:
         "waveform_visible",
         "spectrum_visible",
         "level_meter_visible",
+        "oscilloscope_visible",
+        "vectorscope_visible",
+        "correlation_meter_visible",
+        "spectrogram_visible",
+        "chromagram_visible",
         "volume",
         "muted",
         "repeat_mode",
@@ -49,6 +54,11 @@ def test_visualization_defaults_to_visible() -> None:
     assert settings.waveform_visible is True
     assert settings.spectrum_visible is True
     assert settings.level_meter_visible is True
+    assert settings.oscilloscope_visible is True
+    assert settings.vectorscope_visible is True
+    assert settings.correlation_meter_visible is True
+    assert settings.spectrogram_visible is True
+    assert settings.chromagram_visible is True
 
 
 def test_playback_state_defaults() -> None:
@@ -82,12 +92,17 @@ def test_round_trip_uses_utf8_and_only_settings_fields(tmp_path: Path) -> None:
         "waveform_visible",
         "spectrum_visible",
         "level_meter_visible",
+        "oscilloscope_visible",
+        "vectorscope_visible",
+        "correlation_meter_visible",
+        "spectrogram_visible",
+        "chromagram_visible",
         "volume",
         "muted",
         "repeat_mode",
         "shuffle_enabled",
     }
-    assert document["schema_version"] == SETTINGS_SCHEMA_VERSION == 3
+    assert document["schema_version"] == SETTINGS_SCHEMA_VERSION == 4
 
 
 def test_integer_rate_is_restored_as_float(tmp_path: Path) -> None:
@@ -132,9 +147,9 @@ def test_missing_known_keys_use_defaults(
     assert load_settings(path, DEFAULTS) == expected
 
 
-@pytest.mark.parametrize("version", [None, True, 1.0, "1", 0, 4, 99])
+@pytest.mark.parametrize("version", [None, True, 1.0, "1", 0, 5, 99])
 def test_schema_version_requires_a_supported_integer(tmp_path: Path, version: object) -> None:
-    """versionはbool・float・文字列・欠落・未知値を拒否する（1〜3だけ許可）。"""
+    """versionはbool・float・文字列・欠落・未知値を拒否する（1〜4だけ許可）。"""
     path = tmp_path / "settings.json"
     document: dict[str, object] = {
         "playback_rate": 1.0,

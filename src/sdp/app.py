@@ -295,6 +295,7 @@ def shutdown(composition: PlayerComposition) -> None:
     steps.extend(
         [
             # 可視化を先に止め、破棄済みQObjectへシグナルが飛ばないようにする。
+            ("追加可視化の停止", composition.window.visualizers_panel.shutdown),
             ("可視化の停止", composition.window.spectrum_panel.shutdown),
             ("PCMタップの停止", composition.pcm_tap.shutdown),
             ("波形解析の停止", composition.waveform_analysis.shutdown),
