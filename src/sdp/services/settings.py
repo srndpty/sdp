@@ -32,15 +32,16 @@ from sdp.core.playlist.types import RepeatMode
 
 _logger = logging.getLogger(__name__)
 
-SETTINGS_SCHEMA_VERSION = 3
+SETTINGS_SCHEMA_VERSION = 4
 """現在のschema version。
 
 - version 1: 速度とピッチ補正だけ
 - version 2: 可視化3項目を追加
 - version 3: 音量・ミュート・Repeat・Shuffleを追加
+- version 4: 追加ビジュアライザー5項目を追加
 """
 
-SUPPORTED_SETTINGS_SCHEMA_VERSIONS = (1, 2, 3)
+SUPPORTED_SETTINGS_SCHEMA_VERSIONS = (1, 2, 3, 4)
 """読み込みを許可するschema version。未知のversionは既定値へ丸めず失敗させる。"""
 
 MIN_VOLUME = 0.0
@@ -100,13 +101,27 @@ class AppSettings:
     waveform_visible: bool = True
     spectrum_visible: bool = True
     level_meter_visible: bool = True
+    oscilloscope_visible: bool = True
+    vectorscope_visible: bool = True
+    correlation_meter_visible: bool = True
+    spectrogram_visible: bool = True
+    chromagram_visible: bool = True
     volume: float = 1.0
     muted: bool = False
     repeat_mode: RepeatModeSetting = RepeatModeSetting.OFF
     shuffle_enabled: bool = False
 
 
-_VISIBILITY_FIELDS = ("waveform_visible", "spectrum_visible", "level_meter_visible")
+_VISIBILITY_FIELDS = (
+    "waveform_visible",
+    "spectrum_visible",
+    "level_meter_visible",
+    "oscilloscope_visible",
+    "vectorscope_visible",
+    "correlation_meter_visible",
+    "spectrogram_visible",
+    "chromagram_visible",
+)
 _BOOL_FIELDS = ("pitch_compensation", *_VISIBILITY_FIELDS, "muted", "shuffle_enabled")
 
 
@@ -145,11 +160,16 @@ def load_settings(file_path: Path, defaults: AppSettings) -> AppSettings:
     # 古いversionでは、後のversionのキーが混入していても未知キーとして無視する
     # （v1のファイルへ手で書いた"volume"などをv1の意味へ影響させない）。
     known_visibility = version >= 2
+    known_additional_visualizers = version >= 4
     known_playback_state = version >= 3
 
     def visibility(name: str) -> bool:
         fallback: bool = getattr(defaults, name)
         if not known_visibility:
+            return fallback
+        if name not in ("waveform_visible", "spectrum_visible", "level_meter_visible") and not (
+            known_additional_visualizers
+        ):
             return fallback
         return _bool_from_json(name, document.get(name, fallback))
 
@@ -159,6 +179,11 @@ def load_settings(file_path: Path, defaults: AppSettings) -> AppSettings:
         waveform_visible=visibility("waveform_visible"),
         spectrum_visible=visibility("spectrum_visible"),
         level_meter_visible=visibility("level_meter_visible"),
+        oscilloscope_visible=visibility("oscilloscope_visible"),
+        vectorscope_visible=visibility("vectorscope_visible"),
+        correlation_meter_visible=visibility("correlation_meter_visible"),
+        spectrogram_visible=visibility("spectrogram_visible"),
+        chromagram_visible=visibility("chromagram_visible"),
         volume=(
             _volume_from_json(document.get("volume", defaults.volume))
             if known_playback_state
@@ -194,6 +219,11 @@ def save_settings(file_path: Path, settings: AppSettings) -> None:
         "waveform_visible": settings.waveform_visible,
         "spectrum_visible": settings.spectrum_visible,
         "level_meter_visible": settings.level_meter_visible,
+        "oscilloscope_visible": settings.oscilloscope_visible,
+        "vectorscope_visible": settings.vectorscope_visible,
+        "correlation_meter_visible": settings.correlation_meter_visible,
+        "spectrogram_visible": settings.spectrogram_visible,
+        "chromagram_visible": settings.chromagram_visible,
         "volume": float(settings.volume),
         "muted": settings.muted,
         "repeat_mode": settings.repeat_mode.value,

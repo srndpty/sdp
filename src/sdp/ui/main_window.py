@@ -42,6 +42,7 @@ from sdp.ui.settings_dialog import SettingsDialog
 from sdp.ui.shortcuts import ShortcutManager
 from sdp.ui.spectrum_panel import SpectrumPanel
 from sdp.ui.speed_panel import SpeedPanel
+from sdp.ui.visualizers_panel import VisualizersPanel
 from sdp.ui.waveform_panel import WaveformPanel
 
 _logger = logging.getLogger(__name__)
@@ -119,6 +120,7 @@ class MainWindow(QMainWindow):
         self._waveform_panel = WaveformPanel(controller, waveform_analysis)
         # FFT・タイマー・リングバッファの扱いはPanel側の責務。Windowは配置だけ行う。
         self._spectrum_panel = SpectrumPanel(controller, pcm_tap)
+        self._visualizers_panel = VisualizersPanel(controller, pcm_tap)
         self._playlist_view = PlaylistView(playlist_model)
 
         player_panel = QWidget()
@@ -133,6 +135,7 @@ class MainWindow(QMainWindow):
         player_layout.addWidget(self._speed_panel)
         player_layout.addWidget(self._waveform_panel)
         player_layout.addWidget(self._spectrum_panel)
+        player_layout.addWidget(self._visualizers_panel)
 
         splitter = QSplitter(Qt.Orientation.Vertical, self)
         splitter.setObjectName("mainSplitter")
@@ -236,6 +239,11 @@ class MainWindow(QMainWindow):
     def spectrum_panel(self) -> SpectrumPanel:
         """終了処理でタイマーを止めるために composition root へ公開する。"""
         return self._spectrum_panel
+
+    @property
+    def visualizers_panel(self) -> VisualizersPanel:
+        """終了処理で追加可視化タイマーを止めるために composition root へ公開する。"""
+        return self._visualizers_panel
 
     @property
     def waveform_panel(self) -> WaveformPanel:
@@ -557,6 +565,11 @@ class MainWindow(QMainWindow):
         self._waveform_panel.setVisible(settings.waveform_visible)
         self._spectrum_panel.set_spectrum_visible(settings.spectrum_visible)
         self._spectrum_panel.set_level_meter_visible(settings.level_meter_visible)
+        self._visualizers_panel.set_oscilloscope_visible(settings.oscilloscope_visible)
+        self._visualizers_panel.set_vectorscope_visible(settings.vectorscope_visible)
+        self._visualizers_panel.set_correlation_meter_visible(settings.correlation_meter_visible)
+        self._visualizers_panel.set_spectrogram_visible(settings.spectrogram_visible)
+        self._visualizers_panel.set_chromagram_visible(settings.chromagram_visible)
         self._fit_player_panel_to_contents()
 
     # -- Controller からの通知（続き）---------------------------------------

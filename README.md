@@ -214,7 +214,7 @@ Peak／RMSレベルメーター:
 - 引数解析中に存在確認をせず、ディレクトリ、欠損パス、未知拡張子も
   既存のプレイリスト追加契約どおり行として受理し、ファイルでない場合は欠損表示にする
 
-**未実装**: LUFS／true peak などのラウドネス表示、スペクトログラム、ウォーターフォール、
+**未実装**: LUFS／true peak などのラウドネス表示、ウォーターフォール、
 カバーアート、メタデータの編集、オンラインからの情報取得、
 プリセット編集、独立したピッチシフト、波形ズーム、ステレオ別波形、
 可視化の色設定・バンド数設定・FPS設定・Peak hold時間設定、多チャンネルの個別表示、
@@ -232,7 +232,8 @@ Peak／RMSレベルメーター:
 | プレイリストの並び（順序・重複・entry_id） | `playlist.json` | version 1 |
 | 再生速度、ピッチ補正 | `settings.json` | version 1 以降 |
 | 波形・スペクトラム・レベルメーターの表示ON/OFF | `settings.json` | version 2 以降 |
-| 音量、ミュート、リピート、シャッフル | `settings.json` | version 3 |
+| 音量、ミュート、リピート、シャッフル | `settings.json` | version 3 以降 |
+| オシロスコープ・ベクトルスコープ・位相相関・スペクトログラム・クロマグラムの表示ON/OFF | `settings.json` | version 4 |
 | ウィンドウ位置・サイズ・最大化、スプリッター比率、前回フォルダー | `ui-state.json` | version 1 以降 |
 | 前回の曲（`entry_id`） | `ui-state.json` | version 2 |
 
@@ -244,8 +245,8 @@ Peak／RMSレベルメーター:
 - ログ: `logs\sdp.log`（1MB × 5 世代）
 - プレイリスト: `playlist.json`（曲の並びだけ。メタデータや再生状態は保存しない）
 - 設定: `settings.json`（再生速度、ピッチ補正、音量、ミュート、リピート、シャッフル、
-  可視化3種類の表示ON/OFFだけ。schema version 3。旧version 1／2のファイルも読み込め、
-  次の変更時にversion 3で保存する）
+  可視化8種類の表示ON/OFFだけ。schema version 4。旧version 1／2／3のファイルも読み込め、
+  次の変更時にversion 4で保存する）
 - ウィンドウ状態: `ui-state.json`（位置・サイズ・最大化・スプリッター比率・前回フォルダー・
   前回の曲だけ。schema version 2。削除すると既定の位置とサイズで起動する）
 - 波形キャッシュ: `cache\waveforms\*.npz`（削除しても音源から再生成される）

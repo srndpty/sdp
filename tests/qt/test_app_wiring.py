@@ -50,6 +50,7 @@ from sdp.services.save_status import (
     save_recovered_message,
 )
 from sdp.services.settings import (
+    SETTINGS_SCHEMA_VERSION,
     AppSettings,
     AppSettingsController,
     SettingsSession,
@@ -154,6 +155,11 @@ SETTINGS_KEYS = {
     "waveform_visible",
     "spectrum_visible",
     "level_meter_visible",
+    "oscilloscope_visible",
+    "vectorscope_visible",
+    "correlation_meter_visible",
+    "spectrogram_visible",
+    "chromagram_visible",
     "volume",
     "muted",
     "repeat_mode",
@@ -820,7 +826,7 @@ def test_corrupted_playlist_does_not_disable_settings_saving(
     assert composition.settings_session.flush() is True
     document = json.loads(settings_file.read_text(encoding="utf-8"))
     assert set(document) == SETTINGS_KEYS
-    assert document["schema_version"] == 3
+    assert document["schema_version"] == SETTINGS_SCHEMA_VERSION
     assert document["playback_rate"] == pytest.approx(1.2)
     assert document["pitch_compensation"] is False
 
@@ -1491,14 +1497,14 @@ def test_dialog_changes_reach_the_controller_and_the_panels(
 def test_settings_changes_are_flushed_on_shutdown(
     composition: app_module.PlayerComposition, settings_file: Path
 ) -> None:
-    """終了時のflushで最終設定がversion 2として保存される。"""
+    """終了時のflushで最終設定が現在のschema versionとして保存される。"""
     composition.settings_session.start()
     composition.app_settings.apply(AppSettings(1.25, True, spectrum_visible=False))
 
     assert composition.settings_session.flush() is True
 
     document = json.loads(settings_file.read_text(encoding="utf-8"))
-    assert document["schema_version"] == 3
+    assert document["schema_version"] == SETTINGS_SCHEMA_VERSION
     assert document["spectrum_visible"] is False
     assert document["playback_rate"] == pytest.approx(1.25)
 
@@ -1739,7 +1745,7 @@ def test_ui_state_schema_does_not_touch_the_other_schemas(
 
     assert set(playlist_document) == {"schema_version", "entries"}
     assert set(settings_document) == SETTINGS_KEYS
-    assert settings_document["schema_version"] == 3
+    assert settings_document["schema_version"] == SETTINGS_SCHEMA_VERSION
     assert ui_state_document["schema_version"] == 2
     assert set(ui_state_document) <= {
         "schema_version",

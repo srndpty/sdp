@@ -109,6 +109,33 @@ def fit_fft_input(samples: NDArray[np.float32], fft_size: int = FFT_SIZE) -> NDA
     return fitted
 
 
+def magnitude_spectrum(
+    samples: NDArray[np.float32],
+    sample_rate: int,
+    *,
+    fft_size: int = FFT_SIZE,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """PCMから ``(bin周波数[Hz], 窓補正済みの線形振幅)`` を求める（入力は変更しない）。
+
+    手順は FFT長へ整形 → DC除去 → Hann窓 → rFFT → 振幅 → コヒーレントゲイン補正。
+    振幅補正は「0dBFSの正弦波が約1.0（=0dB）になる」ように正規化する。
+    :func:`compute_spectrum`（対数band別dB）と :mod:`sdp.core.analysis.chroma`
+    （bin単位のピッチクラス集約）の双方から再利用し、Hann窓・rFFTを重複実装しない。
+    """
+    if sample_rate < 1:
+        raise ValueError("sample_rateは1以上である必要があります")
+    frame = fit_fft_input(samples, fft_size).astype(np.float64, copy=True)
+    frame -= frame.mean()
+    window = np.hanning(frame.size)
+    # Hann窓のコヒーレントゲイン補正。実正弦波は正負の対を持つため係数2を掛ける。
+    # fft_size 2 では窓が全0になるため、0除算を避けて補正なしとする。
+    window_sum = float(window.sum())
+    correction = 2.0 / window_sum if window_sum > 0.0 else 1.0
+    magnitude = np.abs(np.fft.rfft(frame * window)) * correction
+    frequencies = np.fft.rfftfreq(frame.size, d=1.0 / sample_rate)
+    return frequencies, magnitude
+
+
 def compute_spectrum(
     samples: NDArray[np.float32],
     sample_rate: int,
@@ -139,17 +166,9 @@ def compute_spectrum(
         # 低sample rateで有効帯域が無い場合は band を捏造しない。
         return empty_spectrum_frame()
 
-    frame = fit_fft_input(samples, fft_size).astype(np.float64, copy=True)
-    frame -= frame.mean()
-    window = np.hanning(frame.size)
-    # Hann窓のコヒーレントゲイン補正。実正弦波は正負の対を持つため係数2を掛ける。
-    # fft_size 2 では窓が全0になるため、0除算を避けて補正なしとする。
-    window_sum = float(window.sum())
-    correction = 2.0 / window_sum if window_sum > 0.0 else 1.0
-    magnitude = np.abs(np.fft.rfft(frame * window)) * correction
+    bin_hz, magnitude = magnitude_spectrum(samples, sample_rate, fft_size=fft_size)
     np.maximum(magnitude, _MAGNITUDE_EPSILON, out=magnitude)
     bin_db = np.clip(20.0 * np.log10(magnitude), db_floor, 0.0)
-    bin_hz = np.fft.rfftfreq(frame.size, d=1.0 / sample_rate)
 
     # np.logspace の戻り値型は PySide6 環境の numpy stub で Unknown になるため明示する。
     edges = cast(
