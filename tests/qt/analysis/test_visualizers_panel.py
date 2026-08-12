@@ -89,13 +89,18 @@ def start_playing(controller: PlaybackController, tap: PcmTap, source: Path) -> 
 
 
 def test_panel_owns_all_additional_widgets(panel: VisualizersPanel) -> None:
-    """追加Widget群を1つのPanelが所有する。"""
+    """追加Widget群を1つのPanelが2つの段へまとめて所有する。"""
     assert panel.objectName() == "visualizersPanel"
-    assert panel.oscilloscope_widget.parent() is panel
-    assert panel.vectorscope_widget.parent() is panel
-    assert panel.correlation_meter_widget.parent() is panel
-    assert panel.spectrogram_widget.parent() is panel
-    assert panel.chromagram_widget.parent() is panel
+    for widget in (
+        panel.oscilloscope_widget,
+        panel.vectorscope_widget,
+        panel.correlation_meter_widget,
+    ):
+        assert widget.parent() is panel.scopes_row
+    for widget in (panel.spectrogram_widget, panel.chromagram_widget):
+        assert widget.parent() is panel.maps_row
+    assert panel.isAncestorOf(panel.scopes_row)
+    assert panel.isAncestorOf(panel.maps_row)
 
 
 def test_timer_starts_only_while_playing(
@@ -176,7 +181,8 @@ def test_hiding_all_visualizers_stops_timer_but_not_pcm_tap(
     feed(tap)
 
     assert not panel.is_timer_active
-    assert not panel.isVisible()
+    assert not panel.scopes_row.isVisible()
+    assert not panel.maps_row.isVisible()
     assert tap.received_buffer_count == received + 1
 
 

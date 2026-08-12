@@ -282,21 +282,26 @@ def test_can_drop_accepts_local_urls(model: PlaylistModel, audio_files: list[Pat
 
 
 @pytest.mark.parametrize(
-    ("action", "column"),
-    [
-        (Qt.DropAction.MoveAction, 0),
-        (Qt.DropAction.LinkAction, 0),
-        (Qt.DropAction.CopyAction, 1),
-    ],
+    "action",
+    [Qt.DropAction.MoveAction, Qt.DropAction.LinkAction],
 )
-def test_can_drop_rejects_unsupported_action_or_column(
+def test_can_drop_rejects_unsupported_action(
     model: PlaylistModel,
     audio_files: list[Path],
     action: Qt.DropAction,
-    column: int,
 ) -> None:
-    """実際のdropで拒否するaction・列にはドロップ可能表示を出さない。"""
-    assert model.canDropMimeData(url_mime(audio_files[:1]), action, -1, column, _ROOT) is False
+    """実際のdropで拒否するactionにはドロップ可能表示を出さない。"""
+    assert model.canDropMimeData(url_mime(audio_files[:1]), action, -1, 0, _ROOT) is False
+
+
+@pytest.mark.parametrize("column", [column.value for column in Column])
+def test_drop_is_accepted_over_any_column(
+    model: PlaylistModel, audio_files: list[Path], column: int
+) -> None:
+    """ドロップは行に対する操作であり、カーソル下の列で可否を変えない。"""
+    mime = url_mime(audio_files[:1])
+    assert model.canDropMimeData(mime, Qt.DropAction.CopyAction, -1, column, _ROOT) is True
+    assert drop(model, url_mime(audio_files[:1]), -1, column=column) is True
 
 
 def test_can_drop_rejects_unrelated_mime(model: PlaylistModel) -> None:

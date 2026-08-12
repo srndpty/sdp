@@ -11,11 +11,12 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QItemSelectionModel, QModelIndex, Qt
-from PySide6.QtGui import QPalette
+from PySide6.QtCore import QItemSelectionModel, QMimeData, QModelIndex, Qt, QUrl
+from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent, QPalette
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QHeaderView,
     QStyleOptionViewItem,
     QTableView,
@@ -155,6 +156,37 @@ def test_table_drag_and_drop_settings(view: PlaylistView) -> None:
     assert table.dragDropMode() == QAbstractItemView.DragDropMode.DragDrop
     assert not table.dragDropOverwriteMode()
     assert table.defaultDropAction() == Qt.DropAction.CopyAction
+
+
+@pytest.mark.parametrize("column", [column.value for column in Column])
+def test_file_drop_is_accepted_over_every_column(
+    view: PlaylistView, model: PlaylistModel, audio_files: list[Path], qtbot: QtBot, column: int
+) -> None:
+    """プレイリスト内ならどの列の上でもファイル追加のドロップを受け付ける。"""
+    model.add_paths(audio_files[:2])
+    view.resize(700, 200)
+    view.show()
+    qtbot.waitExposed(view)
+    table = table_of(view)
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(audio_files[4]))])
+    position = table.visualRect(model.index(1, column)).center()
+
+    arguments = (
+        position,
+        Qt.DropAction.CopyAction,
+        mime,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+    for event in (QDragEnterEvent(*arguments), QDragMoveEvent(*arguments)):
+        QApplication.sendEvent(table.viewport(), event)
+        assert event.isAccepted()
+
+    QApplication.sendEvent(table.viewport(), QDropEvent(*arguments))
+
+    assert model.rowCount() == 3
 
 
 def test_internal_drag_runs_as_copy_action(

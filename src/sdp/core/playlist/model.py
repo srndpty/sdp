@@ -329,7 +329,10 @@ class PlaylistModel(QAbstractTableModel):
         column: int,
         parent: QModelIndex | QPersistentModelIndex,
     ) -> bool:
-        if action != Qt.DropAction.CopyAction or column not in (-1, 0):
+        # 列は無視する。ドロップは行に対する操作であり、View はカーソル下の列を
+        # そのまま渡してくるため、列で絞るとタイトル列の上でしか受け付けられない。
+        del column
+        if action != Qt.DropAction.CopyAction:
             return False
         destination = self.drop_row(row, parent)
         if data.hasFormat(INTERNAL_MIME_TYPE):
@@ -351,9 +354,11 @@ class PlaylistModel(QAbstractTableModel):
         parent: QModelIndex | QPersistentModelIndex,
     ) -> bool:
         """ドロップを受け付ける。不正なデータでは例外を投げず ``False`` を返す。"""
+        # 列は :meth:`canDropMimeData` と同じ理由で見ない。
+        del column
         if action == Qt.DropAction.IgnoreAction:
             return True
-        if action != Qt.DropAction.CopyAction or column not in (-1, 0):
+        if action != Qt.DropAction.CopyAction:
             return False
         destination = self.drop_row(row, parent)
         if data.hasFormat(INTERNAL_MIME_TYPE):

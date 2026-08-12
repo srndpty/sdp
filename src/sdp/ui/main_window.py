@@ -13,6 +13,7 @@ from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QAction, QGuiApplication, QMoveEvent, QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QFileDialog,
+    QGridLayout,
     QMainWindow,
     QSizePolicy,
     QSplitter,
@@ -47,7 +48,14 @@ from sdp.ui.waveform_panel import WaveformPanel
 
 _logger = logging.getLogger(__name__)
 
-WINDOW_TITLE = "sdp"
+WINDOW_TITLE = ""
+"""ウィンドウタイトルの既定値（空）。
+
+Qt は applicationDisplayName（"sdp"）をタイトルへ自動で付け足す
+（``QPlatformWindow::formatWindowTitle``）。ここで "sdp" を含めると
+"sdp — 曲名 - sdp" のように二重に出るため、アプリ名は Qt へ任せて
+ここではファイル名だけを渡す。空のときは Qt がアプリ名だけを表示する。
+"""
 
 # ファイルダイアログのフィルターはユーザー補助にすぎない。拡張子で再生可否を
 # 断定しないため（ADR-0001 の制約 3）、「すべてのファイル」も必ず選べるようにする。
@@ -120,7 +128,7 @@ class MainWindow(QMainWindow):
         self._waveform_panel = WaveformPanel(controller, waveform_analysis)
         # FFT・タイマー・リングバッファの扱いはPanel側の責務。Windowは配置だけ行う。
         self._spectrum_panel = SpectrumPanel(controller, pcm_tap)
-        self._visualizers_panel = VisualizersPanel(controller, pcm_tap)
+        self._visualizers_panel = VisualizersPanel(controller, pcm_tap, self)
         self._playlist_view = PlaylistView(playlist_model)
 
         player_panel = QWidget()
@@ -134,8 +142,7 @@ class MainWindow(QMainWindow):
         player_layout.addWidget(self._controls)
         player_layout.addWidget(self._speed_panel)
         player_layout.addWidget(self._waveform_panel)
-        player_layout.addWidget(self._spectrum_panel)
-        player_layout.addWidget(self._visualizers_panel)
+        player_layout.addWidget(self._build_visualization_area())
 
         splitter = QSplitter(Qt.Orientation.Vertical, self)
         splitter.setObjectName("mainSplitter")
@@ -192,6 +199,32 @@ class MainWindow(QMainWindow):
         # 復元済み設定を表示前に反映し、可視化が一瞬見えてから消えるのを防ぐ。
         app_settings.settings_changed.connect(self._on_settings_changed)
         self._apply_visualization_settings(app_settings.settings)
+
+    def _build_visualization_area(self) -> QWidget:
+        """可視化を2段へ詰める。
+
+        上段はスペクトラム＋ピークとスコープ段を左右半分ずつ、
+        下段はスペクトログラムとクロマグラムを2:1の幅で並べる。
+        縦積みのままでは可視化が画面を占有し、プレイリストが狭くなるため。
+        """
+        area = QWidget()
+        area.setObjectName("visualizationArea")
+        area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        layout = QGridLayout(area)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        scopes_row, maps_row = self._visualizers_panel.take_rows()
+        # 上段は左右で高さを揃える（Maximumのままでは低い方が上下に余白を作る）。
+        self._spectrum_panel.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        layout.addWidget(self._spectrum_panel, 0, 0)
+        layout.addWidget(scopes_row, 0, 1)
+        layout.addWidget(maps_row, 1, 0, 1, 2)
+        layout.setColumnStretch(0, 1)
+        layout.setColumnStretch(1, 1)
+        self._visualization_layout = layout
+        return area
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("ファイル(&F)")
@@ -507,7 +540,7 @@ class MainWindow(QMainWindow):
             self.setWindowTitle(WINDOW_TITLE)
             self.statusBar().showMessage("音声ファイルを開いてください。")
             return
-        self.setWindowTitle(f"{WINDOW_TITLE} — {source.name}")
+        self.setWindowTitle(source.name)
         self.statusBar().showMessage(_MEDIA_STATUS_MESSAGES[MediaStatus.LOADING])
 
     def _on_current_entry_changed(self, entry_id: object) -> None:
@@ -570,6 +603,18 @@ class MainWindow(QMainWindow):
         self._visualizers_panel.set_correlation_meter_visible(settings.correlation_meter_visible)
         self._visualizers_panel.set_spectrogram_visible(settings.spectrogram_visible)
         self._visualizers_panel.set_chromagram_visible(settings.chromagram_visible)
+        # 中身が消えた列に半分の幅を残さない（空欄の隣に可視化を寄せる）。
+        self._visualization_layout.setColumnStretch(
+            0, 1 if settings.spectrum_visible or settings.level_meter_visible else 0
+        )
+        self._visualization_layout.setColumnStretch(
+            1,
+            1
+            if settings.oscilloscope_visible
+            or settings.vectorscope_visible
+            or settings.correlation_meter_visible
+            else 0,
+        )
         self._fit_player_panel_to_contents()
 
     # -- Controller からの通知（続き）---------------------------------------
