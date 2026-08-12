@@ -4,6 +4,9 @@
 1つのPanelへまとめ、同じPcmTapと同じ固定FPSタイマーを共有する。
 PCMのdecode、QAudioBuffer、キャッシュ、PlaylistModel、Backendの具体型は知らない。
 
+表示は2つの行Widget（スコープ段と時間周波数段）に分かれる。行をどこへ置くかは
+MainWindowの責務のため、:meth:`VisualizersPanel.take_rows` で受け渡す。
+
 各可視化の例外境界は独立させる。片方の失敗で他方と音声再生を止めない。
 失敗した可視化は自動では再開しないが、設定でOFF→ONし直したときは再試行する
 （一時的な失敗のあと、その曲の間ずっと表示できないままにしない）。
@@ -12,9 +15,9 @@ PCMのdecode、QAudioBuffer、キャッシュ、PlaylistModel、Backendの具体
 import logging
 from dataclasses import dataclass
 
-from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Slot
-from PySide6.QtGui import QHideEvent, QShowEvent
-from PySide6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtCore import QEvent, QObject, QRect, QSize, Qt, QTimer, Slot
+from PySide6.QtGui import QResizeEvent
+from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 
 from sdp.core.analysis.chroma import ChromaProcessor
 from sdp.core.analysis.oscilloscope import OSCILLOSCOPE_WINDOW, compute_oscilloscope
@@ -50,12 +53,79 @@ STOPPED_MESSAGE = "停止中"
 WAITING_MESSAGE = "PCMを待機中…"
 FAILED_MESSAGE = "可視化を表示できません"
 
+SCOPE_NAMES = ("oscilloscope", "vectorscope", "correlation")
+"""スコープ段（重ね置き）に属する可視化。"""
+
+MAP_NAMES = ("spectrogram", "chromagram")
+"""時間周波数段に属する可視化。"""
+
+SPECTROGRAM_WIDTH_STRETCH = 2
+CHROMAGRAM_WIDTH_STRETCH = 1
+
+_SCOPE_STACK_WIDTH_HINT = 240
+"""スコープ段の推奨幅。実際の幅は置いた側のレイアウトが決める。"""
+
 
 @dataclass(frozen=True, slots=True)
 class _VisualizationItem:
     name: str
     widget: QWidget
     no_source_message: str
+
+
+class ScopeStack(QWidget):
+    """オシロスコープの上へ、ベクトルスコープと位相相関を重ねて置く行Widget。
+
+    QLayoutでは重ね置きを表せないため、子のgeometryを直接決める。
+    右寄せの正方形領域を、上のベクトルスコープと下の位相相関で分け合う
+    （重ねるとベクトルスコープの円が相関メーターに隠れて見切れるため）。
+    ベクトルスコープの領域自体は横長になるが、点群は短辺基準の正方形へ収める
+    （:class:`VectorscopeWidget` が短辺から描画範囲を決める）。
+    """
+
+    def __init__(
+        self,
+        oscilloscope: OscilloscopeWidget,
+        vectorscope: VectorscopeWidget,
+        correlation: CorrelationMeterWidget,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("scopeStack")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._oscilloscope = oscilloscope
+        self._vectorscope = vectorscope
+        self._correlation = correlation
+        for widget in (oscilloscope, vectorscope, correlation):
+            widget.setParent(self)
+        # 重ね順は下からオシロスコープ、ベクトルスコープ、位相相関。
+        vectorscope.raise_()
+        correlation.raise_()
+        self.setMinimumHeight(max(oscilloscope.minimumHeight(), vectorscope.minimumHeight()))
+        # 高さの下限は段が決める。単体の下限（縦積み時代の値）を残すと、
+        # 正方形を位相相関と分け合うときにその分だけはみ出す。
+        vectorscope.setMinimumHeight(1)
+        self._arrange()
+
+    def sizeHint(self) -> QSize:
+        return QSize(_SCOPE_STACK_WIDTH_HINT, self.minimumHeight())
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._arrange()
+
+    def _arrange(self) -> None:
+        width = self.width()
+        height = self.height()
+        self._oscilloscope.setGeometry(0, 0, width, height)
+        # 2つ合わせて正方形に保つ。幅が足りない極端な場合は幅に合わせて縮める。
+        side = max(1, min(width, height))
+        square = QRect(width - side, (height - side) // 2, side, side)
+        meter_height = min(side - 1, self._correlation.minimumHeight())
+        self._vectorscope.setGeometry(QRect(square.left(), square.top(), side, side - meter_height))
+        self._correlation.setGeometry(
+            QRect(square.left(), square.bottom() - meter_height + 1, side, meter_height)
+        )
 
 
 class VisualizersPanel(QWidget):
@@ -100,17 +170,21 @@ class VisualizersPanel(QWidget):
         }
         self._failed: dict[str, bool] = dict.fromkeys(self._enabled, False)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        for widget in (
+        self._scopes_row = ScopeStack(
             self._oscilloscope_widget,
             self._vectorscope_widget,
             self._correlation_widget,
-            self._spectrogram_widget,
-            self._chromagram_widget,
-        ):
-            layout.addWidget(widget)
+            self,
+        )
+        self._maps_row = self._build_maps_row()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._scopes_row)
+        layout.addWidget(self._maps_row)
+        # 行の表示・非表示は timer の起動条件でもあるため、直接監視する。
+        for row in (self._scopes_row, self._maps_row):
+            row.installEventFilter(self)
 
         self._timer = QTimer(self)
         self._timer.setTimerType(Qt.TimerType.PreciseTimer)
@@ -127,7 +201,44 @@ class VisualizersPanel(QWidget):
         pcm_tap.channel_count_changed.connect(self._on_format_changed)
         self._apply_state(playback.state)
 
+    def _build_maps_row(self) -> QWidget:
+        """スペクトログラムとクロマグラムを2:1の幅で並べる段。"""
+        row = QWidget(self)
+        row.setObjectName("visualizerMapsRow")
+        row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        for widget, stretch in (
+            (self._spectrogram_widget, SPECTROGRAM_WIDTH_STRETCH),
+            (self._chromagram_widget, CHROMAGRAM_WIDTH_STRETCH),
+        ):
+            # 単体では固定高だが、同じ段に並べる以上は段の高さを満たす
+            # （QSizePolicy.Fixedのままでは低い方が上下に余白を作る）。
+            widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            layout.addWidget(widget, stretch=stretch)
+        return row
+
     # -- 公開状態 -----------------------------------------------------------
+
+    @property
+    def scopes_row(self) -> QWidget:
+        """オシロスコープ・ベクトルスコープ・位相相関を重ねた段。"""
+        return self._scopes_row
+
+    @property
+    def maps_row(self) -> QWidget:
+        """スペクトログラムとクロマグラムを並べた段。"""
+        return self._maps_row
+
+    def take_rows(self) -> tuple[QWidget, QWidget]:
+        """2つの行を配置用に渡し、Panel自身は描画をやめる。
+
+        どこへ置くかはレイアウト骨格の責務のため、MainWindowが決める。
+        Panelは行を通じて表示状態を見続け、解析の起動条件に使う。
+        """
+        self.hide()
+        return self._scopes_row, self._maps_row
 
     @property
     def oscilloscope_widget(self) -> OscilloscopeWidget:
@@ -219,30 +330,27 @@ class VisualizersPanel(QWidget):
                 signal.disconnect(slot)
             except RuntimeError:
                 _logger.debug("VisualizersPanelのSignal接続は既に解除されています")
+        for row in (self._scopes_row, self._maps_row):
+            row.removeEventFilter(self)
         if self._watched_window is not None:
             self._watched_window.removeEventFilter(self)
             self._watched_window = None
 
     # -- Qt イベント --------------------------------------------------------
 
-    def showEvent(self, event: QShowEvent) -> None:
-        super().showEvent(event)
-        if self._shutdown:
-            return
-        self._watch_top_level_window()
-        self._update_timer()
-
-    def hideEvent(self, event: QHideEvent) -> None:
-        self._timer.stop()
-        super().hideEvent(event)
-
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        if (
-            not self._shutdown
-            and watched is self._watched_window
-            and event.type() is QEvent.Type.WindowStateChange
-        ):
-            self._update_timer()
+        if not self._shutdown:
+            if watched in (self._scopes_row, self._maps_row):
+                if event.type() is QEvent.Type.Show:
+                    # 行の親（＝MainWindow）が決まるのは配置後のため、ここで監視する。
+                    self._watch_top_level_window()
+                    self._update_timer()
+                elif event.type() is QEvent.Type.Hide:
+                    self._update_timer()
+            elif watched is self._watched_window and (
+                event.type() is QEvent.Type.WindowStateChange
+            ):
+                self._update_timer()
         return super().eventFilter(watched, event)
 
     # -- Controller / PcmTap ------------------------------------------------
@@ -353,8 +461,13 @@ class VisualizersPanel(QWidget):
                 self._spectrogram_processor.reset()
             elif name == "chromagram":
                 self._chroma_processor.reset()
-        self.setVisible(any(self._enabled.values()))
+        self._update_row_visibility()
         self._update_timer()
+
+    def _update_row_visibility(self) -> None:
+        """中身が全部消えた段は畳み、レイアウトへ空欄を残さない。"""
+        self._scopes_row.setVisible(any(self._enabled[name] for name in SCOPE_NAMES))
+        self._maps_row.setVisible(any(self._enabled[name] for name in MAP_NAMES))
 
     def _placeholder_message(self, no_source_message: str) -> str:
         if self._playback.source is None:
@@ -371,20 +484,23 @@ class VisualizersPanel(QWidget):
         self._timer.stop()
 
     def _should_run(self) -> bool:
-        window = self.window()
         return (
             not self._shutdown
             and any(self._active(name) for name in self._enabled)
             and self._playback.state is PlaybackState.PLAYING
-            and self.isVisible()
-            and not window.isMinimized()
+            and (self._scopes_row.isVisible() or self._maps_row.isVisible())
+            and not self._top_level_window().isMinimized()
         )
 
     def _active(self, name: str) -> bool:
         return self._enabled[name] and not self._failed[name]
 
+    def _top_level_window(self) -> QWidget:
+        """行が属するtop-level window（Panel自身は配置後に非表示のため使わない）。"""
+        return self._scopes_row.window()
+
     def _watch_top_level_window(self) -> None:
-        window = self.window()
+        window = self._top_level_window()
         if window is self._watched_window:
             return
         if self._watched_window is not None:

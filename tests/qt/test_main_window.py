@@ -318,10 +318,13 @@ def test_all_files_filter_is_available() -> None:
 def test_source_change_updates_the_window_title(
     window: MainWindow, controller: PlaybackController, audio_file: Path
 ) -> None:
-    """source_changedでファイル名をウィンドウタイトルへ表示する。"""
+    """source_changedでファイル名をウィンドウタイトルへ表示する。
+
+    アプリ名はQtがapplicationDisplayNameとして付け足すため、ここでは重ねない。
+    """
     controller.load(audio_file)
 
-    assert window.windowTitle() == f"sdp — {audio_file.name}"
+    assert window.windowTitle() == audio_file.name
     assert window.findChild(QWidget, "fileNameLabel") is None
 
 
@@ -695,6 +698,66 @@ def test_toggling_settings_shows_and_hides_each_visualization(
     assert panel.is_level_meter_visible
 
 
+def test_visualizations_share_two_rows_instead_of_stacking(
+    window: MainWindow, qtbot: QtBot
+) -> None:
+    """可視化は縦積みせず、上段を左右半分ずつ・下段を2:1の幅で使う。"""
+    window.resize(880, 700)
+    window.show()
+    qtbot.waitExposed(window)
+    panel = window.visualizers_panel
+    spectrum = window.spectrum_panel
+    scopes = panel.scopes_row
+    maps = panel.maps_row
+    area = window.findChild(QWidget, "visualizationArea")
+    assert area is not None
+
+    # 上段: スペクトラム＋ピークとスコープ段を左右半分ずつ、同じ高さで。
+    assert spectrum.width() == pytest.approx(area.width() / 2, abs=1)
+    assert scopes.width() == pytest.approx(area.width() / 2, abs=1)
+    assert scopes.geometry().left() == spectrum.geometry().right() + 1
+    assert scopes.height() == spectrum.height()
+    # 下段: 全幅を2:1で分ける。
+    assert maps.width() == area.width()
+    assert maps.geometry().top() == scopes.geometry().bottom() + 1
+    assert panel.spectrogram_widget.width() == pytest.approx(maps.width() * 2 / 3, abs=1)
+    assert panel.chromagram_widget.width() == pytest.approx(maps.width() / 3, abs=1)
+    assert panel.chromagram_widget.height() == panel.spectrogram_widget.height()
+
+    spectrum.shutdown()
+    panel.shutdown()
+
+
+def test_vectorscope_and_correlation_sit_inside_the_oscilloscope(
+    window: MainWindow, qtbot: QtBot
+) -> None:
+    """オシロスコープ内の右寄せ正方形を、ベクトルスコープと位相相関で分け合う。
+
+    重ねるとベクトルスコープの円が相関メーターの下へ隠れて見切れる。
+    """
+    window.resize(880, 700)
+    window.show()
+    qtbot.waitExposed(window)
+    panel = window.visualizers_panel
+    scopes = panel.scopes_row
+    oscilloscope = panel.oscilloscope_widget.geometry()
+    vectorscope = panel.vectorscope_widget.geometry()
+    correlation = panel.correlation_meter_widget.geometry()
+
+    assert oscilloscope == scopes.rect()
+    assert oscilloscope.contains(vectorscope)
+    assert oscilloscope.contains(correlation)
+    # 2つ合わせて正方形。上がベクトルスコープ、下が位相相関で、重ならない。
+    assert vectorscope.right() == correlation.right() == oscilloscope.right()
+    assert vectorscope.width() == correlation.width()
+    assert correlation.top() == vectorscope.bottom() + 1
+    assert vectorscope.height() + correlation.height() == vectorscope.width()
+    assert not vectorscope.intersects(correlation)
+
+    window.spectrum_panel.shutdown()
+    panel.shutdown()
+
+
 def test_playlist_keeps_a_useful_height_and_player_panel_does_not_expand(
     window: MainWindow, qtbot: QtBot
 ) -> None:
@@ -721,7 +784,8 @@ def test_playlist_keeps_a_useful_height_and_player_panel_does_not_expand(
     assert player_panel.height() <= player_layout.sizeHint().height()
 
     packed_widgets = [
-        window.findChild(QWidget, name) for name in ("speedPanel", "waveformPanel", "spectrumPanel")
+        window.findChild(QWidget, name)
+        for name in ("speedPanel", "waveformPanel", "visualizationArea")
     ]
     controls = window.findChild(PlayerControls)
     assert controls is not None

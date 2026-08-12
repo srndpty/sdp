@@ -752,16 +752,42 @@ MainWindow の依存を増やしたり、汎用オーディオグラフやイベ
 - 失敗状態は source 変更・format 変更・停止で解除する。加えて、**設定での
   OFF→ON は明示的な再試行の要求として扱い、その可視化の失敗状態を解除する**
   （一時的な失敗をその曲の間ずっと引きずらない）。
+- 表示は**スコープ段**（オシロスコープ・ベクトルスコープ・位相相関）と
+  **時間周波数段**（スペクトログラム・クロマグラム）の 2 つの行 Widget に分かれる。
+  どこへ置くかはレイアウト骨格の責務のため、`take_rows()` で `MainWindow` へ渡す
+  （Panel 自身はそれ以降描画せず、調停だけを行う）。
+  タイマーの起動条件に使う「表示中か」は、Panel ではなく**行の表示状態**で判定する。
+- スコープ段（`ScopeStack`）は QLayout では表せない重ね置きのため、子の geometry を
+  直接決める。オシロスコープが全面、その中の**右寄せの正方形領域**を上のベクトル
+  スコープと下の位相相関（ピークと同程度の高さ）で**分け合う**。重ねると
+  ベクトルスコープの円が相関メーターの下へ隠れて見切れるため、重複させない。
+  ベクトルスコープの領域自体は横長になるが、点群は**短辺基準の正方形**へ収める
+  （横へ引き延ばさない）。
 
 ### 6.11 MainWindow と app.py
 
-`MainWindow` は PlayerControls → SpeedPanel → WaveformPanel → **SpectrumPanel
-（スペクトラム + レベルメーター）** → **VisualizersPanel
-（オシロスコープ + ベクトルスコープ + 位相相関 + スペクトログラム + クロマグラム）**
+`MainWindow` は PlayerControls → SpeedPanel → WaveformPanel → **可視化エリア**
 → PlaylistView の順に配置するだけで、FFT・Peak / RMS・Peak hold・追加可視化Processor・
 タイマー・リングバッファを持たない。
 レベルメーターは `SpectrumPanel`、追加可視化は `VisualizersPanel` の中へ入れる。
-可視化が増えた分だけ既定ウィンドウ高を広げ、プレイリスト領域を残す。
+
+**可視化エリア（`visualizationArea`）は `QGridLayout` の 2 段**とし、可視化を縦積み
+しない（縦積みでは画面を占有し、プレイリストが狭くなるため）。
+
+| 段 | 左 | 右 |
+| --- | --- | --- |
+| 上段 | `SpectrumPanel`（スペクトラム + ピーク）幅 50% | スコープ段（`ScopeStack`）幅 50% |
+| 下段 | `SpectrogramWidget` 幅 2 | `ChromagramWidget` 幅 1 |
+
+- 波形（scrub）は操作画面を兼ねるため全幅のまま `WaveformPanel` に残す。
+- 段の中身が設定で全部消えた列には幅を残さない（空欄の隣へ可視化を寄せる）。
+- 同じ段に並ぶ Widget は段の高さを満たす（単体では固定高でも、置いた側が
+  `QSizePolicy.Preferred` へ変える）。
+
+ウィンドウタイトルは**ファイル名だけ**を設定する。アプリ名は Qt が
+`applicationDisplayName` として付け足すため（`QPlatformWindow::formatWindowTitle`）、
+ここで "sdp" を入れると二重に表示される。source が無いときは空にして
+Qt にアプリ名だけを表示させる。
 `MainWindow` へ具体 Backend は渡さない（`PcmTap` は既存の `WaveformAnalysisService` と
 同じく composition 済みサービスとして受け取る）。
 

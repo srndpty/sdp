@@ -2,14 +2,14 @@
 
 import numpy as np
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QRect, Qt
 from PySide6.QtWidgets import QLabel, QSizePolicy, QWidget
 from pytestqt.qtbot import QtBot
 
 from sdp.core.analysis.chroma import compute_chroma
 from sdp.core.analysis.oscilloscope import compute_oscilloscope
 from sdp.core.analysis.spectrogram import SpectrogramProcessor
-from sdp.core.analysis.stereo import compute_vectorscope
+from sdp.core.analysis.stereo import VectorscopeFrame, compute_vectorscope
 from sdp.ui.chromagram_widget import ChromagramWidget
 from sdp.ui.correlation_meter_widget import CorrelationMeterWidget
 from sdp.ui.oscilloscope_widget import OscilloscopeWidget
@@ -87,6 +87,41 @@ def test_vectorscope_paints_points(qtbot: QtBot) -> None:
     repaint(widget, qtbot)
 
     assert widget.last_point_count > 0
+
+
+def test_vectorscope_fits_a_square_into_a_wide_widget(qtbot: QtBot) -> None:
+    """横長の領域でも、描画は短辺基準の正方形へ収める（横に引き延ばさない）。"""
+    widget = prepare(VectorscopeWidget(), qtbot, width=240, height=80)
+    # 左右の端に届く点（逆相成分が最大）を与える。
+    widget.set_frame(
+        VectorscopeFrame(
+            x=np.array([-1.0, 1.0], dtype=np.float32),
+            y=np.array([0.0, 0.0], dtype=np.float32),
+        )
+    )
+    widget.set_status_text("")
+    repaint(widget, qtbot)
+
+    painted = _painted_bounds(widget)
+    assert painted.width() <= widget.height()
+    # 正方形は領域の中央にある（左右の余白がほぼ等しい）。
+    assert painted.left() == pytest.approx(widget.width() - painted.right(), abs=2)
+
+
+def _painted_bounds(widget: QWidget) -> QRect:
+    """背景色と異なる pixel の外接矩形。"""
+    image = widget.grab().toImage()
+    background = image.pixel(0, 0)
+    painted = [
+        (x, y)
+        for x in range(image.width())
+        for y in range(image.height())
+        if image.pixel(x, y) != background
+    ]
+    assert painted
+    xs = [x for x, _ in painted]
+    ys = [y for _, y in painted]
+    return QRect(min(xs), min(ys), max(xs) - min(xs) + 1, max(ys) - min(ys) + 1)
 
 
 def test_correlation_meter_paints_value(qtbot: QtBot) -> None:
