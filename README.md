@@ -475,6 +475,47 @@ sdpを終了してからやり直すこと。ファイルの権限やセキュ�
   途中で失敗・中止された場合は元へ戻す。**更新に失敗しても、以前のsdpは起動できる。**
 - 設定・プレイリスト・UI状態・キャッシュは更新の影響を受けない。
 
+### 手元の`%ProgramFiles%\sdp`を今の作業ツリーで置き換える
+
+開発中の変更を実際のインストール済みsdpへ反映する手順。version番号が同じままでも
+同一versionの上書きインストールとして通る（`installer-smoke.ps1`の検査項目）。
+
+```powershell
+# 1. 実行中のsdpを終了する（起動中はinstallが中止される。無断で強制終了しない）
+Get-Process sdp -ErrorAction SilentlyContinue
+
+# 2. 品質ゲート（任意だが推奨）
+pwsh -File scripts/fix.ps1
+pwsh -File scripts/check.ps1
+
+# 3. 作業ツリーからinstallerを作り直す（ZIP生成・layout/契約検査・selftest・codec testを含む）
+pwsh -File scripts/build-installer.ps1
+
+# 4. 管理者へ昇格してsilent install（上書き更新）
+$setup = (Resolve-Path release\sdp-0.0.1-windows-x64-setup.exe).Path
+$install = Start-Process -FilePath $setup -Verb RunAs -Wait -PassThru `
+    -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+$install.ExitCode   # 0 なら成功
+
+# 5. 置き換わったことの確認
+(Get-Item "$env:ProgramFiles\sdp\sdp.exe").LastWriteTime
+& "$env:ProgramFiles\sdp\sdp.exe" --selftest
+```
+
+- **アンインストールしてから入れ直す必要はない。** 上書き時に古いランタイムは
+  `.upgrade-backup`へ退避され、成功したら破棄、失敗したら元へ戻る。
+  設定・プレイリスト・UI状態・波形キャッシュ（`%LOCALAPPDATA%\sdp`）は影響を受けない。
+- 終了コード`7`は**旧per-user版（`%LOCALAPPDATA%\Programs\sdp`）の検出**である。
+  「アプリと機能」から旧版を削除してからやり直す。
+- 手順4をGUIで行う場合は`release\`のsetup.exeをそのまま実行してよい（UACで昇格する）。
+- `dist\`が最新なら`scripts/build-installer.ps1 -SkipBuild`でPyInstallerのビルドを省ける。
+  ソースを変更したあとは付けないこと（古い`dist\`をそのまま包んでしまう）。
+- **Program Filesを触らずに動作だけ見たい**場合は、インストールせず
+  `dist\sdp\sdp.exe`を直接起動すれば足りる。ただし単一instanceの識別子は
+  ユーザーとWindows sessionだけで決まりexeのpathを含まないため、
+  導入済みのsdpが起動中だとそちらへ処理が渡る。先に終了しておくこと。
+  ユーザーデータ（`%LOCALAPPDATA%\sdp`）も導入版と共有する。
+
 ### installerの動作確認
 
 ```powershell

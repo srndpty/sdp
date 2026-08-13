@@ -21,6 +21,9 @@ jobs:
   # コマンド列を CI に複製せず scripts/check.ps1 を呼び出す。
   quality:
     runs-on: windows-latest
+    # 通常は3分弱で終わる。runner側でQtのdecodeがストールしてジョブが進まなくなった
+    # 実績があるため、既定の360分ではなくここで打ち切る（課金時間を溶かさない）。
+    timeout-minutes: 30
     steps:
       - name: チェックアウト
         # actions/checkout v5.0.0
@@ -53,6 +56,7 @@ jobs:
   # PyInstaller での配布物作成は 3.13 のみで行うため、ここでは実施しない。
   python-314-compatibility:
     runs-on: windows-latest
+    timeout-minutes: 20
     env:
       UV_PYTHON: "3.14"
       # Windows runner の標準出力が cp1252 でも、日本語メッセージを安全に出力する。
@@ -88,6 +92,7 @@ jobs:
   audio-codec-check:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
+    timeout-minutes: 20
     env:
       PYTHONUTF8: "1"
     steps:
@@ -126,6 +131,7 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     continue-on-error: true
+    timeout-minutes: 20
     env:
       PYTHONUTF8: "1"
     steps:
