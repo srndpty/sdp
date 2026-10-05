@@ -19,6 +19,7 @@ from sdp.core.playlist.model import (
     PATH_ROLE,
     Column,
     PlaylistModel,
+    contiguous_ranges,
 )
 from sdp.core.playlist.persistence import load_playlist, save_playlist
 
@@ -553,3 +554,51 @@ def test_bulk_operations_with_1000_entries(model: PlaylistModel, tmp_path: Path)
     assert model.removeRows(0, 500) is True
     assert model.rowCount() == 500
     assert model.row_of_entry_id(model.entry_at(499).entry_id) == 499
+
+
+# -- 重複の削除 -------------------------------------------------------------
+
+
+def test_remove_duplicate_paths_keeps_first_occurrence(
+    model: PlaylistModel, audio_files: list[Path]
+) -> None:
+    """同じパスは先頭の1件だけ残り、他の行の順序は変わらない。"""
+    first, second = audio_files[0], audio_files[1]
+    model.add_paths([first, second, first, first, second])
+
+    removed = model.remove_duplicate_paths()
+
+    assert removed == 3
+    assert [entry.path for entry in model.entries()] == [first, second]
+
+
+def test_remove_duplicate_paths_without_duplicates_is_a_no_op(
+    model: PlaylistModel, audio_files: list[Path], qtbot: QtBot
+) -> None:
+    """重複が無ければ何も削除せず、行の削除も通知しない。"""
+    del qtbot
+    model.add_paths(audio_files)
+    spy = QSignalSpy(model.rowsRemoved)
+
+    assert model.remove_duplicate_paths() == 0
+    assert model.rowCount() == len(audio_files)
+    assert spy.count() == 0
+
+
+def test_remove_duplicate_paths_keeps_the_protected_entry(
+    model: PlaylistModel, audio_files: list[Path]
+) -> None:
+    """再生中の行が後ろの重複でも、その行だけを残す。"""
+    first = audio_files[0]
+    entry_ids = model.add_paths([first, first, first])
+
+    removed = model.remove_duplicate_paths(keep_entry_id=entry_ids[2])
+
+    assert removed == 2
+    assert [entry.entry_id for entry in model.entries()] == [entry_ids[2]]
+
+
+def test_contiguous_ranges_folds_rows_into_ranges() -> None:
+    """昇順の行番号は連続範囲へ畳まれる。"""
+    assert contiguous_ranges([0, 1, 2, 5, 7, 8]) == [(0, 3), (5, 1), (7, 2)]
+    assert contiguous_ranges([]) == []

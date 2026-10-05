@@ -606,3 +606,46 @@ def test_view_does_not_import_the_metadata_reader() -> None:
     """PlaylistView は MetadataReader を知らない。"""
     for forbidden in ("MetadataReader", "mutagen", "read_track_metadata"):
         assert not hasattr(playlist_view_module, forbidden), forbidden
+
+
+# -- 重複の削除 -------------------------------------------------------------
+
+
+def test_remove_duplicates_reports_removed_count(
+    view: PlaylistView, model: PlaylistModel, audio_files: list[Path]
+) -> None:
+    """重複を消し、件数をメッセージで知らせる。確認ダイアログは出さない。"""
+    model.add_paths([audio_files[0], audio_files[1], audio_files[0]])
+    messages: list[str] = []
+    view.message_requested.connect(messages.append)
+
+    view.remove_duplicates()
+
+    assert model.rowCount() == 2
+    assert messages == ["重複する1項目を削除しました。"]
+
+
+def test_remove_duplicates_without_duplicates_reports_nothing_removed(
+    view: PlaylistView, model: PlaylistModel, audio_files: list[Path]
+) -> None:
+    """重複が無ければ削除せず、その旨だけ知らせる。"""
+    model.add_paths(audio_files)
+    messages: list[str] = []
+    view.message_requested.connect(messages.append)
+
+    view.remove_duplicates()
+
+    assert model.rowCount() == len(audio_files)
+    assert messages == ["重複する項目はありませんでした。"]
+
+
+def test_remove_duplicates_keeps_the_current_entry(
+    view: PlaylistView, model: PlaylistModel, audio_files: list[Path]
+) -> None:
+    """再生中の行が後ろの重複でも消さない。"""
+    entry_ids = model.add_paths([audio_files[0], audio_files[0]])
+    view.set_current_entry_id(entry_ids[1])
+
+    view.remove_duplicates()
+
+    assert [entry.entry_id for entry in model.entries()] == [entry_ids[1]]

@@ -482,6 +482,30 @@ class PlaylistModel(QAbstractTableModel):
         self._rebuild_index()
         self.endInsertRows()
 
+    def remove_duplicate_paths(self, *, keep_entry_id: str | None = None) -> int:
+        """同じパスの行を1件だけ残して削除し、削除した行数を返す。
+
+        重複追加そのものは許可したまま（PL-07）、ユーザーの明示操作でだけ間引く。
+        残すのは各パスの先頭行。ただし ``keep_entry_id``（再生中の行）が
+        同じパスの中にあるときはその行を残す。再生中の行が消えると
+        現在曲の追跡が切れるため。
+        """
+        keep_row_by_path: dict[Path, int] = {}
+        for row, entry in enumerate(self._entries):
+            if entry.path not in keep_row_by_path or entry.entry_id == keep_entry_id:
+                keep_row_by_path[entry.path] = row
+        doomed = [
+            row for row, entry in enumerate(self._entries) if keep_row_by_path[entry.path] != row
+        ]
+        if not doomed:
+            return 0
+        removed = 0
+        # 連続範囲へまとめ、下側から削除して行番号のずれを避ける。
+        for start, count in reversed(contiguous_ranges(doomed)):
+            if self.removeRows(start, count):
+                removed += count
+        return removed
+
     def clear(self) -> None:
         """全消去。"""
         if not self._entries:
@@ -663,3 +687,19 @@ class PlaylistModel(QAbstractTableModel):
             if entry.entry_id in seen:
                 raise ValueError(f"entry_id が重複しています: {entry.entry_id}")
             seen.add(entry.entry_id)
+
+
+def contiguous_ranges(rows: Sequence[int]) -> list[tuple[int, int]]:
+    """昇順の行番号を ``(開始行, 行数)`` の連続範囲へまとめる。
+
+    ``beginRemoveRows`` は連続範囲しか受け取れないため、非連続の削除は
+    必ずここで範囲へ畳んでから下側から適用する。
+    """
+    ranges: list[tuple[int, int]] = []
+    for row in rows:
+        if ranges and ranges[-1][0] + ranges[-1][1] == row:
+            start, count = ranges[-1]
+            ranges[-1] = (start, count + 1)
+        else:
+            ranges.append((row, 1))
+    return ranges

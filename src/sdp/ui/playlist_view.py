@@ -21,7 +21,13 @@ from PySide6.QtWidgets import (
 )
 
 from sdp.core.playlist.entry import FileStatus
-from sdp.core.playlist.model import ENTRY_ID_ROLE, FILE_STATUS_ROLE, Column, PlaylistModel
+from sdp.core.playlist.model import (
+    ENTRY_ID_ROLE,
+    FILE_STATUS_ROLE,
+    Column,
+    PlaylistModel,
+    contiguous_ranges,
+)
 
 # ファイルダイアログのフィルターはユーザー補助にすぎない。拡張子で再生可否を
 # 断定しないため（ADR-0001 の制約 3）、「すべてのファイル」も必ず選べるようにする。
@@ -213,12 +219,20 @@ class PlaylistView(QWidget):
             return
         removed = 0
         # 連続範囲へまとめ、下側から削除して行番号のずれを避ける。
-        for start, count in reversed(_contiguous_ranges(rows)):
+        for start, count in reversed(contiguous_ranges(rows)):
             if self._model.removeRows(start, count):
                 removed += count
         if removed:
             self._select_row_after_removal(rows[0])
             self.message_requested.emit(f"{removed}項目を削除しました。")
+
+    def remove_duplicates(self) -> None:
+        """同じパスの行を1件だけ残して削除する。確認は求めない。"""
+        removed = self._model.remove_duplicate_paths(keep_entry_id=self._delegate.current_entry_id)
+        if removed:
+            self.message_requested.emit(f"重複する{removed}項目を削除しました。")
+        else:
+            self.message_requested.emit("重複する項目はありませんでした。")
 
     def clear_playlist(self) -> None:
         """確認のうえ全消去する。ディスク上のファイルは削除しない。"""
@@ -245,15 +259,3 @@ class PlaylistView(QWidget):
             return
         row = min(first_removed_row, count - 1)
         self._table.selectRow(row)
-
-
-def _contiguous_ranges(rows: list[int]) -> list[tuple[int, int]]:
-    """昇順の行番号を ``(開始行, 行数)`` の連続範囲へまとめる。"""
-    ranges: list[tuple[int, int]] = []
-    for row in rows:
-        if ranges and ranges[-1][0] + ranges[-1][1] == row:
-            start, count = ranges[-1]
-            ranges[-1] = (start, count + 1)
-        else:
-            ranges.append((row, 1))
-    return ranges
