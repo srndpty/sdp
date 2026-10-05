@@ -38,6 +38,7 @@ from sdp.services.settings import AppSettings, AppSettingsController
 from sdp.services.ui_state import ScreenRect, SplitterState, UiState, WindowState
 from sdp.services.waveform_analysis import WaveformAnalysisService
 from sdp.ui import main_window as main_window_module
+from sdp.ui import playlist_view as playlist_view_module
 from sdp.ui.legal_dialog import LegalDocumentDialog
 from sdp.ui.main_window import MainWindow
 from sdp.ui.player_controls import PlayerControls
@@ -110,6 +111,12 @@ def stub_open_dialog(selected: str) -> Callable[..., tuple[str, str]]:
         return (selected, "")
 
     return _dialog
+
+
+def stub_confirm_yes(*args: object, **kwargs: object) -> object:
+    """`QMessageBox.question` の差し替え。常に「はい」を返す。"""
+    del args, kwargs
+    return playlist_view_module.QMessageBox.StandardButton.Yes
 
 
 def action_of(window: MainWindow, name: str) -> QAction:
@@ -1209,3 +1216,29 @@ def test_main_window_does_not_know_the_ui_state_file() -> None:
         "default_ui_state_path",
     ):
         assert not hasattr(main_window_module, forbidden), forbidden
+
+
+def test_playlist_menu_removes_duplicates(
+    window: MainWindow, playlist_model: PlaylistModel, audio_file: Path
+) -> None:
+    """メニューの「重複を削除」が PlaylistView へ委譲される。"""
+    playlist_model.add_paths([audio_file, audio_file, audio_file])
+
+    action_of(window, "removeDuplicatesAction").trigger()
+
+    assert playlist_model.rowCount() == 1
+
+
+def test_playlist_menu_clears_the_playlist(
+    window: MainWindow,
+    playlist_model: PlaylistModel,
+    audio_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """メニューの「全消去」が確認のうえ PlaylistView へ委譲される。"""
+    playlist_model.add_paths([audio_file])
+    monkeypatch.setattr(playlist_view_module.QMessageBox, "question", stub_confirm_yes)
+
+    action_of(window, "clearPlaylistAction").trigger()
+
+    assert playlist_model.rowCount() == 0

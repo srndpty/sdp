@@ -249,6 +249,19 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
+        playlist_menu = self.menuBar().addMenu("プレイリスト(&P)")
+        for label, object_name, callback in (
+            ("重複を削除(&D)", "removeDuplicatesAction", self._playlist_view.remove_duplicates),
+            ("選択項目を削除(&R)", "removeSelectedAction", self._playlist_view.remove_selected),
+            ("全消去...(&C)", "clearPlaylistAction", self._playlist_view.clear_playlist),
+        ):
+            # Delete キーは PlaylistTableView 側で扱う。QAction へ shortcut を
+            # 付けるとウィンドウ全体で Delete を奪ってしまうため付けない。
+            action = QAction(label, self)
+            action.setObjectName(object_name)
+            action.triggered.connect(callback)
+            playlist_menu.addAction(action)
+
         tools_menu = self.menuBar().addMenu("ツール(&T)")
         settings_action = QAction("設定...(&S)", self)
         settings_action.setObjectName("openSettingsAction")

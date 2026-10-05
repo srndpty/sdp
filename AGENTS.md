@@ -24,6 +24,18 @@ sdp リポジトリで作業するエージェント・開発者向けの規約�
 - 完了前に format、lint、型検査、テストを実行する
   （`pwsh -File scripts/fix.ps1` のあと `pwsh -File scripts/check.ps1`）。
 
+## 開発コマンドの入口
+
+- ローカル更新: `./dev.ps1 install`（sdp を終了してから実行。UAC 昇格あり）。
+- Build: `./dev.ps1 build`
+- Run GUI: `./dev.ps1 gui`（通常起動の `run` も同じ入口）
+- Test: `./dev.ps1 test`（既存の `uv run pytest` と同じ。実音テストを含む）
+- Lint / 型検査: `./dev.ps1 lint`
+- 自動修正: `./dev.ps1 fix`
+- Full validation: `./dev.ps1 check`（`scripts/check.ps1` をそのまま呼ぶ）
+- 完了前は `./dev.ps1 fix` のあと `./dev.ps1 check` を実行する。
+- 詳細は `./dev.ps1 help` と README の開発コマンドを参照する。
+
 ## DRY と抽象化
 
 - 同じ知識や業務規則を複数箇所に持たせない。

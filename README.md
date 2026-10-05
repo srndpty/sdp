@@ -561,6 +561,39 @@ uv run python tools/gen_app_icon.py
 
 ## 開発コマンド
 
+推奨入口はリポジトリルートの `dev.ps1`（PowerShell 7 と uv が必要）。
+既存スクリプト・ツールを呼び出すだけで、下記の詳細手順も引き続き利用できる。
+
+| コマンド | 内部で呼ぶ正式手順 |
+|---|---|
+| `.\dev.ps1 build` | `pwsh -File scripts/build-package.ps1`（Windows onedir 配布物） |
+| `.\dev.ps1 run` / `.\dev.ps1 gui` | `uv run python -m sdp` |
+| `.\dev.ps1 test` | `uv run pytest`（既存どおり実音テストも含む） |
+| `.\dev.ps1 lint` | `uv run ruff format --check .` → `uv run ruff check .` → `uv run pyright` |
+| `.\dev.ps1 check` | `pwsh -File scripts/check.ps1`（CI と共通、検査内容は変更しない） |
+| `.\dev.ps1 fix` | `pwsh -File scripts/fix.ps1` |
+| `.\dev.ps1 install` | `scripts/install-local.ps1`（installer ビルド → UAC 昇格 → 上書き導入 → selftest） |
+| `.\dev.ps1 help` | 利用可能コマンドの説明（省略時も表示） |
+
+```powershell
+.\dev.ps1 fix
+.\dev.ps1 check
+.\dev.ps1 test -m 'not audio'
+.\dev.ps1 run '.\assets\test_audio\sine440.wav'
+.\dev.ps1 gui --selftest
+```
+
+`run` / `gui` / `test` / `install` は後続引数をそのまま渡す。他のコマンドは追加引数を受け付けない。
+各処理の失敗は非ゼロ終了コードで伝播する。
+別フォルダーから絶対パスで呼んでも動作し、音源の相対パスは呼び出し元基準となる。
+PowerShell では `.\dev <command>`、cmd.exe では `dev <command>` として
+薄い `dev.cmd` wrapper も使える。PATH や shell profile の変更は不要。
+
+`clean` は正式な削除手順がないため未提供。
+`install` は管理者昇格を伴うローカル更新をまとめて実行する。詳細は上記の
+「手元の `%ProgramFiles%\sdp` を今の作業ツリーで置き換える」手順を参照する。
+ZIP／installer 生成と個別 smoke の既存手順もそのまま利用する。
+
 自動修正（Ruff の lint 自動修正 + フォーマット）:
 
 ```powershell
@@ -574,6 +607,21 @@ pwsh -File scripts/fix.ps1
 pwsh -File scripts/check.ps1
 ```
 
+### ローカルインストールの短い入口
+
+```powershell
+.\dev.ps1 install
+.\dev.ps1 install -SkipBuild
+.\dev.ps1 install -InnoSetupCompiler 'C:\Tools\Inno Setup 6\ISCC.exe'
+```
+
+実行前に sdp を終了する。起動中なら停止し、強制終了はしない。
+既存の installer ビルドと検証を実行し、成功した場合だけ UAC 昇格して
+silent install する。導入後は登録済みの導入先で selftest を実行する。
+UAC キャンセルや各段階の失敗は非ゼロ終了となる。
+`fix` / `check` は自動実行しないため、必要なら先に `dev check` を実行する。
+`-SkipBuild` は dist が最新の場合だけ使う。installer 作成時の検証は省略しない。
+ユーザーデータは既存 installer の仕様どおり保持する。
 ### pre-commit
 
 commit 時に高速な検査（空白除去、末尾改行、YAML/TOML 検証、Ruff）を実行する。
